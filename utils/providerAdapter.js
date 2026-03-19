@@ -160,7 +160,7 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
         body = {
             model: model,
             messages: normalizedMessages,
-            temperature: 0.7,
+            temperature: 0.3,
             max_tokens: 4096,
             stream: !!streaming
         };

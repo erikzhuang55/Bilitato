@@ -2383,3 +2383,122 @@ input[type="range"]:active::-webkit-slider-thumb {
     transition: background 0.2s;
 }
 .guide-btn-primary:hover { background: #e7688f; }
+
+/* 总结页专属布局 */
+#page-summary .page-body {
+    overflow: hidden;
+    gap: 0;
+    min-height: 0;
+    position: relative;
+}
+
+/* 总结区：高度由 JS 动态设置 summaryRatio */
+.summary-card-fixed {
+    flex-shrink: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    /* height 由 JS 内联样式控制 */
+}
+
+.summary-result-text {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    line-height: 1.6;
+    color: #2f3542;
+    font-size: 14px;
+}
+
+/* 拖拽分隔条 */
+.summary-resize-divider {
+    flex-shrink: 0;
+    height: 8px;
+    margin: 0 -12px;
+    cursor: row-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    user-select: none;
+    position: relative;
+    z-index: 2;
+}
+.summary-resize-divider::after {
+    content: "";
+    display: block;
+    width: 32px;
+    height: 3px;
+    border-radius: 999px;
+    background: #dce0e6;
+    transition: background 0.15s, width 0.15s;
+}
+.summary-resize-divider:hover::after,
+.summary-resize-divider.dragging::after {
+    background: #fb7299;
+    width: 48px;
+}
+
+/* 分段区 */
+.summary-card-segments {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* 分段标题行 */
+.segments-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0 4px 0;
+    flex-shrink: 0;
+}
+.segments-section-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: #222;
+}
+
+/* 展开/收起按钮 */
+.segments-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    border: 0;
+    background: transparent;
+    color: #9499a0;
+    font-size: 11px;
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 4px;
+    transition: color 0.15s, background 0.15s;
+    user-select: none;
+}
+.segments-toggle-btn:hover {
+    color: #fb7299;
+    background: rgba(251, 114, 153, 0.07);
+}
+.segments-toggle-btn .toggle-chevron {
+    transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.segments-toggle-btn.is-expanded .toggle-chevron {
+    transform: rotate(180deg);
+}
+
+/* 分段内容：正常模式下在区域内滚动 */
+.segments-body {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+/* 展开完整模式：分段完整显示，不裁剪 */
+#page-summary.is-segments-expanded .summary-card-segments {
+    overflow: visible;
+}
+#page-summary.is-segments-expanded .segments-body {
+    overflow: visible;
+}

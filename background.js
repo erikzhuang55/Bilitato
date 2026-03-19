@@ -142,7 +142,7 @@ const DEFAULT_PROMPT_SETTINGS = {
 
 const DEFAULT_SETTINGS = {
     provider: "modelscope",
-    model: "",
+    model: "MiniMax/MiniMax-M2.5",
     apiKey: "",
     customBaseUrl: "",
     customProtocol: "openai",

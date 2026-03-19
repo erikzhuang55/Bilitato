@@ -157,6 +157,7 @@ const appState = {
     segmentsMarkerTickAt: 0,
     sessionGeneratedTasks: new Set(),
     summaryExpanded: false,
+    summaryRatio: 0.6,
     isCollapsed: false,
     segmentsCollapsed: false,
     playInfo: null,
@@ -431,6 +432,11 @@ async function waitPanelMount() {
         const styleLink = document.createElement("link");
         styleLink.rel = "stylesheet";
         styleLink.href = chrome.runtime.getURL("content.css");
+        const revealHost = () => {
+            rootHost.style.opacity = "1";
+        };
+        styleLink.addEventListener("load", revealHost, { once: true });
+        styleLink.addEventListener("error", revealHost, { once: true });
         panelShadowRoot.appendChild(styleLink);
         
         // 创建面板容器
@@ -523,7 +529,9 @@ async function waitPanelMount() {
     
     // Initial height sync
     setTimeout(syncPluginHeight, 500);
-    setTimeout(() => { rootHost.style.opacity = "1"; }, 50);
+    setTimeout(() => {
+        if (rootHost.style.opacity !== "1") rootHost.style.opacity = "1";
+    }, 800);
 }
 
 function initResizeObserver() {
@@ -569,14 +577,17 @@ function syncPluginHeight() {
         totalHeight = 600; // Reasonable default
     }
 
-    if (appState.activePage === "summary" && appState.summaryExpanded) {
-        // Expanded mode: allow auto height to show full content
-        box.style.height = "auto";
-        box.style.maxHeight = "none";
-    } else {
-        // Standard mode: strict sync with video player height
-        box.style.height = `${totalHeight}px`;
-        box.style.maxHeight = `${totalHeight}px`;
+    box.style.height = `${totalHeight}px`;
+    box.style.maxHeight = `${totalHeight}px`;
+    if (appState.activePage === "summary") {
+        const summaryPanel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
+        if (summaryPanel) {
+            if (appState.segmentsCollapsed) {
+                requestAnimationFrame(() => applyExpandedSummaryHeight(summaryPanel));
+            } else {
+                requestAnimationFrame(() => applySummaryRatio(summaryPanel));
+            }
+        }
     }
 }
 
@@ -940,6 +951,15 @@ function bindPanelDelegatedEvents() {
                 panel.dataset.lastSignature = ""; // Invalidate signature
                 renderSummary(panel);
             }
+            requestAnimationFrame(() => {
+                syncPluginHeight();
+                if (!appState.segmentsCollapsed) {
+                    const summaryPanel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
+                    if (summaryPanel) {
+                        requestAnimationFrame(() => applySummaryRatio(summaryPanel));
+                    }
+                }
+            });
             return;
         }
         if (action === "settings-save") {
@@ -1231,6 +1251,8 @@ async function takePanelScreenshot() {
 function renderSummary(panel) {
     const apiKey = String(appState.settings?.apiKey || "").trim();
     if (!apiKey) {
+        panel.classList.remove("is-segments-expanded");
+        panel.dataset.lastSignature = "";
         panel.innerHTML = `
             <div class="no-apikey-notice">
                 <div class="no-apikey-icon">🔑</div>
@@ -1267,6 +1289,7 @@ function renderSummary(panel) {
     `;
 
     if (!isLoading && (!hasContent || appState.isTranscribing)) {
+        panel.classList.remove("is-segments-expanded");
         const hasSubtitle = Array.isArray(appState.cache?.rawSubtitle) && appState.cache.rawSubtitle.length > 0;
         let btnDisabled = (!hasSubtitle && !appState.isTranscribing) ? "disabled" : "";
         let tipText = hasSubtitle ? "去除噪音，抓住重点。" : "当前视频未检测到字幕，无法总结";
@@ -1297,21 +1320,42 @@ function renderSummary(panel) {
     const summaryBody = isLoading
         ? summarySkeleton
         : (summary ? `<div class="result-text summary-result-text">${renderRichContent(summary)}</div>` : `<div class="empty-text">尚未生成总结</div>`);
-
-    const segmentRows = isLoading
-        ? segmentsSkeleton
-        : (segments.length ? (appState.segmentsCollapsed ? "" : `<div class="segment-list">${segments.map((item) => `<button class="segment-card ${item.type === "ad" ? "ad" : ""}" data-action="segment-jump" data-start="${item.start}"><span class="seg-time">${formatTime(item.start)}-${formatTime(item.end)}</span><span class="seg-label">${escapeHtml(item.label)}</span>${item.type === "ad" ? '<span class="ad-tag">广告片段</span>' : ""}</button>`).join("")}</div>`) : `<div class="empty-text">尚未生成分段</div>`);
     
     const copyIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/copy2.png`);
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
     const actionButton = `<button class="panel-icon-btn" data-action="run-summary" title="重新生成"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>`;
     const copyBtn = summary ? `<button class="panel-icon-btn" data-action="summary-copy" title="复制"><img src="${copyIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(1);"></button>` : "";
-    
-    const isSegmentsCollapsed = appState.segmentsCollapsed;
-    const expandIcon = isSegmentsCollapsed 
-        ? `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;"><polyline points="6 9 12 15 18 9"></polyline></svg>`
-        : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;"><polyline points="18 15 12 9 6 15"></polyline></svg>`;
-    const expandBtn = segments.length ? `<button class="panel-icon-btn" data-action="summary-expand" title="${isSegmentsCollapsed ? '展开' : '折叠'}">${expandIcon}</button>` : "";
+
+    const isExpanded = !!appState.segmentsCollapsed;
+    panel.classList.toggle("is-segments-expanded", isExpanded);
+
+    const chevron = `<svg class="toggle-chevron" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+        style="width:12px;height:12px;">
+        <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>`;
+
+    const hasSegments = segments.length > 0 || isLoading;
+    const toggleBtn = hasSegments ? `
+        <button class="segments-toggle-btn ${isExpanded ? "is-expanded" : ""}"
+                data-action="summary-expand"
+                title="${isExpanded ? "收起" : "展开完整分段"}">
+            ${isExpanded ? "收起" : "展开"} ${chevron}
+        </button>
+    ` : "";
+
+    const segmentListHtml = isLoading
+        ? segmentsSkeleton
+        : (segments.length
+            ? `<div class="segment-list">${segments.map((item) => `
+                <button class="segment-card ${item.type === "ad" ? "ad" : ""}"
+                        data-action="segment-jump" data-start="${item.start}">
+                    <span class="seg-time">${formatTime(item.start)}-${formatTime(item.end)}</span>
+                    <span class="seg-label">${escapeHtml(item.label)}</span>
+                    ${item.type === "ad" ? '<span class="ad-tag">广告片段</span>' : ""}
+                </button>`).join("")}
+              </div>`
+            : `<div class="empty-text">尚未生成分段</div>`);
 
     panel.innerHTML = `
         <div class="page-header">
@@ -1325,21 +1369,131 @@ function renderSummary(panel) {
             <div class="summary-card-fixed">
                 ${summaryBody}
             </div>
+            <div class="summary-resize-divider" id="summary-resize-divider"></div>
             <div class="summary-card-segments">
-                <div style="font-size:13px;font-weight:600;margin:8px 0 4px 0;color:#2f3542;display:flex;justify-content:space-between;align-items:center;">
-                    <span>视频分段</span>
-                    ${expandBtn}
+                <div class="segments-section-header">
+                    <span class="segments-section-title">视频分段</span>
+                    ${toggleBtn}
                 </div>
-                ${segmentRows}
+                <div class="segments-body">
+                    ${segmentListHtml}
+                </div>
             </div>
         </div>
         ${renderMetricsBox()}
     `;
+    const summaryCard = panel.querySelector(".summary-card-fixed");
+    if (isExpanded && summaryCard) {
+        summaryCard.style.height = "auto";
+        requestAnimationFrame(() => applyExpandedSummaryHeight(panel));
+    } else {
+        if (summaryCard) {
+            // Recover from expanded mode first to avoid summary area occupying the whole page.
+            summaryCard.style.height = "";
+        }
+        applySummaryRatio(panel);
+    }
+    bindSummaryResizeDivider(panel);
+}
+
+function applyExpandedSummaryHeight(panel) {
+    if (!appState.segmentsCollapsed) return;
+    const box = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
+    const segmentsBody = panel.querySelector(".segments-body");
+    if (!box || !segmentsBody) return;
+
+    const adjust = () => {
+        const baseHeight = box.getBoundingClientRect().height;
+        const overflow = Math.max(0, segmentsBody.scrollHeight - segmentsBody.clientHeight);
+        const targetHeight = Math.round(baseHeight + overflow);
+        if (overflow <= 0) return false;
+        box.style.height = `${targetHeight}px`;
+        box.style.maxHeight = `${targetHeight}px`;
+        return true;
+    };
+
+    if (adjust()) {
+        requestAnimationFrame(() => {
+            adjust();
+        });
+    }
+}
+
+function applySummaryRatio(panel) {
+    if (appState.segmentsCollapsed) return;
+    const pageBody = panel.querySelector(".page-body");
+    const summaryCard = panel.querySelector(".summary-card-fixed");
+    if (!pageBody || !summaryCard) return;
+    const ratio = Math.max(0.15, Math.min(0.85, Number(appState.summaryRatio) || 0.6));
+
+    const tryApply = () => {
+        const bodyHeight = pageBody.getBoundingClientRect().height;
+        if (bodyHeight < 100) return false;
+        const dividerH = 8;
+        const availableH = Math.max(0, bodyHeight - dividerH);
+        summaryCard.style.height = `${Math.round(availableH * ratio)}px`;
+        return true;
+    };
+
+    if (!tryApply()) {
+        // Fallback height to prevent segments pane from disappearing while waiting for layout.
+        const panelHeight = panel.getBoundingClientRect().height;
+        if (panelHeight >= 160) {
+            const fallbackAvailable = Math.max(120, panelHeight - 64);
+            summaryCard.style.height = `${Math.round(fallbackAvailable * ratio)}px`;
+        }
+        requestAnimationFrame(() => {
+            if (tryApply()) return;
+            requestAnimationFrame(() => {
+                tryApply();
+            });
+        });
+    }
+}
+
+function bindSummaryResizeDivider(panel) {
+    const divider = panel.querySelector("#summary-resize-divider");
+    const pageBody = panel.querySelector(".page-body");
+    const summaryCard = panel.querySelector(".summary-card-fixed");
+    if (!divider || !pageBody || !summaryCard) return;
+
+    let startY = 0;
+    let startHeight = 0;
+
+    const onMouseMove = (e) => {
+        if (appState.segmentsCollapsed) return;
+        const bodyRect = pageBody.getBoundingClientRect();
+        const dividerH = 8;
+        const availableH = bodyRect.height - dividerH;
+        const delta = e.clientY - startY;
+        const newSummaryH = Math.max(60, Math.min(availableH - 60, startHeight + delta));
+        const newRatio = newSummaryH / availableH;
+        appState.summaryRatio = Math.max(0.15, Math.min(0.85, newRatio));
+        summaryCard.style.height = `${newSummaryH}px`;
+    };
+
+    const onMouseUp = () => {
+        divider.classList.remove("dragging");
+        document.removeEventListener("mousemove", onMouseMove);
+        document.removeEventListener("mouseup", onMouseUp);
+    };
+
+    divider.addEventListener("mousedown", (e) => {
+        if (appState.segmentsCollapsed) return;
+        e.preventDefault();
+        startY = e.clientY;
+        startHeight = summaryCard.getBoundingClientRect().height;
+        divider.classList.add("dragging");
+        document.addEventListener("mousemove", onMouseMove);
+        document.addEventListener("mouseup", onMouseUp);
+    });
 }
 
 function renderCC(panel, rowsOverride) {
     const rows = Array.isArray(rowsOverride) ? rowsOverride : (Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle : []);
     const currentBvid = normalizeBvidCase(appState.tabState?.activeBvid || getBvidFromUrl(location.href) || "");
+    const cacheBvid = normalizeBvidCase(appState.cache?.bvid || "");
+    const cacheReadyForCurrent = !!currentBvid && cacheBvid === currentBvid;
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
     const progress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? appState.transcriptionProgress ?? 0)));
     const isGroqSubtitle = subtitleSource === "groq" || subtitleSource === "whisper";
@@ -1373,15 +1527,18 @@ function renderCC(panel, rowsOverride) {
             </section>
         `;
     } else {
-        const capsuleDisabled = appState.transcriptionRunning ? "disabled" : "";
-        const statusText = (appState.transcriptionRunning && appState.transcribeStatusText) 
-            ? escapeHtml(appState.transcribeStatusText) 
-            : "未检测到字幕，可开启在线转录";
+        const isDetectingSubtitle = !appState.transcriptionRunning && (!appState.cache || !cacheReadyForCurrent);
+        const capsuleDisabled = (appState.transcriptionRunning || isDetectingSubtitle) ? "disabled" : "";
+        const statusText = isDetectingSubtitle
+            ? "正在读取字幕，请稍候..."
+            : ((appState.transcriptionRunning && appState.transcribeStatusText)
+                ? escapeHtml(appState.transcribeStatusText)
+                : "未检测到字幕，可开启在线转录");
             
         const capsuleHtml = `<div class="subtitle-empty-container">
             <div class="action-container">
                 <p class="action-tip">${statusText}</p>
-                <button id="start-groq-transcribe" class="action-btn" data-action="transcription-start" ${capsuleDisabled}>${appState.transcriptionRunning ? "转录中..." : "开始在线转录"}</button>
+                <button id="start-groq-transcribe" class="action-btn" data-action="transcription-start" ${capsuleDisabled}>${appState.transcriptionRunning ? "转录中..." : (isDetectingSubtitle ? "检测中..." : "开始在线转录")}</button>
             </div>
         </div>`;
         panel.innerHTML = `
@@ -1497,6 +1654,7 @@ function applyCCSearchFilter(panel, rawTerm) {
 function renderChat(panel) {
     const apiKey = String(appState.settings?.apiKey || "").trim();
     if (!apiKey) {
+        panel.dataset.lastSignature = "";
         panel.innerHTML = `
             <div class="no-apikey-notice">
                 <div class="no-apikey-icon">🔑</div>
@@ -1653,6 +1811,7 @@ function renderChat(panel) {
 function renderReal(panel) {
     const apiKey = String(appState.settings?.apiKey || "").trim();
     if (!apiKey) {
+        panel.dataset.lastSignature = "";
         panel.innerHTML = `
             <div class="no-apikey-notice">
                 <div class="no-apikey-icon">🔑</div>
@@ -2206,13 +2365,16 @@ function renderSettings(panel) {
 
     const inputs = panel.querySelectorAll("input, textarea");
     inputs.forEach(input => {
+        if (input.type === "range") return;
         if (input.id === "settings-api-key") {
-             input.addEventListener("input", () => {
-                 if (validateApiKey()) debouncedSave();
-             });
-        } else {
-             input.addEventListener("input", debouncedSave);
+            input.addEventListener("input", () => {
+                validateApiKey();
+            });
         }
+        input.addEventListener("blur", () => {
+            if (input.id === "settings-api-key" && !validateApiKey()) return;
+            triggerAutoSave();
+        });
     });
 
     ["summary", "segments", "rumors"].forEach(key => {
@@ -2229,7 +2391,6 @@ function renderSettings(panel) {
         updateCount();
         textarea.addEventListener("input", () => {
             updateCount();
-            debouncedSave();
         });
     });
 
@@ -2342,7 +2503,7 @@ function renderAssistantBubble(text, metrics) {
         safeText = `<div class="rich-text-block">${escapeHtml(text || "")}</div>`;
     }
 
-    const metricsText = formatMetricText(metrics);
+    const metricsText = shouldHideRuntimeMetrics() ? "" : formatMetricText(metrics);
     const metricsLine = metricsText ? `<div class="chat-item-meta">${escapeHtml(metricsText)}</div>` : "";
     return `<div class="chat-item assistant">${safeText}</div><button class="chat-copy-mini-btn" data-action="chat-copy" data-text="${escapeHtml(text || "")}">复制</button>${metricsLine}`;
 }
@@ -2361,10 +2522,27 @@ function formatMetricText(metrics) {
 function renderTopRemaining() {
     const holder = panelShadowRoot ? panelShadowRoot.getElementById("logo-remaining") : null;
     if (!holder) return;
+    if (shouldHideRuntimeMetrics()) {
+        holder.textContent = "任务运行中...";
+        holder.title = "任务运行中...";
+        return;
+    }
     const metrics = Array.isArray(appState.cache?.metrics) ? appState.cache.metrics : [];
     const latest = metrics[metrics.length - 1];
-    const remaining = latest?.modelScopeRemaining === null || latest?.modelScopeRemaining === undefined || latest?.modelScopeRemaining === "" ? "-" : String(latest.modelScopeRemaining);
-    holder.textContent = `剩余调用次数：${remaining}`;
+    if (!latest) {
+        holder.textContent = "暂无调用指标";
+        holder.title = "暂无调用指标";
+        return;
+    }
+    const remaining = latest.modelScopeRemaining === null || latest.modelScopeRemaining === undefined || latest.modelScopeRemaining === "" ? "-" : String(latest.modelScopeRemaining);
+    const total = Number(latest.tokens || 0);
+    const input = Number(latest.inputTokens || 0);
+    const output = Number(latest.outputTokens || 0);
+    const tokenStr = input || output ? `${total} (In ${input} / Out ${output})` : `${total}`;
+    const latency = Number.isFinite(Number(latest.latencyMs)) ? `${(Number(latest.latencyMs) / 1000).toFixed(3)}s` : "-";
+    const metricLine = `用时: ${latency} · Tokens: ${tokenStr} · 剩余次数 ${remaining}`;
+    holder.textContent = metricLine;
+    holder.title = metricLine;
 }
 
 function renderSkeletonLines(lineCount, extraClass) {
@@ -3381,16 +3559,17 @@ function ensureSegmentsVideoEvents() {
     video.dataset.segmentsBound = "1";
 }
 
+function shouldHideRuntimeMetrics() {
+    const taskStatus = appState.tabState?.taskStatus || {};
+    const summaryRunning = taskStatus.summary === "processing";
+    const segmentsRunning = taskStatus.segments === "processing";
+    const rumorsRunning = taskStatus.rumors === "processing";
+    const chatRunning = taskStatus.chat === "processing" || !!String(appState.chatStreamingId || "").trim();
+    return summaryRunning || segmentsRunning || rumorsRunning || chatRunning;
+}
+
 function renderMetricsBox() {
-    const metrics = Array.isArray(appState.cache?.metrics) ? appState.cache.metrics : [];
-    const latest = metrics[metrics.length - 1];
-    if (!latest) return "";
-    const extra = latest.modelScopeRemaining ? ` · 剩余次数 ${latest.modelScopeRemaining}` : "";
-    const total = latest.tokens || 0;
-    const input = latest.inputTokens || 0;
-    const output = latest.outputTokens || 0;
-    const tokenStr = input || output ? `${total} (In ${input} / Out ${output})` : `${total}`;
-    return `<section class="panel-section metrics"><div class="metric-line">用时: ${latest.latencyMs/1000 || 0}s · Tokens: ${tokenStr}${escapeHtml(extra)}</div></section>`;
+    return "";
 }
 
 function getTabStateKey() {
@@ -3850,9 +4029,11 @@ function syncPanelHeightMode() {
     root.classList.toggle("summary-flex-mode", isSummaryPage);
     root.classList.toggle("fixed-lock-mode", !isSummaryPage);
     
-    // Defer to syncPluginHeight for actual height setting
-    // But we might need to trigger it here if page changed
     syncPluginHeight();
+    if (isSummaryPage) {
+        const panel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
+        if (panel) requestAnimationFrame(() => applySummaryRatio(panel));
+    }
 }
 
 function getLockedMainHeight() {

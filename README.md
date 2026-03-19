@@ -1,5 +1,19 @@
 # Bilitato 快速入门
-Bilitato是一款利用AI大模型帮助你高效观看Bilibili视频的免费开源浏览器插件。支持一键下载音视频、自动解析字幕、无字幕视频转录、总结内容、划分章节、广告识别，还可以直接向AI提问视频内容。支持自定义API、模型和Prompt。
+Bilitato是一款利用AI大模型帮助你高效观看Bilibili视频的免费开源浏览器插件。支持一键下载音视频、自动解析字幕、无字幕视频转录、总结内容、划分章节、广告识别，内容验真，还可以直接向AI提问视频内容。支持自定义API、模型和Prompt。
+
+## 插件介绍
+
+<img width="1280" height="800" alt="Summary" src="https://github.com/user-attachments/assets/b040067f-2004-448b-ac45-a8afb5061550" />
+
+<img width="1280" height="800" alt="Ad" src="https://github.com/user-attachments/assets/3ff49975-add8-450d-ad3e-50dec25a7503" />
+
+<img width="1280" height="800" alt="Chat " src="https://github.com/user-attachments/assets/7aa8505e-1482-4e72-88c7-7838ca29d95d" />
+
+<img width="1280" height="800" alt="Real" src="https://github.com/user-attachments/assets/0e4dbf72-ce50-4af4-9b8e-282250747663" />
+
+<img width="1280" height="800" alt="Download" src="https://github.com/user-attachments/assets/e342ca70-e1f8-469c-833f-01ab8758526a" />
+
+用Figma顺手做的，如果觉得不好看请见谅..
 
 ## 支持的浏览器
 Bilitato是一个基于Chromium内核开发的浏览器插件，理论上适配所有Chromium内核主流浏览器（例如Chrome、Edge、Opera、夸克、QQ浏览器等），不支持Safari。如果你不确定自己的浏览器是否是Chromium内核，你也可以下载试试能否正常安装，很大概率是可以的。

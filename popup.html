@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>设置</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background:#f7f9fc; color:#222; }
+    .wrap { padding: 12px; display:flex; flex-direction:column; gap:10px; }
+    .card { background:#fff; border:1px solid #e6ebf2; border-radius:10px; padding:10px; display:flex; flex-direction:column; gap:8px; }
+    .row { display:flex; flex-direction:column; gap:4px; }
+    label { font-size:12px; color:#5b6474; }
+    input, select, textarea { border:1px solid #dfe5ed; border-radius:8px; padding:7px 8px; font-size:12px; }
+    textarea { min-height:72px; resize:vertical; }
+    button { border:0; border-radius:8px; height:30px; background:#ff6699; color:#fff; font-size:12px; cursor:pointer; }
+    .muted { font-size:12px; color:#80899a; }
+    .reg { font-size:12px; color:#ff6699; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="row">
+        <label for="provider">Provider</label>
+        <select id="provider"></select>
+      </div>
+      <a id="reg-link" class="reg" href="#" target="_blank" rel="noreferrer">注册/获取 Key</a>
+      <div class="row">
+        <label for="apiKey">API Key</label>
+        <input id="apiKey" type="password" placeholder="请输入 API Key">
+      </div>
+      <div class="row">
+        <label for="model">模型（可覆盖默认）</label>
+        <input id="model" type="text" placeholder="留空使用默认模型">
+      </div>
+      <div class="row">
+        <label for="customBaseUrl">Base URL（可覆盖默认）</label>
+        <input id="customBaseUrl" type="text" placeholder="留空使用默认地址">
+      </div>
+      <div class="row">
+        <label for="prefMode">调用模式</label>
+        <select id="prefMode">
+          <option value="quality">quality</option>
+          <option value="efficiency">efficiency</option>
+        </select>
+      </div>
+      <div class="row">
+        <label for="debugMode">Debug 模式</label>
+        <select id="debugMode">
+          <option value="false">false</option>
+          <option value="true">true</option>
+        </select>
+      </div>
+    </div>
+    <div class="card">
+      <div class="row">
+        <label for="promptSummary">总结 Prompt</label>
+        <textarea id="promptSummary"></textarea>
+      </div>
+      <div class="row">
+        <label for="promptSegments">分段 Prompt</label>
+        <textarea id="promptSegments"></textarea>
+      </div>
+      <div class="row">
+        <label for="promptRumors">验真 Prompt</label>
+        <textarea id="promptRumors"></textarea>
+      </div>
+      <button id="save">保存设置</button>
+      <div id="status" class="muted"></div>
+    </div>
+  </div>
+  <script src="logger.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

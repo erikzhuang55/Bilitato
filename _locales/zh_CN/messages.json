@@ -1,0 +1,11 @@
+{
+  "extName": {
+    "message": "B站助教君-你的B站学习好帮手！"
+  },
+  "extDesc": {
+    "message": "你的 AI 视频课代表！自动提取B站 CC/AI 字幕，帮你总结视频内容，妈妈再也不用担心我的学习。"
+  },
+  "actionTitle": {
+ "message": "B站助教君-你的B站学习好帮手！" 
+  }
+}

@@ -1,0 +1,32 @@
+[
+  {
+    "id": 1,
+    "priority": 1000,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Referer", "operation": "set", "value": "https://www.bilibili.com/" },
+        { "header": "Origin", "operation": "set", "value": "https://www.bilibili.com" }
+      ]
+    },
+    "condition": {
+      "requestDomains": ["bilivideo.com"],
+      "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest", "media", "other"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 1000,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Referer", "operation": "set", "value": "https://www.bilibili.com/" },
+        { "header": "Origin", "operation": "set", "value": "https://www.bilibili.com" }
+      ]
+    },
+    "condition": {
+      "requestDomains": ["bilivideo.cn"],
+      "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest", "media", "other"]
+    }
+  }
+]

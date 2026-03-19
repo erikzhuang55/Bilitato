@@ -1,0 +1,96 @@
+{
+  "manifest_version": 3,
+  "name": "Bilitato - AI陪你看B站", 
+  "description": "AI帮你高效看B站视频！下载字幕，总结内容，划分章节，识别广告，还可以直接提问视频内容！支持无字幕视频、自定义大模型API和Prompt！",
+  "version": "1.0.0",
+  "default_locale": "zh_CN",
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "32": "assets/icons/icon32.png",
+    "48": "assets/icons/icon48.png",
+    "64": "assets/icons/icon64.png",
+    "128": "assets/icons/icon128.png"
+  },
+  "permissions": [
+    "scripting",
+    "storage",
+    "tabs",
+    "declarativeNetRequest",
+    "downloads"
+  ],
+  "side_panel": {
+    "default_path": "popup.html"
+  },
+  "host_permissions": [
+    "*://*.bilibili.com/*",
+    "*://*.bilivideo.com/*",
+    "*://*.bilivideo.cn/*",
+    "*://*.hdslb.com/*",
+    "https://api-inference.modelscope.cn/*",
+    "https://api.deepseek.com/*",
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://open.bigmodel.cn/*",
+    "https://api.moonshot.cn/*",
+    "https://api.groq.com/*"
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "ruleset_1",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  },
+  "action": {
+    "default_title": "Bilitato - AI陪你看B站",
+    "default_icon": {
+      "16": "assets/icons/icon16.png",
+      "32": "assets/icons/icon32.png",
+      "48": "assets/icons/icon48.png",
+      "64": "assets/icons/icon64.png",
+      "128": "assets/icons/icon128.png"
+
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "assets/ui/default/*.png",
+        "assets/ui/active/*.png",
+        "assets/ui/*.png",    
+        "assets/icons/*.png",   
+        "inject.js",
+        "logger.js",
+        "content.css"
+      ],
+      "matches": [
+        "*://*.bilibili.com/*"
+      ]
+    }
+  ],
+  "content_scripts": [
+    {
+      "js": [
+        "logger.js",
+        "html2canvas.min.js",
+        "markdownRenderer.js",
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "matches": [
+        "https://www.bilibili.com/video/*",
+        "https://www.bilibili.com/list/*"
+      ],
+      "run_at": "document_start"
+    }
+  ]
+}
+ 

@@ -366,9 +366,6 @@ body::-webkit-scrollbar {
     padding: 0;
 }
 
-.summary-card-fixed {
-    overflow: hidden;
-}
 
 .summary-result-text {
     overflow-y: auto;

@@ -10,8 +10,8 @@
       ]
     },
     "condition": {
-      "requestDomains": ["bilivideo.com"],
-      "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest", "media", "other"]
+      "urlFilter": "bilivideo",
+      "resourceTypes": ["xmlhttprequest", "main_frame", "sub_frame", "other"]
     }
   },
   {
@@ -25,8 +25,8 @@
       ]
     },
     "condition": {
-      "requestDomains": ["bilivideo.cn"],
-      "resourceTypes": ["main_frame", "sub_frame", "xmlhttprequest", "media", "other"]
+      "urlFilter": "bilivideo",
+      "resourceTypes": ["xmlhttprequest", "main_frame", "sub_frame", "other"]
     }
   }
 ]

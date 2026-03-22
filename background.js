@@ -125,7 +125,7 @@ const TONE_PROMPTS = {
 };
 const DETAIL_PROMPTS = {
     brief: "内容尽量简洁，只保留最核心的信息和结论。",
-    normal: "在简洁基础上补充主要观点和必要细节。",
+    normal: "补充主要观点和必要细节，在简洁和详细之间保持平衡。",
     detailed: "尽量完整展开主要观点、背景、逻辑和结论，但保持结构清晰，不要冗长重复。"
 };
 const DEFAULT_PROMPT_SETTINGS = {
@@ -278,31 +278,9 @@ async function handleMessage(msg, sender) {
 
         // Step 1: URL 获取日志
         logger.info("[DOWNLOAD] Step 1: Received URL", { url, filename, tabId });
-        
-        // [Check] 预检逻辑
-        logger.info("[Check] 正在校验链接有效性...");
-        try {
-            const response = await fetch(url, { method: "HEAD" });
-            const contentType = response.headers.get("content-type") || "";
-            if (contentType.includes("text/html")) {
-                logger.warn("[Download] 检测到失效链接 (HTML response)", url);
-                const text = "链接已失效 (403/Redirect)，请刷新页面重试";
-                if (tabId) {
-                    try {
-                        chrome.tabs.sendMessage(tabId, { action: "SHOW_TOAST", text });
-                    } catch (_) {}
-                }
-                throw new Error(text);
-            }
-        } catch (error) {
-            // 如果是网络错误导致无法连接，可能也意味着无法下载，或者只是 HEAD 被拒绝
-            // 这里主要拦截明确的 HTML 响应（鉴权失败跳转）
-            if (error.message.includes("链接已失效")) throw error;
-            logger.warn("[Check] 预检请求异常（非致命），尝试继续下载", error);
-        }
 
         try {
-            // 直接使用 chrome.downloads.download，依赖 DNR 规则处理 Referer
+            // 直接下载；Referer 由 DNR 规则注入
             const downloadId = await chrome.downloads.download({
                 url: url,
                 filename: filename || "download.mp4",
@@ -331,6 +309,12 @@ async function handleMessage(msg, sender) {
             logger.error("[DOWNLOAD] Error:", error);
             throw error;
         }
+    }
+    if (msg.action === "PROBE_URL") {
+        const url = String(msg?.payload?.url || "").trim();
+        if (!url) return { status: "unknown" };
+        const status = await probeUrlStatus(url);
+        return { status };
     }
     if (msg.action === "LOG_ENTRY") {
         if (msg.entry && typeof msg.entry === "object") {
@@ -454,6 +438,63 @@ async function probeDownloadContentType(url) {
         } catch (_) {
             return null;
         }
+    }
+}
+
+async function probeUrlStatus(url) {
+    const target = String(url || "").trim();
+    if (!target) return "unknown";
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    try {
+        const htmlExtReg = /\.(s?html?|xhtml|mhtml)(?:$|[?#])/i;
+        const isHtmlLikeResponse = (res) => {
+            const ct = String(res.headers.get("content-type") || "").toLowerCase();
+            const cd = String(res.headers.get("content-disposition") || "").toLowerCase();
+            const finalUrl = String(res.url || "").toLowerCase();
+            if (
+                ct.includes("text/html")
+                || ct.includes("application/xhtml+xml")
+                || ct.includes("text/xhtml")
+                || ct.includes("application/html")
+            ) return true;
+            if (htmlExtReg.test(finalUrl)) return true;
+            if (htmlExtReg.test(cd)) return true;
+            return false;
+        };
+        const evaluate = (res) => {
+            if (isHtmlLikeResponse(res)) return "expired";
+            if (res.status === 401 || res.status === 403) return "expired";
+            if (res.ok || res.status === 206) return "ok";
+            return "unknown";
+        };
+        const baseInit = {
+            method: "GET",
+            headers: { Range: "bytes=0-0" },
+            referrer: "https://www.bilibili.com/",
+            referrerPolicy: "strict-origin-when-cross-origin",
+            redirect: "follow",
+            cache: "no-store",
+            credentials: "omit",
+            signal: controller.signal
+        };
+        try {
+            const res = await fetch(target, {
+                ...baseInit,
+                headers: {
+                    ...baseInit.headers,
+                    Referer: "https://www.bilibili.com/"
+                }
+            });
+            return evaluate(res);
+        } catch (_) {
+            const res = await fetch(target, baseInit);
+            return evaluate(res);
+        }
+    } catch (_) {
+        return "unknown";
+    } finally {
+        clearTimeout(timeoutId);
     }
 }
 

@@ -8,7 +8,8 @@ const logger = {
 
 const UI_ICON_BASE_DIR = "assets/ui";
 const FOLLOW_RESUME_MS = 5000;
-const SUBTITLE_CHECK_DELAY_MS = 3000;
+const SUBTITLE_CHECK_DELAY_MS = 1000;
+const SUBTITLE_DETECT_TIMEOUT_MS = 5000;
 const CACHE_SYNC_THROTTLE_MS = 500;
 const SUBTITLE_OBSERVE_GRACE_MS = 3500;
 const STEP_PROGRESS_TIMEOUT_MS = 60000;
@@ -129,6 +130,7 @@ const appState = {
     transcriptionSuppressUntil: 0,
     transcribeCountdownTimer: null,
     subtitleCheckDelayTimer: null,
+    subtitleDetectTimeoutTimer: null,
     subtitleCheckTargetBvid: "",
     transcriptionCapsuleVisible: false,
     transcriptionCapsuleMeta: null,
@@ -158,6 +160,8 @@ const appState = {
     sessionGeneratedTasks: new Set(),
     summaryExpanded: false,
     summaryRatio: 0.6,
+    panelMaxHeight: 0,
+    expandedSummaryHeight: 0,
     isCollapsed: false,
     segmentsCollapsed: false,
     playInfo: null,
@@ -470,16 +474,16 @@ async function waitPanelMount() {
             // Click on logo icon to take screenshot
             const logoImg = logoEl.querySelector("img");
             if (logoImg) {
-                logoImg.style.cursor = "pointer";
-                logoImg.title = "点击截图当前面板";
                 logoImg.onclick = (e) => {
                     e.stopPropagation();
+                    if (!IS_DEBUG_MODE) return;
                     if (typeof html2canvas === 'undefined') {
                         showToast("截图组件尚未加载完成，请稍后再试");
                         return;
                     }
                     takePanelScreenshot();
                 };
+                refreshLogoDebugCaptureState();
             }
 
             // Click on other parts of the top area to collapse/expand
@@ -576,6 +580,7 @@ function syncPluginHeight() {
     if (totalHeight < 300) {
         totalHeight = 600; // Reasonable default
     }
+    appState.panelMaxHeight = totalHeight;
 
     box.style.height = `${totalHeight}px`;
     box.style.maxHeight = `${totalHeight}px`;
@@ -583,7 +588,7 @@ function syncPluginHeight() {
         const summaryPanel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
         if (summaryPanel) {
             if (appState.segmentsCollapsed) {
-                requestAnimationFrame(() => applyExpandedSummaryHeight(summaryPanel));
+                requestAnimationFrame(() => applyExpandedSegmentsLayout(summaryPanel));
             } else {
                 requestAnimationFrame(() => applySummaryRatio(summaryPanel));
             }
@@ -811,7 +816,8 @@ async function loadBootstrapData() {
     appState.cache = res?.cache || null;
     appState.settings = res?.settings || null;
     appState.providers = res?.providers || null;
-    appState.activePage = resolveDefaultOpenPage(appState.settings?.defaultOpenPage);
+    // 首次加载固定展示 CC，让用户先看到字幕检测状态
+    appState.activePage = "CC";
 }
 
 function renderApp() {
@@ -825,6 +831,14 @@ function renderApp() {
 // Backdoor mechanism
 let logoClickCount = 0;
 let logoClickTimer = null;
+
+function refreshLogoDebugCaptureState() {
+    if (!panelShadowRoot) return;
+    const logoImg = panelShadowRoot.querySelector(".plugin-top-logo img:not(.logo-info-icon)");
+    if (!logoImg) return;
+    logoImg.style.cursor = IS_DEBUG_MODE ? "pointer" : "default";
+    logoImg.title = IS_DEBUG_MODE ? "点击截图当前面板" : "";
+}
 
 function bindPanelDelegatedEvents() {
     const panelRoot = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
@@ -847,6 +861,7 @@ function bindPanelDelegatedEvents() {
                 IS_DEBUG_MODE = !IS_DEBUG_MODE;
                 showToast(`Debug Mode ${IS_DEBUG_MODE ? "Enabled" : "Disabled"}`);
                 logoClickCount = 0;
+                refreshLogoDebugCaptureState();
                 // Sync to inject script if possible (optional)
             }
         }
@@ -945,21 +960,31 @@ function bindPanelDelegatedEvents() {
             return;
         }
         if (action === "summary-expand") {
-            appState.segmentsCollapsed = !appState.segmentsCollapsed;
             const panel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
-            if (panel) {
-                panel.dataset.lastSignature = ""; // Invalidate signature
-                renderSummary(panel);
+            const summaryCard = panel ? panel.querySelector(".summary-card-fixed") : null;
+            if (summaryCard && !appState.segmentsCollapsed) {
+                appState.expandedSummaryHeight = summaryCard.getBoundingClientRect().height;
             }
-            requestAnimationFrame(() => {
-                syncPluginHeight();
-                if (!appState.segmentsCollapsed) {
-                    const summaryPanel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
-                    if (summaryPanel) {
-                        requestAnimationFrame(() => applySummaryRatio(summaryPanel));
-                    }
+            appState.segmentsCollapsed = !appState.segmentsCollapsed;
+            if (!appState.segmentsCollapsed) {
+                appState.expandedSummaryHeight = 0;
+                // 收起时恢复正常高度
+                if (panel) {
+                    panel.dataset.lastSignature = "";
+                    renderSummary(panel);
                 }
-            });
+                syncPluginHeight();
+            } else {
+                // 展开时只让 applyExpandedSegmentsLayout 负责高度
+                if (panel) {
+                    panel.dataset.lastSignature = "";
+                    renderSummary(panel);
+                }
+                requestAnimationFrame(() => {
+                    const summaryPanel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
+                    if (summaryPanel) applyExpandedSegmentsLayout(summaryPanel);
+                });
+            }
             return;
         }
         if (action === "settings-save") {
@@ -1384,39 +1409,67 @@ function renderSummary(panel) {
     `;
     const summaryCard = panel.querySelector(".summary-card-fixed");
     if (isExpanded && summaryCard) {
-        summaryCard.style.height = "auto";
-        requestAnimationFrame(() => applyExpandedSummaryHeight(panel));
+        const lockedSummaryHeight = appState.expandedSummaryHeight > 0
+            ? appState.expandedSummaryHeight
+            : summaryCard.getBoundingClientRect().height;
+        if (lockedSummaryHeight > 0) {
+            appState.expandedSummaryHeight = lockedSummaryHeight;
+            summaryCard.style.height = `${Math.round(lockedSummaryHeight)}px`;
+        } else {
+            summaryCard.style.height = "";
+        }
+        requestAnimationFrame(() => applyExpandedSegmentsLayout(panel));
     } else {
         if (summaryCard) {
             // Recover from expanded mode first to avoid summary area occupying the whole page.
             summaryCard.style.height = "";
+        }
+        const segmentsBody = panel.querySelector(".segments-body");
+        if (segmentsBody) {
+            segmentsBody.style.maxHeight = "";
+            segmentsBody.style.overflowY = "";
         }
         applySummaryRatio(panel);
     }
     bindSummaryResizeDivider(panel);
 }
 
-function applyExpandedSummaryHeight(panel) {
+function applyExpandedSegmentsLayout(panel) {
     if (!appState.segmentsCollapsed) return;
     const box = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
+    const pageBody = panel.querySelector(".page-body");
+    const summaryCard = panel.querySelector(".summary-card-fixed");
+    const divider = panel.querySelector("#summary-resize-divider");
+    const segmentsHeader = panel.querySelector(".segments-section-header");
     const segmentsBody = panel.querySelector(".segments-body");
-    if (!box || !segmentsBody) return;
+    if (!box || !pageBody || !summaryCard || !segmentsBody || !segmentsHeader) return;
 
-    const adjust = () => {
-        const baseHeight = box.getBoundingClientRect().height;
-        const overflow = Math.max(0, segmentsBody.scrollHeight - segmentsBody.clientHeight);
-        const targetHeight = Math.round(baseHeight + overflow);
-        if (overflow <= 0) return false;
-        box.style.height = `${targetHeight}px`;
-        box.style.maxHeight = `${targetHeight}px`;
-        return true;
-    };
-
-    if (adjust()) {
-        requestAnimationFrame(() => {
-            adjust();
-        });
+    const segmentList = segmentsBody.querySelector(".segment-list");
+    const boxRect = box.getBoundingClientRect();
+    const pageBodyRect = pageBody.getBoundingClientRect();
+    const fixedOutsideBody = Math.max(0, pageBodyRect.top - boxRect.top);
+    const summaryHeight = Math.max(0, Number(appState.expandedSummaryHeight || parseFloat(summaryCard.style.height || "0") || 0));
+    if (summaryHeight > 0) {
+        appState.expandedSummaryHeight = summaryHeight;
+        summaryCard.style.height = `${Math.round(summaryHeight)}px`;
     }
+    const dividerHeight = divider ? (divider.getBoundingClientRect().height || 8) : 8;
+    const segmentsHeaderHeight = segmentsHeader.getBoundingClientRect().height || 0;
+    const segmentContentHeight = segmentList ? segmentList.scrollHeight : segmentsBody.scrollHeight;
+    const bodyStyle = window.getComputedStyle(pageBody);
+    const gap = Math.max(0, parseFloat(bodyStyle.rowGap || bodyStyle.gap || "0") || 0);
+    const gapCount = 2; // summary -> divider -> segments
+
+    const neededBodyHeight = summaryHeight + dividerHeight + segmentsHeaderHeight + segmentContentHeight + (gap * gapCount);
+    const neededBoxHeight = fixedOutsideBody + neededBodyHeight;
+    // 展开时不限制最大高度，让容器自然撑开到刚好显示完分段
+    const targetBoxHeight = Math.max(320, Math.ceil(neededBoxHeight));
+    box.style.height = `${targetBoxHeight}px`;
+    box.style.maxHeight = `${targetBoxHeight}px`;
+
+    const maxSegmentsBodyHeight = targetBoxHeight - fixedOutsideBody - summaryHeight - dividerHeight - segmentsHeaderHeight - (gap * gapCount);
+    segmentsBody.style.maxHeight = `${Math.max(80, Math.floor(maxSegmentsBodyHeight))}px`;
+    segmentsBody.style.overflowY = "auto";
 }
 
 function applySummaryRatio(panel) {
@@ -1461,7 +1514,6 @@ function bindSummaryResizeDivider(panel) {
     let startHeight = 0;
 
     const onMouseMove = (e) => {
-        if (appState.segmentsCollapsed) return;
         const bodyRect = pageBody.getBoundingClientRect();
         const dividerH = 8;
         const availableH = bodyRect.height - dividerH;
@@ -1470,6 +1522,10 @@ function bindSummaryResizeDivider(panel) {
         const newRatio = newSummaryH / availableH;
         appState.summaryRatio = Math.max(0.15, Math.min(0.85, newRatio));
         summaryCard.style.height = `${newSummaryH}px`;
+        if (appState.segmentsCollapsed) {
+            appState.expandedSummaryHeight = newSummaryH;
+            applyExpandedSegmentsLayout(panel);
+        }
     };
 
     const onMouseUp = () => {
@@ -1479,7 +1535,6 @@ function bindSummaryResizeDivider(panel) {
     };
 
     divider.addEventListener("mousedown", (e) => {
-        if (appState.segmentsCollapsed) return;
         e.preventDefault();
         startY = e.clientY;
         startHeight = summaryCard.getBoundingClientRect().height;
@@ -1527,7 +1582,19 @@ function renderCC(panel, rowsOverride) {
             </section>
         `;
     } else {
-        const isDetectingSubtitle = !appState.transcriptionRunning && (!appState.cache || !cacheReadyForCurrent);
+        const detectElapsedMs = Date.now() - Number(appState.injectBvidChangedAt || 0);
+        const detectTimeoutReached = detectElapsedMs >= SUBTITLE_DETECT_TIMEOUT_MS;
+        const isDetectingSubtitle = !appState.transcriptionRunning && (!appState.cache || !cacheReadyForCurrent) && !detectTimeoutReached;
+        if (isDetectingSubtitle && !appState.subtitleDetectTimeoutTimer) {
+            const forceRenderInMs = Math.max(100, SUBTITLE_DETECT_TIMEOUT_MS - detectElapsedMs + 100);
+            appState.subtitleDetectTimeoutTimer = setTimeout(() => {
+                appState.subtitleDetectTimeoutTimer = null;
+                renderContent();
+            }, forceRenderInMs);
+        } else if (!isDetectingSubtitle && appState.subtitleDetectTimeoutTimer) {
+            clearTimeout(appState.subtitleDetectTimeoutTimer);
+            appState.subtitleDetectTimeoutTimer = null;
+        }
         const capsuleDisabled = (appState.transcriptionRunning || isDetectingSubtitle) ? "disabled" : "";
         const statusText = isDetectingSubtitle
             ? "正在读取字幕，请稍候..."
@@ -2796,6 +2863,7 @@ function resetPageStateByBvidSwitch() {
     appState.transcriptionProgress = 0;
     appState.subtitleObserveUntil = 0;
     appState.subtitleCheckTargetBvid = "";
+    appState.expandedSummaryHeight = 0;
     appState.lastCacheSyncTime = 0;
     appState.lastCacheSyncBvid = "";
     appState.isStateDirty = true;
@@ -2818,6 +2886,10 @@ function resetPageStateByBvidSwitch() {
         clearTimeout(appState.subtitleCheckDelayTimer);
         appState.subtitleCheckDelayTimer = null;
     }
+    if (appState.subtitleDetectTimeoutTimer) {
+        clearTimeout(appState.subtitleDetectTimeoutTimer);
+        appState.subtitleDetectTimeoutTimer = null;
+    }
     if (appState.transcribeCountdownTimer) {
         clearInterval(appState.transcribeCountdownTimer);
         appState.transcribeCountdownTimer = null;
@@ -2830,6 +2902,7 @@ function resetAllState() {
     appState.transcriptionProgress = 0;
     appState.subtitleObserveUntil = 0;
     appState.subtitleCheckTargetBvid = "";
+    appState.expandedSummaryHeight = 0;
     appState.lastCacheSyncTime = 0;
     appState.lastCacheSyncBvid = "";
     appState.isStateDirty = true;
@@ -2862,6 +2935,10 @@ function resetAllState() {
     if (appState.subtitleCheckDelayTimer) {
         clearTimeout(appState.subtitleCheckDelayTimer);
         appState.subtitleCheckDelayTimer = null;
+    }
+    if (appState.subtitleDetectTimeoutTimer) {
+        clearTimeout(appState.subtitleDetectTimeoutTimer);
+        appState.subtitleDetectTimeoutTimer = null;
     }
     if (appState.transcribeCountdownTimer) {
         clearInterval(appState.transcribeCountdownTimer);
@@ -3707,10 +3784,22 @@ function startSubtitleCheckTimer() {
         clearTimeout(appState.subtitleCheckDelayTimer);
         appState.subtitleCheckDelayTimer = null;
     }
+    if (appState.subtitleDetectTimeoutTimer) {
+        clearTimeout(appState.subtitleDetectTimeoutTimer);
+        appState.subtitleDetectTimeoutTimer = null;
+    }
     appState.subtitleCheckDelayTimer = setTimeout(() => {
         appState.subtitleCheckDelayTimer = null;
         renderSubtitleTimelinePanel(document.getElementById("panel-body"));
     }, SUBTITLE_CHECK_DELAY_MS);
+    const detectElapsedMs = Date.now() - Number(appState.injectBvidChangedAt || 0);
+    const detectRemainMs = SUBTITLE_DETECT_TIMEOUT_MS - detectElapsedMs;
+    if (detectRemainMs > 0) {
+        appState.subtitleDetectTimeoutTimer = setTimeout(() => {
+            appState.subtitleDetectTimeoutTimer = null;
+            renderContent();
+        }, detectRemainMs);
+    }
 }
 
 function evaluateTranscriptionNeedAfterDelay(meta) {
@@ -4617,28 +4706,19 @@ function renderExportMainMenu(menuContainer) {
 }
 
 async function probeUrlInPage(url) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
     try {
-        const res = await fetch(url, {
-            method: "GET",
-            headers: { Range: "bytes=0-0" },
-            credentials: "include",
-            cache: "no-store",
-            signal: controller.signal
-        });
-        const ct = String(res.headers.get("content-type") || "").toLowerCase();
-        if (ct.includes("text/html")) return "expired";
-        if (res.status === 401 || res.status === 403) return "expired";
-        return "ok";
+        const res = await chrome.runtime.sendMessage({ action: "PROBE_URL", payload: { url } });
+        return res?.status || "unknown";
     } catch (_) {
         return "unknown";
-    } finally {
-        clearTimeout(timeoutId);
     }
 }
 
 function renderQualityList(menuContainer, type) {
+    if (!chrome.runtime?.id) {
+        showToast("下载链接已经失效，请刷新页面后重试");
+        return;
+    }
     if (!appState.playInfo) {
         showToast("视频信息加载中，请稍候...");
         // 尝试重新触发获取
@@ -4660,8 +4740,11 @@ function renderQualityList(menuContainer, type) {
     
     if (type === "video") {
         listHtml = streams.map((group, gIndex) => {
+            const streamList = Array.isArray(group?.streams) ? group.streams : [];
+            const firstCandidateIndex = streamList.findIndex((s) => String(s?.url || "").trim());
+            const initialStreamIndex = firstCandidateIndex >= 0 ? firstCandidateIndex : 0;
             // group.streams has sub-options
-            const subOptions = group.streams.map((s, sIndex) => `
+            const subOptions = streamList.map((s, sIndex) => `
                 <button class="codec-btn" data-group="${gIndex}" data-stream="${sIndex}" 
                    title="${escapeHtml(s.codecs || s.codecName)}"
                    style="font-size:11px;padding:2px 6px;border:1px solid #e3e8ec;background:#f6f7f8;color:#61666d;border-radius:4px;cursor:pointer;margin-left:4px;">
@@ -4673,7 +4756,7 @@ function renderQualityList(menuContainer, type) {
                 <div class="quality-group" style="padding:8px 12px;border-bottom:1px solid #f1f2f3;">
                     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
                         <span class="quality-desc" style="font-size:13px;font-weight:500;color:#18191c;">${escapeHtml(group.desc)}</span>
-                        <button class="download-default-btn" data-group="${gIndex}" data-stream="0"
+                        <button class="download-default-btn" data-group="${gIndex}" data-stream="${initialStreamIndex}"
                            style="font-size:12px;padding:4px 10px;border:1px solid #fb7299;color:#fff;background:#fb7299;border-radius:4px;cursor:pointer;">
                            下载
                         </button>
@@ -4690,7 +4773,7 @@ function renderQualityList(menuContainer, type) {
             <div class="quality-item" style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;gap:12px;border-bottom:1px solid #f1f2f3;">
                 <span class="quality-desc" style="font-size:13px;">${escapeHtml(s.desc)}</span>
                 <button class="download-stream-btn" data-index="${index}" 
-                   style="font-size:12px;padding:4px 8px;border:1px solid #fb7299;color:#fb7299;background:#fff;border-radius:4px;cursor:pointer;">
+                   style="font-size:12px;padding:4px 10px;border:1px solid #fb7299;color:#fff;background:#fb7299;border-radius:4px;cursor:pointer;">
                    下载
                 </button>
             </div>
@@ -4737,7 +4820,7 @@ function renderQualityList(menuContainer, type) {
         if (status === "expired") {
             btn.dataset.probeStatus = "expired";
             btn.disabled = true;
-            btn.textContent = "已失效";
+            btn.textContent = "不可用";
             btn.style.opacity = "1";
             btn.style.cursor = "not-allowed";
             btn.style.color = "#999";
@@ -4753,6 +4836,12 @@ function renderQualityList(menuContainer, type) {
         btn.style.color = btn.dataset.probeOriginalColor || "";
         btn.style.borderColor = btn.dataset.probeOriginalBorderColor || "";
         btn.style.background = btn.dataset.probeOriginalBackground || "";
+        if (btn.classList.contains("download-default-btn") || btn.classList.contains("download-stream-btn")) {
+            btn.style.opacity = "1";
+            btn.style.color = "#fff";
+            btn.style.borderColor = "#fb7299";
+            btn.style.background = "#fb7299";
+        }
     };
 
     const addProbeTarget = (urlToButtons, url, btn) => {
@@ -4761,6 +4850,51 @@ function renderQualityList(menuContainer, type) {
         const list = urlToButtons.get(key) || [];
         list.push(btn);
         urlToButtons.set(key, list);
+    };
+
+    const syncDefaultButtonState = (groupIndex) => {
+        if (type !== "video") return;
+        const defaultBtn = menuContainer.querySelector(`.download-default-btn[data-group="${groupIndex}"]`);
+        if (!defaultBtn) return;
+        const group = streams[groupIndex];
+        const streamList = Array.isArray(group?.streams) ? group.streams : [];
+        if (!streamList.length) {
+            applyProbeState(defaultBtn, "expired");
+            defaultBtn.dataset.stream = "-1";
+            return;
+        }
+        let firstOkIndex = -1;
+        let firstFallbackIndex = -1;
+        let hasPending = false;
+        for (let i = 0; i < streamList.length; i++) {
+            const codecBtn = menuContainer.querySelector(`.codec-btn[data-group="${groupIndex}"][data-stream="${i}"]`);
+            const status = String(codecBtn?.dataset?.probeStatus || "pending");
+            if (status === "pending") hasPending = true;
+            if (status === "ok" && firstOkIndex < 0) firstOkIndex = i;
+            if ((status === "ok" || status === "unknown") && firstFallbackIndex < 0) firstFallbackIndex = i;
+        }
+        if (firstOkIndex >= 0) {
+            defaultBtn.dataset.stream = String(firstOkIndex);
+            applyProbeState(defaultBtn, "ok");
+            return;
+        }
+        if (firstFallbackIndex >= 0) {
+            defaultBtn.dataset.stream = String(firstFallbackIndex);
+            applyProbeState(defaultBtn, "unknown");
+            return;
+        }
+        if (hasPending) {
+            setProbePending(defaultBtn);
+            return;
+        }
+        defaultBtn.dataset.stream = "-1";
+        applyProbeState(defaultBtn, "expired");
+    };
+
+    const syncAllDefaultButtons = () => {
+        if (type !== "video") return;
+        const groups = appState.playInfo?.video || [];
+        groups.forEach((_, gIndex) => syncDefaultButtonState(gIndex));
     };
 
     const collectProbeTargets = () => {
@@ -4774,10 +4908,6 @@ function renderQualityList(menuContainer, type) {
                     if (!url) return;
                     const codecBtn = menuContainer.querySelector(`.codec-btn[data-group="${gIndex}"][data-stream="${sIndex}"]`);
                     addProbeTarget(urlToButtons, url, codecBtn);
-                    if (sIndex === 0) {
-                        const defaultBtn = menuContainer.querySelector(`.download-default-btn[data-group="${gIndex}"][data-stream="0"]`);
-                        addProbeTarget(urlToButtons, url, defaultBtn);
-                    }
                 });
             });
             return urlToButtons;
@@ -4794,6 +4924,7 @@ function renderQualityList(menuContainer, type) {
 
     const pendingButtons = menuContainer.querySelectorAll(".download-default-btn, .codec-btn, .download-stream-btn");
     pendingButtons.forEach(setProbePending);
+    syncAllDefaultButtons();
 
     const startProbeForCurrentMenu = async () => {
         if (!isProbeTargetAlive() || menuContainer.dataset.probeSessionId !== probeSessionId) return;
@@ -4813,15 +4944,23 @@ function renderQualityList(menuContainer, type) {
                     const status = await probeUrlInPage(url);
                     if (!isProbeTargetAlive() || menuContainer.dataset.probeSessionId !== probeSessionId) return;
                     btnList.forEach((btn) => applyProbeState(btn, status));
+                    const touchedGroups = new Set(
+                        btnList
+                            .map((btn) => Number(btn?.dataset?.group))
+                            .filter((n) => Number.isFinite(n))
+                    );
+                    touchedGroups.forEach((gIndex) => syncDefaultButtonState(gIndex));
                 })
             );
 
             pendingButtons.forEach((btn) => {
                 if (btn.dataset.probeStatus === "pending") applyProbeState(btn, "unknown");
             });
+            syncAllDefaultButtons();
         } catch (_) {
             if (!isProbeTargetAlive() || menuContainer.dataset.probeSessionId !== probeSessionId) return;
             pendingButtons.forEach((btn) => applyProbeState(btn, "unknown"));
+            syncAllDefaultButtons();
         }
     };
 
@@ -4856,6 +4995,10 @@ function renderQualityList(menuContainer, type) {
             const currentTitle = document.title.replace(/_哔哩哔哩_bilibili$/, "").trim();
             const safeTitle = currentTitle.replace(/[\\/:*?"<>|]/g, "_");
             const filename = `${safeTitle}_${freshGroup.desc}_${freshStream.codecName}.mp4`;
+            if (!chrome.runtime?.id) {
+                showToast("下载链接已经失效，请刷新页面后重试");
+                return;
+            }
             
             await chrome.runtime.sendMessage({
                 action: "DOWNLOAD_STREAM",
@@ -4876,7 +5019,13 @@ function renderQualityList(menuContainer, type) {
         menuContainer.querySelectorAll(".download-default-btn").forEach(btn => {
             btn.addEventListener("click", (e) => {
                 e.stopPropagation();
-                triggerVideoDownload(btn, parseInt(btn.dataset.group), parseInt(btn.dataset.stream));
+                const groupIndex = parseInt(btn.dataset.group, 10);
+                const streamIndex = parseInt(btn.dataset.stream, 10);
+                if (!Number.isFinite(groupIndex) || !Number.isFinite(streamIndex) || streamIndex < 0) {
+                    showToast("当前清晰度暂无可用流");
+                    return;
+                }
+                triggerVideoDownload(btn, groupIndex, streamIndex);
             });
         });
         menuContainer.querySelectorAll(".codec-btn").forEach(btn => {
@@ -4908,6 +5057,10 @@ function renderQualityList(menuContainer, type) {
                     const currentTitle = document.title.replace(/_哔哩哔哩_bilibili$/, "").trim();
                     const safeTitle = currentTitle.replace(/[\\/:*?"<>|]/g, "_");
                     const filename = `${safeTitle}_${freshStream.desc}.m4a`;
+                    if (!chrome.runtime?.id) {
+                        showToast("下载链接已经失效，请刷新页面后重试");
+                        return;
+                    }
                     
                     await chrome.runtime.sendMessage({
                         action: "DOWNLOAD_STREAM",

@@ -2492,10 +2492,21 @@ input[type="range"]:active::-webkit-slider-thumb {
     padding-right: 2px;
 }
 
-/* 展开完整模式：分段完整显示，不裁剪 */
+/* 展开完整模式：通过 JS 增高容器展示完整分段，避免 visible 溢出导致裁剪/抖动 */
+#page-summary.is-segments-expanded .page-body {
+    overflow: hidden;
+    gap: 8px;
+}
+#page-summary.is-segments-expanded .plugin-content-panel {
+    overflow: hidden;
+}
 #page-summary.is-segments-expanded .summary-card-segments {
+    flex: 0 0 auto;
     overflow: visible;
 }
 #page-summary.is-segments-expanded .segments-body {
+    flex: 0 0 auto;
+    min-height: auto;
     overflow: visible;
+    max-height: none;
 }

@@ -13,6 +13,7 @@ const SUBTITLE_DETECT_TIMEOUT_MS = 5000;
 const CACHE_SYNC_THROTTLE_MS = 500;
 const SUBTITLE_OBSERVE_GRACE_MS = 3500;
 const STEP_PROGRESS_TIMEOUT_MS = 60000;
+const CLOUD_READ_TIMEOUT_MS = 500;
 const TASK_PROMPTS_DEFAULT = {
     summary: `
 任务：总结视频核心内容。
@@ -118,6 +119,12 @@ const appState = {
     timelineSearchTerm: "",
     timelineSearchDebounceTimer: null,
     ccSearchTerm: "",
+    cloudReadState: {
+        bvid: "",
+        status: "idle",
+        requestId: 0,
+        startedAt: 0
+    },
     ccSearchDebounceTimer: null,
     subtitleFallbackTimer: null,
     lastSubtitleForwardAt: 0,
@@ -806,7 +813,7 @@ function syncStepProgressByTaskState(tabState) {
 }
 
 async function loadBootstrapData() {
-    const res = await chrome.runtime.sendMessage({ action: "GET_BOOTSTRAP" });
+    const res = await chrome.runtime.sendMessage({ action: "GET_BOOTSTRAP", skipCloud: true });
     if (!res?.ok) {
         showToast(res?.error || "初始化失败");
         return;
@@ -1193,6 +1200,7 @@ function renderContent() {
     const panel = panelShadowRoot ? panelShadowRoot.getElementById("panel-body") : null;
     if (!panel) return;
     renderTopRemaining();
+    ensureCloudReadForActivePage();
 
     const pages = ["CC", "summary", "chat", "real", "settings"];
     pages.forEach((id) => {
@@ -1293,12 +1301,21 @@ function renderSummary(panel) {
     const segmentsStatus = appState.tabState?.taskStatus?.segments || "idle";
     const isLoading = summaryStatus === "processing" || segmentsStatus === "processing";
     const hasContent = !!String(summary || "").trim() || segments.length > 0;
+    const cloudReading = isCloudReadLoadingForCurrentVideo();
+
+    if (cloudReading && !hasContent) {
+        panel.dataset.lastSignature = `cloud-loading:${normalizeBvidCase(resolveCurrentBvid() || "")}`;
+        panel.innerHTML = renderCloudLoadingState("总结", "读取云端数据中...");
+        return;
+    }
 
     const signature = JSON.stringify({
         summary,
         segmentsLength: segments.length,
         summaryStatus,
         segmentsStatus,
+        summarySource: getTaskCacheSource("summary"),
+        segmentsSource: getTaskCacheSource("segments"),
         sessionFresh: appState.sessionGeneratedTasks.has("summary") || appState.sessionGeneratedTasks.has("segments")
     });
 
@@ -1306,7 +1323,7 @@ function renderSummary(panel) {
     panel.dataset.lastSignature = signature;
 
     const isFresh = appState.sessionGeneratedTasks.has("summary") || appState.sessionGeneratedTasks.has("segments");
-    const cacheTag = hasContent && !isLoading && !isFresh ? `<span class="cache-tag">本地缓存</span>` : "";
+    const cacheTag = buildCacheTagHtml(["summary", "segments"], hasContent, isLoading, isFresh);
     const headerHtml = `
         <div class="page-header">
             <h3>总结 <div class="header-tags">${cacheTag}</div></h3>
@@ -1733,6 +1750,12 @@ function renderChat(panel) {
     }
     const history = Array.isArray(appState.cache?.history) ? appState.cache.history : [];
     const pending = Array.isArray(appState.chatPending) ? appState.chatPending : [];
+    const cloudReading = isCloudReadLoadingForCurrentVideo();
+    if (cloudReading && !history.length && !pending.length) {
+        panel.dataset.lastSignature = `chat-cloud-loading:${normalizeBvidCase(resolveCurrentBvid() || "")}`;
+        panel.innerHTML = renderCloudLoadingState("聊天", "读取云端数据中...");
+        return;
+    }
     
     const signature = JSON.stringify({
         h: history.length,
@@ -1892,6 +1915,12 @@ function renderReal(panel) {
     const claims = Array.isArray(rumors?.claims) ? rumors.claims : [];
     const rumorsStatus = appState.tabState?.taskStatus?.rumors || "idle";
     const hasRumorsCache = !!String(rumors?.overview || "").trim() || claims.length > 0;
+    const cloudReading = isCloudReadLoadingForCurrentVideo();
+    if (cloudReading && !hasRumorsCache) {
+        panel.dataset.lastSignature = `rumors-cloud-loading:${normalizeBvidCase(resolveCurrentBvid() || "")}`;
+        panel.innerHTML = renderCloudLoadingState("验真助手", "读取云端数据中...");
+        return;
+    }
     
     // Sort claims by timestamp
     const sortedClaims = [...claims].sort((a, b) => {
@@ -1902,6 +1931,7 @@ function renderReal(panel) {
         overview: rumors?.overview,
         claimsLength: sortedClaims.length,
         rumorsStatus,
+        rumorsSource: getTaskCacheSource("rumors"),
         sessionFresh: appState.sessionGeneratedTasks.has("rumors")
     });
 
@@ -1909,9 +1939,7 @@ function renderReal(panel) {
     panel.dataset.lastSignature = signature;
     
     const isFresh = appState.sessionGeneratedTasks.has("rumors");
-    const rumorsCacheTag = hasRumorsCache && rumorsStatus !== "processing" && !isFresh
-        ? `<span class="cache-tag">本地缓存</span>`
-        : "";
+    const rumorsCacheTag = buildCacheTagHtml(["rumors"], hasRumorsCache, rumorsStatus === "processing", isFresh);
 
     const claimListHtml = sortedClaims.map((item) => {
         // Determine style class based on verdict/credibility
@@ -2875,6 +2903,7 @@ function resetPageStateByBvidSwitch() {
     appState.pseudoProgressTaskId = "";
     appState.pseudoProgressValue = 0;
     appState.pseudoProgressStartedAt = 0;
+    appState.cloudReadState = { bvid: "", status: "idle", requestId: 0, startedAt: 0 };
     appState.cache = null; // Explicitly clear cache
     appState.playInfo = null; // Explicitly clear playInfo
     const bar = panelShadowRoot ? panelShadowRoot.getElementById("step-progress-bar") : null;
@@ -2924,6 +2953,7 @@ function resetAllState() {
     appState.pseudoProgressTaskId = "";
     appState.pseudoProgressValue = 0;
     appState.pseudoProgressStartedAt = 0;
+    appState.cloudReadState = { bvid: "", status: "idle", requestId: 0, startedAt: 0 };
     appState.segmentsMarkerTickAt = 0;
     
     const bar = panelShadowRoot ? panelShadowRoot.getElementById("step-progress-bar") : null;
@@ -3067,6 +3097,159 @@ function bindChatListAutoScroll(list) {
 
 function shouldAutoScrollChat() {
     return Date.now() >= Number(appState.chatAutoScrollPausedUntil || 0);
+}
+
+function getTaskCacheSource(task) {
+    if (task === "summary") return String(appState.cache?.summaryCacheSource || "").trim().toLowerCase();
+    if (task === "segments") return String(appState.cache?.segmentsCacheSource || "").trim().toLowerCase();
+    if (task === "rumors") return String(appState.cache?.rumorsCacheSource || "").trim().toLowerCase();
+    return "";
+}
+
+function getTaskModel(task) {
+    if (task === "summary") return String(appState.cache?.summaryModel || "").trim();
+    if (task === "segments") return String(appState.cache?.segmentsModel || "").trim();
+    if (task === "rumors") return String(appState.cache?.rumorsModel || "").trim();
+    return "";
+}
+
+function formatUtc8DateTime(value) {
+    if (value == null || value === "") return "";
+    const raw = typeof value === "number" ? value : String(value || "").trim();
+    if (raw === "") return "";
+    const date = typeof raw === "number" ? new Date(raw) : new Date(raw);
+    if (!Number.isFinite(date.getTime())) return "";
+    const utc8 = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+    const yyyy = utc8.getUTCFullYear();
+    const mm = String(utc8.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(utc8.getUTCDate()).padStart(2, "0");
+    const hh = String(utc8.getUTCHours()).padStart(2, "0");
+    const min = String(utc8.getUTCMinutes()).padStart(2, "0");
+    const sec = String(utc8.getUTCSeconds()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd} ${hh}:${min}:${sec} UTC+8`;
+}
+
+function escapeHtmlAttr(value) {
+    return escapeHtml(String(value || "")).replace(/"/g, "&quot;");
+}
+
+function buildCloudCacheTooltip(tasks) {
+    const models = [...new Set((Array.isArray(tasks) ? tasks : []).map(getTaskModel).filter(Boolean))];
+    const uploadedAt = formatUtc8DateTime(
+        appState.cache?.cloudUpdatedAt
+        || appState.cache?.updated_at
+        || appState.cache?.cloudSyncedAt
+        || ""
+    );
+    const lines = [];
+    if (models.length) lines.push(`模型: ${models.join(" / ")}`);
+    if (uploadedAt) lines.push(`上传: ${uploadedAt}`);
+    return lines.join("\n");
+}
+
+function buildCacheTagHtml(tasks, hasContent, isLoading, isFresh) {
+    if (!hasContent || isLoading || isFresh) return "";
+    const requestedTasks = Array.isArray(tasks) ? tasks : [];
+    const sources = [...new Set(requestedTasks.map(getTaskCacheSource).filter(Boolean))];
+    if (!sources.length) {
+        return '<span class="cache-tag">本地缓存</span>';
+    }
+    const tags = [];
+    if (sources.includes("local")) tags.push('<span class="cache-tag">本地缓存</span>');
+    if (sources.includes("cloud")) {
+        const tooltip = buildCloudCacheTooltip(requestedTasks);
+        const tooltipAttr = tooltip ? ` data-tooltip="${escapeHtmlAttr(tooltip)}"` : "";
+        tags.push(`<span class="cache-tag cloud-cache-tag"${tooltipAttr}>云端缓存</span>`);
+    }
+    return tags.join("");
+}
+
+function isCloudReadLoadingForCurrentVideo() {
+    const target = normalizeBvidCase(resolveCurrentBvid() || "");
+    return !!target
+        && normalizeBvidCase(appState.cloudReadState?.bvid || "") === target
+        && appState.cloudReadState?.status === "loading";
+}
+
+function shouldAttemptCloudReadForPage(page) {
+    const target = normalizeBvidCase(resolveCurrentBvid() || "");
+    if (!target) return false;
+    if (!["summary", "real"].includes(String(page || ""))) return false;
+    const state = appState.cloudReadState || {};
+    if (normalizeBvidCase(state.bvid || "") === target && (state.status === "loading" || state.status === "success" || state.status === "failed")) {
+        return false;
+    }
+    if (page === "summary") {
+        const hasSummary = !!String(appState.cache?.summary || "").trim();
+        const hasSegments = Array.isArray(appState.cache?.segments) && appState.cache.segments.length > 0;
+        return !(hasSummary || hasSegments);
+    }
+    return !(!!String(appState.cache?.rumors?.overview || "").trim() || Array.isArray(appState.cache?.rumors?.claims) && appState.cache.rumors.claims.length > 0);
+}
+
+function startCloudReadForCurrentVideo() {
+    const target = normalizeBvidCase(resolveCurrentBvid() || "");
+    if (!target) return;
+    const nextRequestId = Number(appState.cloudReadState?.requestId || 0) + 1;
+    appState.cloudReadState = {
+        bvid: target,
+        status: "loading",
+        requestId: nextRequestId,
+        startedAt: Date.now()
+    };
+    renderContent();
+    const request = chrome.runtime.sendMessage({ action: "GET_CACHE", bvid: target });
+    const timeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error("CLOUD_TIMEOUT")), CLOUD_READ_TIMEOUT_MS);
+    });
+    Promise.race([request, timeout])
+        .then((res) => {
+            if (normalizeBvidCase(appState.cloudReadState?.bvid || "") !== target) return;
+            if (Number(appState.cloudReadState?.requestId || 0) !== nextRequestId) return;
+            if (!res?.ok) throw new Error(res?.error || "访问云端数据库失败");
+            const cache = res?.cache || null;
+            if (cache && normalizeBvidCase(cache?.bvid || "") === target) {
+                appState.cache = cache;
+            }
+            if (res?.tabState) appState.tabState = res.tabState;
+            appState.cloudReadState = {
+                bvid: target,
+                status: "success",
+                requestId: nextRequestId,
+                startedAt: Date.now()
+            };
+            renderContent();
+        })
+        .catch(() => {
+            if (normalizeBvidCase(appState.cloudReadState?.bvid || "") !== target) return;
+            if (Number(appState.cloudReadState?.requestId || 0) !== nextRequestId) return;
+            appState.cloudReadState = {
+                bvid: target,
+                status: "failed",
+                requestId: nextRequestId,
+                startedAt: Date.now()
+            };
+            renderContent();
+            showToast("访问云端数据库失败！");
+        });
+}
+
+function ensureCloudReadForActivePage() {
+    if (!shouldAttemptCloudReadForPage(appState.activePage)) return;
+    startCloudReadForCurrentVideo();
+}
+
+function renderCloudLoadingState(title, detail = "读取云端数据中...") {
+    return `
+        <div class="page-header">
+            <h3>${title}</h3>
+        </div>
+        <div class="page-body subtitle-empty-container">
+            <div class="action-container">
+                <p class="action-tip">${detail}</p>
+            </div>
+        </div>
+    `;
 }
 
 function dismissChatGuide() {
@@ -4371,7 +4554,7 @@ async function syncCacheFromBackground(bvid) {
     try {
         appState.lastCacheSyncTime = now;
         appState.lastCacheSyncBvid = target;
-        const res = await chrome.runtime.sendMessage({ action: "GET_CACHE", bvid: target });
+        const res = await chrome.runtime.sendMessage({ action: "GET_CACHE", bvid: target, skipCloud: true });
         if (!res?.ok) return;
         const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href));
         if (routeBvid && routeBvid !== target) return;

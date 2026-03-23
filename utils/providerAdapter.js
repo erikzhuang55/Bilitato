@@ -79,6 +79,12 @@ function appendJsonFormatHint(messages) {
     return list;
 }
 
+function shouldIncludeStreamUsage(providerKey, isCustom, protocol) {
+    if (isCustom && protocol === "claude") return false;
+    const normalized = String(providerKey || "").toLowerCase();
+    return normalized === "openai" || normalized === "deepseek" || normalized === "custom";
+}
+
 function resolveProviderRequest(providerKey, config, messages, streaming) {
     const provider = PROVIDERS[providerKey] || PROVIDERS[config.provider] || PROVIDERS.modelscope || PROVIDERS.default;
     const isCustom = (providerKey || config.provider) === "custom";
@@ -164,6 +170,9 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
             max_tokens: 4096,
             stream: !!streaming
         };
+        if (streaming && shouldIncludeStreamUsage(providerKey || config.provider, isCustom, protocol)) {
+            body.stream_options = { include_usage: true };
+        }
         return {
             provider,
             isCustom,

@@ -16,7 +16,15 @@ const TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
 const GROQ_AUDIO_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
+const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
+const SUPABASE_DEFAULT_USAGE_RPC = "increment_feature_usage_with_token_log";
+const SUPABASE_DEFAULT_USAGE_STATS_TABLE = "usage_stats";
 const TASK_KEYS = ["summary", "segments", "rumors"];
+const CLOUD_TASK_FIELD_MAP = {
+    summary: ["summary", "summary_model", "summary_upvotes", "summary_downvotes"],
+    segments: ["segments", "segments_model", "segments_upvotes", "segments_downvotes"],
+    rumors: ["rumors", "rumors_model", "rumors_upvotes", "rumors_downvotes"]
+};
 const TASK_PROMPT_FORMAT_RULES = {
     segments: "【技术规范】只输出 JSON 数组，严禁包含任何 Markdown 代码块或解释性文字。格式严格遵守：[{\"start\":数字,\"end\":数字,\"label\":\"字符串\",\"type\":\"content\"|\"ad\"}]。",
     rumors: "【技术规范】只输出 JSON 对象，严禁 Markdown。结构必须包含：{ \"overall_score\": 数字, \"overview\": \"字符串\", \"claims\": [{\"text\":\"内容\",\"timestamp\":数字,\"verdict\":布尔值,\"analysis\":\"原因\"}] }。",
@@ -149,6 +157,11 @@ const DEFAULT_SETTINGS = {
     customProtocol: "openai",
     groqApiKey: "",
     groqModel: "whisper-large-v3-turbo",
+    supabaseUrl: "https://qdksdauixnbgrgkilgac.supabase.co",
+    supabaseAnonKey: "sb_publishable_55zwbZc_sQ0k4EDJBgpxsQ_1F86l1vT",
+    supabaseVideoCacheTable: SUPABASE_DEFAULT_VIDEO_CACHE_TABLE,
+    supabaseUsageRpcName: SUPABASE_DEFAULT_USAGE_RPC,
+    supabaseUsageStatsTable: SUPABASE_DEFAULT_USAGE_STATS_TABLE,
     prefMode: "efficiency",
     debugMode: false
 };
@@ -357,8 +370,11 @@ async function handleMessage(msg, sender) {
     if (msg.action === "GET_BOOTSTRAP") {
         if (!tabId) return { tabState: null, cache: null };
         const tabState = await getTabState(tabId);
-        const cache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
         const settings = await getResolvedSettings();
+        if (tabState?.activeBvid && msg?.skipCloud !== true) {
+            await hydrateCloudCacheIfNeeded(tabState.activeBvid, TASK_KEYS, settings);
+        }
+        const cache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
         return { tabId, tabState, cache, settings, providers: PROVIDERS };
     }
     if (msg.action === "GET_CACHE") {
@@ -367,8 +383,16 @@ async function handleMessage(msg, sender) {
             if (!tabId) return { bvid: "", cache: null, tabState: null };
             const tabState = await getTabState(tabId);
             const bvid = normalizeBvid(tabState?.activeBvid);
+            const settings = await getResolvedSettings();
+            if (bvid && msg?.skipCloud !== true) {
+                await hydrateCloudCacheIfNeeded(bvid, TASK_KEYS, settings);
+            }
             const cache = bvid ? await getCache(bvid) : null;
             return { bvid, cache, tabState };
+        }
+        const settings = await getResolvedSettings();
+        if (msg?.skipCloud !== true) {
+            await hydrateCloudCacheIfNeeded(expected, TASK_KEYS, settings);
         }
         const cache = await getCache(expected);
         const tabState = tabId ? await getTabState(tabId) : null;
@@ -1009,6 +1033,7 @@ async function runTasksForTab(tabId, tasks, force, taskContext = {}) {
     const bvid = tabState?.activeBvid;
     if (!bvid) throw new Error("未获取到视频字幕");
     const resolvedSettings = await getResolvedSettings();
+    await hydrateCloudCacheIfNeeded(bvid, tasks, resolvedSettings);
     const hasSummarySegments = tasks.includes("summary") && tasks.includes("segments");
     const otherTasks = tasks.filter((task) => !(hasSummarySegments && (task === "summary" || task === "segments")));
 
@@ -1027,13 +1052,21 @@ async function runTasksForTab(tabId, tasks, force, taskContext = {}) {
 }
 
 async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {}) {
+    if (!force) {
+        await hydrateCloudCacheIfNeeded(bvid, [task], settings);
+    }
     const cache = await getCache(bvid);
     if (!force && cache?.[task]) return cache[task];
     const key = `${bvid}|${task}`;
     logBackground.info("task_start", { tab_id: tabId, bvid, task });
     try {
         const result = await runWithDedup(key, () => requestTaskResult(bvid, task, settings, taskContext));
-        await mergeCacheByBvid(bvid, { [task]: result, updatedAt: Date.now() });
+        await mergeCacheByBvid(bvid, {
+            [task]: result,
+            ...buildTaskSourcePatch([task], "local"),
+            updatedAt: Date.now()
+        });
+        await persistCloudFeaturePatch(bvid, settings, { [task]: result });
         return result;
     } catch (error) {
         const status = error?.code === "TIMEOUT" ? "timeout" : "error";
@@ -1048,6 +1081,9 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
 }
 
 async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext = {}) {
+    if (!force) {
+        await hydrateCloudCacheIfNeeded(bvid, ["summary", "segments"], settings);
+    }
     const cache = await getCache(bvid);
     if (!force && cache?.summary && Array.isArray(cache?.segments) && cache.segments.length) {
         await setTaskStatus(tabId, ["summary", "segments"], "done");
@@ -1062,6 +1098,12 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
         ? () => runSummarySegmentsInEfficiency(tabId, bvid, force, settings, taskContext)
         : () => runSummarySegmentsInQuality(tabId, bvid, force, settings, taskContext);
     const results = await runWithDedup(key, runner);
+    const cloudPatch = {};
+    if (results?.summary?.ok) cloudPatch.summary = results.summary.data;
+    if (results?.segments?.ok) cloudPatch.segments = results.segments.data;
+    if (Object.keys(cloudPatch).length) {
+        await persistCloudFeaturePatch(bvid, settings, cloudPatch);
+    }
     const summaryOk = !!results?.summary?.ok;
     const segmentsOk = !!results?.segments?.ok;
     if (!summaryOk && !segmentsOk) {
@@ -1093,6 +1135,7 @@ async function runChatForTab(tabId, text, messageId) {
             const aiRes = await callAIWithTimeout(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS);
             lastMetrics = aiRes.metrics || null;
             await appendMetrics(bvid, tabId, "chat", aiRes.metrics);
+            await reportFeatureUsage("chat", bvid, resolvedSettings, aiRes.metrics);
             return aiRes.text.trim();
         });
         const mergedHistory = [
@@ -1149,6 +1192,7 @@ async function runChatForPort(port, msg) {
             }, abortController);
             lastMetrics = aiRes.metrics || null;
             await appendMetrics(bvid, tabId, "chat", aiRes.metrics);
+            await reportFeatureUsage("chat", bvid, resolvedSettings, aiRes.metrics);
             return aiRes.text.trim();
         });
         const mergedHistory = [
@@ -1203,6 +1247,7 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
     const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS);
     logAI.info("ai_request_success", { bvid, task, provider: settings.provider, latency_ms: aiRes.metrics?.latencyMs || 0, tokens: aiRes.metrics?.tokens || 0 });
     await appendMetrics(bvid, null, task, aiRes.metrics);
+    await reportFeatureUsage(task, bvid, settings, aiRes.metrics);
     if (task === "summary") {
         return aiRes.text.trim();
     }
@@ -1261,6 +1306,7 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
     if (summaryResult) {
         if (summaryResult.ok) {
             cachePatch.summary = String(summaryResult.data || "");
+            cachePatch.summaryCacheSource = "local";
             statusMap.summary = "done";
         } else if (keepProcessingTasks.has("summary")) {
             statusMap.summary = "processing";
@@ -1273,6 +1319,7 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
     if (segmentsResult) {
         if (segmentsResult.ok) {
             cachePatch.segments = Array.isArray(segmentsResult.data) ? segmentsResult.data : [];
+            cachePatch.segmentsCacheSource = "local";
             statusMap.segments = "done";
         } else if (keepProcessingTasks.has("segments")) {
             statusMap.segments = "processing";
@@ -1334,6 +1381,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 const summaryText = String(aiRes.text || "").trim();
                 if (!summaryText) throw new Error("总结生成为空");
                 await appendMetrics(bvid, null, "summary", aiRes.metrics);
+                await reportFeatureUsage("summary", bvid, settings, aiRes.metrics);
                 results.summary = { ok: true, data: summaryText, error: null };
                 await applySummarySegmentsResults(tabId, bvid, { summary: results.summary });
                 logAI.info("ai_request_success", { bvid, task: "summary", provider: settings.provider, mode: "quality", latency_ms: aiRes.metrics?.latencyMs || 0, tokens: aiRes.metrics?.tokens || 0 });
@@ -1358,6 +1406,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 const normalized = normalizeSegments(parsed);
                 if (!normalized.length) throw new Error("分段 JSON 解析失败");
                 await appendMetrics(bvid, null, "segments", aiRes.metrics);
+                await reportFeatureUsage("segments", bvid, settings, aiRes.metrics);
                 results.segments = { ok: true, data: normalized, error: null };
                 await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
                 logAI.info("ai_request_success", { bvid, task: "segments", provider: settings.provider, mode: "quality", latency_ms: aiRes.metrics?.latencyMs || 0, tokens: aiRes.metrics?.tokens || 0 });
@@ -1501,6 +1550,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
         }
         await appendMetrics(bvid, null, "summary", aiRes.metrics);
         await appendMetrics(bvid, null, "segments", aiRes.metrics);
+        await reportFeatureUsage("summary_segments_merged", bvid, settings, aiRes.metrics);
         await applySummarySegmentsResults(tabId, bvid, results);
         logAI.info("ai_request_success", { bvid, task: "summary_segments_merged", provider: settings.provider, mode: "efficiency", latency_ms: aiRes.metrics?.latencyMs || 0, tokens: aiRes.metrics?.tokens || 0 });
     } catch (error) {
@@ -1938,6 +1988,11 @@ function normalizeSettings(settings) {
     const customProtocol = String(base.customProtocol || "openai").toLowerCase() === "claude" ? "claude" : "openai";
     const groqApiKey = String(base.groqApiKey || "").trim();
     const groqModel = String(base.groqModel || DEFAULT_SETTINGS.groqModel || "whisper-large-v3-turbo").trim() || "whisper-large-v3-turbo";
+    const supabaseUrl = String(base.supabaseUrl || DEFAULT_SETTINGS.supabaseUrl || "").trim().replace(/\/+$/, "");
+    const supabaseAnonKey = String(base.supabaseAnonKey || DEFAULT_SETTINGS.supabaseAnonKey || "").trim();
+    const supabaseVideoCacheTable = String(base.supabaseVideoCacheTable || DEFAULT_SETTINGS.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE).trim() || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE;
+    const supabaseUsageRpcName = String(base.supabaseUsageRpcName || DEFAULT_SETTINGS.supabaseUsageRpcName || SUPABASE_DEFAULT_USAGE_RPC).trim() || SUPABASE_DEFAULT_USAGE_RPC;
+    const supabaseUsageStatsTable = String(base.supabaseUsageStatsTable || DEFAULT_SETTINGS.supabaseUsageStatsTable || SUPABASE_DEFAULT_USAGE_STATS_TABLE).trim() || SUPABASE_DEFAULT_USAGE_STATS_TABLE;
     const prefModeRaw = String(base.prefMode || DEFAULT_SETTINGS.prefMode || "quality").toLowerCase();
     const prefMode = prefModeRaw === "efficiency" ? "efficiency" : "quality";
     return {
@@ -1947,8 +2002,305 @@ function normalizeSettings(settings) {
         customProtocol,
         groqApiKey,
         groqModel,
+        supabaseUrl,
+        supabaseAnonKey,
+        supabaseVideoCacheTable,
+        supabaseUsageRpcName,
+        supabaseUsageStatsTable,
         prefMode
     };
+}
+
+function hasTaskResult(cache, task) {
+    if (!cache || typeof cache !== "object") return false;
+    if (task === "summary") return !!String(cache.summary || "").trim();
+    if (task === "segments") return Array.isArray(cache.segments) && cache.segments.length > 0;
+    if (task === "rumors") return !!normalizeRumors(cache.rumors);
+    return false;
+}
+
+function isSupabaseEnabled(settings) {
+    return !!String(settings?.supabaseUrl || "").trim() && !!String(settings?.supabaseAnonKey || "").trim();
+}
+
+function buildSupabaseHeaders(settings, extra = {}) {
+    const apiKey = String(settings?.supabaseAnonKey || "").trim();
+    return {
+        apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
+        ...extra
+    };
+}
+
+function getTaskModelName(settings) {
+    const configured = String(settings?.model || "").trim();
+    if (configured) return configured;
+    const provider = PROVIDERS[settings?.provider] || {};
+    return String(provider.model || "").trim();
+}
+
+function buildCloudSelectColumns(tasks) {
+    const columns = new Set(["bvid", "updated_at"]);
+    (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        (CLOUD_TASK_FIELD_MAP[task] || []).forEach((field) => columns.add(field));
+    });
+    return [...columns];
+}
+
+function buildCloudPatchFromRow(row, tasks) {
+    const patch = {
+        cloudUpdatedAt: String(row?.updated_at || "").trim()
+    };
+    (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        if (task === "summary") {
+            const summary = String(row?.summary || "").trim();
+            if (!summary) return;
+            patch.summary = summary;
+            patch.summaryModel = String(row?.summary_model || "");
+            patch.summaryUpvotes = Number(row?.summary_upvotes || 0);
+            patch.summaryDownvotes = Number(row?.summary_downvotes || 0);
+            return;
+        }
+        if (task === "segments") {
+            const segments = normalizeSegments(row?.segments);
+            if (!segments.length) return;
+            patch.segments = segments;
+            patch.segmentsModel = String(row?.segments_model || "");
+            patch.segmentsUpvotes = Number(row?.segments_upvotes || 0);
+            patch.segmentsDownvotes = Number(row?.segments_downvotes || 0);
+            return;
+        }
+        if (task === "rumors") {
+            const rumors = normalizeRumors(row?.rumors);
+            if (!rumors) return;
+            patch.rumors = rumors;
+            patch.rumorsModel = String(row?.rumors_model || "");
+            patch.rumorsUpvotes = Number(row?.rumors_upvotes || 0);
+            patch.rumorsDownvotes = Number(row?.rumors_downvotes || 0);
+        }
+    });
+    return patch;
+}
+
+function buildTaskSourcePatch(tasks, source) {
+    const patch = {};
+    (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        if (task === "summary") patch.summaryCacheSource = source;
+        if (task === "segments") patch.segmentsCacheSource = source;
+        if (task === "rumors") patch.rumorsCacheSource = source;
+    });
+    return patch;
+}
+
+async function fetchCloudVideoCacheRow(bvid, tasks, settings) {
+    if (!isSupabaseEnabled(settings)) return null;
+    const normalizedBvid = normalizeBvid(bvid);
+    if (!normalizedBvid) return null;
+    const url = new URL(`${settings.supabaseUrl}/rest/v1/${encodeURIComponent(settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE)}`);
+    url.searchParams.set("select", buildCloudSelectColumns(tasks).join(","));
+    url.searchParams.set("bvid", `eq.${normalizedBvid}`);
+    url.searchParams.set("limit", "1");
+    const res = await fetch(url.toString(), {
+        method: "GET",
+        headers: buildSupabaseHeaders(settings, { Accept: "application/json" })
+    });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`Supabase 查询失败 ${res.status}: ${text}`);
+    }
+    const rows = await res.json();
+    return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+async function hydrateCloudCacheIfNeeded(bvid, tasks, settings) {
+    const current = await getCache(bvid);
+    if (!isSupabaseEnabled(settings)) return { hydratedTasks: [], cache: current };
+    const missingTasks = (Array.isArray(tasks) ? tasks : []).filter((task) => !hasTaskResult(current, task));
+    if (!missingTasks.length) return { hydratedTasks: [], cache: current };
+    try {
+        const row = await fetchCloudVideoCacheRow(bvid, missingTasks, settings);
+        if (!row) return { hydratedTasks: [], cache: current };
+        const patch = buildCloudPatchFromRow(row, missingTasks);
+        const hydratedTasks = missingTasks.filter((task) => hasTaskResult(patch, task));
+        if (!hydratedTasks.length) return { hydratedTasks: [], cache: current };
+        await mergeCacheByBvid(bvid, {
+            ...patch,
+            ...buildTaskSourcePatch(hydratedTasks, "cloud"),
+            cloudSyncedAt: Date.now(),
+            updatedAt: Date.now()
+        });
+        logCache.info("cloud_cache_backfill", { bvid: normalizeBvid(bvid), tasks: hydratedTasks });
+        return { hydratedTasks, cache: await getCache(bvid) };
+    } catch (error) {
+        logBackground.error("cloud_cache_fetch_fail", {
+            bvid: normalizeBvid(bvid),
+            tasks: missingTasks,
+            error: error.message || "cloud fetch failed"
+        });
+        return { hydratedTasks: [], cache: current };
+    }
+}
+
+function buildSupabaseVideoPatch(bvid, settings, patch) {
+    const row = { bvid: normalizeBvid(bvid), updated_at: new Date().toISOString() };
+    const modelName = getTaskModelName(settings);
+    if (Object.prototype.hasOwnProperty.call(patch, "summary")) {
+        row.summary = String(patch.summary || "");
+        row.summary_model = modelName;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "segments")) {
+        row.segments = Array.isArray(patch.segments) ? patch.segments : [];
+        row.segments_model = modelName;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "rumors")) {
+        row.rumors = patch.rumors && typeof patch.rumors === "object" ? patch.rumors : null;
+        row.rumors_model = modelName;
+    }
+    return row;
+}
+
+async function persistCloudFeaturePatch(bvid, settings, patch) {
+    if (!isSupabaseEnabled(settings)) return false;
+    const row = buildSupabaseVideoPatch(bvid, settings, patch);
+    const meaningfulKeys = Object.keys(row).filter((key) => key !== "bvid" && key !== "updated_at");
+    if (!row.bvid || !meaningfulKeys.length) return false;
+    try {
+        const url = `${settings.supabaseUrl}/rest/v1/${encodeURIComponent(settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE)}?on_conflict=bvid`;
+        const res = await fetch(url, {
+            method: "POST",
+            headers: buildSupabaseHeaders(settings, {
+                "Content-Type": "application/json",
+                Prefer: "resolution=merge-duplicates,return=minimal"
+            }),
+            body: JSON.stringify(row)
+        });
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Supabase 写入失败 ${res.status}: ${text}`);
+        }
+        logCache.info("cloud_cache_write", { bvid: row.bvid, fields: meaningfulKeys });
+        return true;
+    } catch (error) {
+        logBackground.error("cloud_cache_write_fail", {
+            bvid: row.bvid,
+            fields: meaningfulKeys,
+            error: error.message || "cloud write failed"
+        });
+        return false;
+    }
+}
+
+async function getOrCreateAnonymousUserId() {
+    const { anonymousUserId } = await chrome.storage.local.get(["anonymousUserId"]);
+    const existing = String(anonymousUserId || "").trim();
+    if (existing) return existing;
+    const created = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    await chrome.storage.local.set({ anonymousUserId: created });
+    return created;
+}
+
+async function updateUsageStats(featureName, tokenCount, settings) {
+    if (!isSupabaseEnabled(settings)) return false;
+    const normalizedFeature = String(featureName || "").trim();
+    if (!normalizedFeature) return false;
+    const tableName = String(settings.supabaseUsageStatsTable || SUPABASE_DEFAULT_USAGE_STATS_TABLE).trim() || SUPABASE_DEFAULT_USAGE_STATS_TABLE;
+    const table = encodeURIComponent(tableName);
+    try {
+        const queryUrl = new URL(`${settings.supabaseUrl}/rest/v1/${table}`);
+        queryUrl.searchParams.set("select", "feature_name,usage_count,total_tokens");
+        queryUrl.searchParams.set("feature_name", `eq.${normalizedFeature}`);
+        queryUrl.searchParams.set("limit", "1");
+        const queryRes = await fetch(queryUrl.toString(), {
+            method: "GET",
+            headers: buildSupabaseHeaders(settings, { Accept: "application/json" })
+        });
+        if (!queryRes.ok) {
+            const text = await queryRes.text();
+            throw new Error(`usage_stats 查询失败 ${queryRes.status}: ${text}`);
+        }
+        const rows = await queryRes.json();
+        const current = Array.isArray(rows) && rows.length ? rows[0] : null;
+        const nextRow = {
+            feature_name: normalizedFeature,
+            usage_count: Math.max(0, Number(current?.usage_count || 0)) + 1,
+            total_tokens: Math.max(0, Number(current?.total_tokens || 0)) + tokenCount,
+            updated_at: new Date().toISOString()
+        };
+        const writeMethod = current ? "PATCH" : "POST";
+        const writeUrl = current
+            ? `${settings.supabaseUrl}/rest/v1/${table}?feature_name=eq.${normalizedFeature}`
+            : `${settings.supabaseUrl}/rest/v1/${table}`;
+        const writeRes = await fetch(writeUrl, {
+            method: writeMethod,
+            headers: buildSupabaseHeaders(settings, {
+                "Content-Type": "application/json",
+                Prefer: "return=minimal"
+            }),
+            body: JSON.stringify(current ? {
+                usage_count: nextRow.usage_count,
+                total_tokens: nextRow.total_tokens,
+                updated_at: nextRow.updated_at
+            } : nextRow)
+        });
+        if (!writeRes.ok) {
+            const text = await writeRes.text();
+            throw new Error(`usage_stats 写入失败 ${writeRes.status}: ${text}`);
+        }
+        logAI.info("usage_stats_updated", {
+            feature: normalizedFeature,
+            usage_count: nextRow.usage_count,
+            total_tokens: nextRow.total_tokens
+        });
+        return true;
+    } catch (error) {
+        logBackground.error("usage_stats_update_fail", {
+            feature: normalizedFeature,
+            table: tableName,
+            error: error.message || "usage stats update failed"
+        });
+        return false;
+    }
+}
+
+async function reportFeatureUsage(featureName, bvid, settings, metrics) {
+    if (!isSupabaseEnabled(settings)) return false;
+    const tokenCount = Number(metrics?.tokens || 0);
+    if (!tokenCount) return false;
+    try {
+        const userId = await getOrCreateAnonymousUserId();
+        const url = `${settings.supabaseUrl}/rest/v1/rpc/${encodeURIComponent(settings.supabaseUsageRpcName || SUPABASE_DEFAULT_USAGE_RPC)}`;
+        const res = await fetch(url, {
+            method: "POST",
+            headers: buildSupabaseHeaders(settings, {
+                "Content-Type": "application/json",
+                Accept: "application/json"
+            }),
+            body: JSON.stringify({
+                f_name: String(featureName || "").trim(),
+                u_id: userId,
+                t_count: tokenCount,
+                v_id: normalizeBvid(bvid)
+            })
+        });
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`Supabase RPC 失败 ${res.status}: ${text}`);
+        }
+        await updateUsageStats(featureName, tokenCount, settings);
+        logAI.info("usage_reported", {
+            feature: String(featureName || ""),
+            bvid: normalizeBvid(bvid),
+            tokens: tokenCount
+        });
+        return true;
+    } catch (error) {
+        logBackground.error("usage_report_fail", {
+            feature: String(featureName || ""),
+            bvid: normalizeBvid(bvid),
+            error: error.message || "usage report failed"
+        });
+        return false;
+    }
 }
 
 function normalizePromptSettings(raw) {

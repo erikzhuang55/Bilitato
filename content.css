@@ -277,6 +277,7 @@ body::-webkit-scrollbar {
     justify-content: space-between;
     padding: 0;
     height: 36px;
+    overflow: visible;
     border-bottom: 0px solid rgba(0,0,0,0.06);
     flex-shrink: 0;
 }
@@ -287,6 +288,8 @@ body::-webkit-scrollbar {
     color: #222;
     margin: 0;
     display: flex;
+    overflow: visible;
+    position: relative;
     align-items: center;
 }
 
@@ -294,6 +297,8 @@ body::-webkit-scrollbar {
     display: flex;
     align-items: center;
     margin-left: 6px;
+    overflow: visible;
+    position: relative;
 }
 
 .action-container {
@@ -1623,6 +1628,46 @@ input[type="range"]:active::-webkit-slider-thumb {
     height: 16px;
     font-weight: normal;
     line-height: 1;
+}
+
+.cloud-cache-tag {
+    position: relative;
+    cursor: help;
+}
+
+.cloud-cache-tag:hover::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: auto;
+    transform: translateY(8px);
+    background: rgba(0, 0, 0, 0.85);
+    color: #fff;
+    padding: 6px 10px;
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    width: max-content;
+    max-width: 240px;
+    z-index: 99999;
+    pointer-events: none;
+}
+
+.cloud-cache-tag:hover::before {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 10px;
+    right: auto;
+    transform: translateY(0);
+    border-width: 4px;
+    border-style: solid;
+    border-color: transparent transparent rgba(0, 0, 0, 0.85) transparent;
+    z-index: 100000;
+    pointer-events: none;
 }
 
 .claim-list {

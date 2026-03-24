@@ -280,6 +280,7 @@ async function onInjectMessage(event) {
         // Notify background to abort ongoing transcription for previous BVID
         chrome.runtime.sendMessage({ action: "ABORT_TRANSCRIPTION", bvid: appState.transcriptionRequestedBvid }).catch(() => {});
         resetAllState();
+        waitForAlignedPlayInfo(normalizeBvidCase(getBvidFromUrl(location.href) || "")).catch(() => {});
         return;
     }
     if (msgType !== "BILI_SUBTITLE_DATA") return;
@@ -4055,7 +4056,11 @@ async function startTranscriptionFromCapsule() {
     updateProgress(10, progressTaskId);
     renderSubtitleTimelinePanel(document.getElementById("panel-body"));
     try {
-        const res = await chrome.runtime.sendMessage({ action: "GET_AUDIO_URL", payload: meta });
+        const audioUrl = appState.playInfo?.audio?.[0]?.url || "";
+        const res = await chrome.runtime.sendMessage({
+            action: "GET_AUDIO_URL",
+            payload: { ...meta, audioUrl }
+        });
         if (!res?.ok) throw new Error(res?.error || "Groq 转录失败");
     } catch (error) {
         appState.transcriptionRequestedBvid = "";
@@ -4097,7 +4102,11 @@ async function handleRegenerateGroqSubtitle() {
     };
     try {
         await chrome.runtime.sendMessage({ action: "CLEAR_SUBTITLE_CACHE", bvid: injectBvid });
-        const res = await chrome.runtime.sendMessage({ action: "GET_AUDIO_URL", payload });
+        const audioUrl = appState.playInfo?.audio?.[0]?.url || "";
+        const res = await chrome.runtime.sendMessage({
+            action: "GET_AUDIO_URL",
+            payload: { ...payload, audioUrl }
+        });
         if (!res?.ok) throw new Error(res?.error || "重新生成失败");
     } catch (error) {
         appState.transcriptionRunning = false;
@@ -4468,6 +4477,76 @@ function clearCCListImmediately() {
     renderCC(container, []);
 }
 
+function normalizeIncomingPlayInfo(info) {
+    if (!info || typeof info !== "object") return null;
+    const next = {
+        ...info,
+        video: Array.isArray(info.video) ? info.video : [],
+        audio: Array.isArray(info.audio) ? info.audio : []
+    };
+
+    if (!next.audio.length) {
+        const dashAudio = Array.isArray(info?.dash?.audio) ? info.dash.audio : [];
+        next.audio = dashAudio
+            .map((item) => ({
+                id: item?.id || 0,
+                desc: item?.id ? `Audio ${item.id}` : "Audio",
+                url: item?.url || item?.baseUrl || item?.base_url || "",
+                bandwidth: Number(item?.bandwidth || 0)
+            }))
+            .filter((item) => item.url);
+    }
+
+    return next;
+}
+
+async function requestFromInject(timeoutMs = 500) {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            window.removeEventListener("message", onMessage, false);
+            resolve(null);
+        }, Math.max(50, Number(timeoutMs) || 500));
+
+        const onMessage = (event) => {
+            if (event.source !== window) return;
+            if (String(event?.data?.type || "") !== "SEND_PLAY_INFO") return;
+            clearTimeout(timer);
+            window.removeEventListener("message", onMessage, false);
+            resolve(event.data?.data || null);
+        };
+
+        window.addEventListener("message", onMessage, false);
+        window.postMessage({ type: "GET_PLAY_INFO" }, "*");
+    });
+}
+
+async function waitForAlignedPlayInfo(targetBvid) {
+    const expectedBvid = normalizeBvidCase(targetBvid || "");
+    if (!expectedBvid) return null;
+    logContent.info("playinfo_received", { source: "route_wait_start", bvid: expectedBvid });
+
+    let freshData = null;
+    for (let i = 0; i < 30; i++) {
+        const info = await requestFromInject(500);
+        const infoBvid = normalizeBvidCase(info?._bvid || "");
+        if (info && infoBvid === expectedBvid) {
+            freshData = info;
+            break;
+        }
+        await sleep(200);
+    }
+
+    if (freshData && normalizeBvidCase(getBvidFromUrl(location.href) || "") === expectedBvid) {
+        appState.playInfo = normalizeIncomingPlayInfo(freshData);
+        appState.playInfoUpdatedAt = Date.now();
+        logContent.info("playinfo_received", { source: "route_wait_ready", bvid: expectedBvid });
+        return appState.playInfo;
+    }
+
+    logContent.warn("playinfo_received", { source: "route_wait_timeout", bvid: expectedBvid });
+    return null;
+}
+
 function scheduleSubtitleFallbackWatchdog(source) {
     if (appState.subtitleFallbackTimer) {
         clearTimeout(appState.subtitleFallbackTimer);
@@ -4544,7 +4623,34 @@ async function syncActiveCacheByBvid(expectedBvid) {
     } catch (_) {}
 }
 
-async function syncCacheFromBackground(bvid) {
+function hasSubtitleCacheForBvid(targetBvid) {
+    const target = normalizeBvidCase(targetBvid || "");
+    const cacheBvid = normalizeBvidCase(appState.cache?.bvid || "");
+    return !!(target && cacheBvid === target && Array.isArray(appState.cache?.rawSubtitle) && appState.cache.rawSubtitle.length);
+}
+
+function reconcileTranscriptionState(targetBvid) {
+    const target = normalizeBvidCase(targetBvid || resolveCurrentBvid() || "");
+    const requestBvid = normalizeBvidCase(appState.transcriptionRequestedBvid || "");
+    const subtitleSource = String(appState.tabState?.subtitleSource || "");
+    const progress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? appState.transcriptionProgress ?? 0)));
+    const hasSubtitle = hasSubtitleCacheForBvid(target);
+    const sameTask = !!(target && requestBvid && target === requestBvid);
+
+    if (hasSubtitle) {
+        appState.transcriptionRunning = false;
+        appState.isTranscribing = false;
+        appState.transcriptionRequestedBvid = "";
+        appState.transcriptionCapsuleVisible = false;
+        appState.transcriptionCapsuleMeta = null;
+        return;
+    }
+
+    const shouldKeepRunning = appState.isTranscribing || (sameTask && subtitleSource === "groq" && progress > 0 && progress < 100);
+    appState.transcriptionRunning = shouldKeepRunning;
+}
+
+async function syncCacheFromBackground(bvid, options = {}) {
     const target = normalizeBvidCase(bvid || getBvidFromUrl(location.href) || "");
     if (!target) return;
     const now = Date.now();
@@ -4560,20 +4666,40 @@ async function syncCacheFromBackground(bvid) {
         if (routeBvid && routeBvid !== target) return;
         const cache = res.cache || null;
         if (!cache || normalizeBvidCase(cache?.bvid || "") !== target) {
-            appState.cache = null;
+            if (options.preserveCacheOnMiss !== true) {
+                appState.cache = null;
+            }
+            reconcileTranscriptionState(target);
             appState.isStateDirty = false;
             renderContent();
-            return;
+            return false;
         }
         appState.cache = cache;
         if (res.tabState) appState.tabState = res.tabState;
         appState.subtitleCapturedBvid = target;
-        appState.transcriptionCapsuleVisible = false;
-        appState.transcriptionCapsuleMeta = null;
-        appState.transcriptionRunning = false;
+        reconcileTranscriptionState(target);
         appState.isStateDirty = false;
         renderContent();
+        return true;
     } catch (_) {}
+    return false;
+}
+
+async function syncCacheFromBackgroundWithRetry(bvid, attempts = 6, delayMs = 250) {
+    const target = normalizeBvidCase(bvid || "");
+    if (!target) return false;
+    for (let i = 0; i < attempts; i++) {
+        const ok = await syncCacheFromBackground(target, { preserveCacheOnMiss: true });
+        if (ok && hasSubtitleCacheForBvid(target)) {
+            return true;
+        }
+        if (i < attempts - 1) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+    }
+    reconcileTranscriptionState(target);
+    renderContent();
+    return false;
 }
 
 function onBackgroundMessage(message) {
@@ -4590,6 +4716,10 @@ function onBackgroundMessage(message) {
         
         if (text) {
             appState.transcribeStatusText = text;
+        }
+        if (message?.stage !== "done" && message?.level !== "error") {
+            appState.transcriptionRunning = true;
+            appState.isTranscribing = true;
         }
 
         if (Number.isFinite(Number(message?.progress))) {
@@ -4655,7 +4785,8 @@ function onBackgroundMessage(message) {
             appState.isStateDirty = true;
             updateProgress(100, progressTaskId);
             
-            syncCacheFromBackground(currentBvid).then(() => renderContent());
+            const targetBvid = normalizeBvidCase(message?.bvid || currentBvid || "");
+            syncCacheFromBackgroundWithRetry(targetBvid).then(() => renderContent());
             renderSubtitleTimelinePanel(document.getElementById("panel-body"));
         }
         if (message?.stage !== "done" && message?.level !== "error") {
@@ -4684,10 +4815,7 @@ function onBackgroundMessage(message) {
     renderNav();
     appState.cache = cache && (!routeBvid || String(cache?.bvid || "").trim() === routeBvid) ? cache : null;
     if (cache?.rawSubtitle?.length) {
-        appState.transcriptionRequestedBvid = "";
-        appState.transcriptionRunning = false;
-        appState.transcriptionCapsuleVisible = false;
-        appState.transcriptionCapsuleMeta = null;
+        reconcileTranscriptionState(payloadBvid || routeBvid);
     }
     appState.isStateDirty = false;
     renderContent();
@@ -5261,15 +5389,33 @@ function renderQualityList(menuContainer, type) {
     }
 }
 
-async function refreshPlayInfoNow(timeoutMs = 1200) {
-    const startAt = Number(appState.playInfoUpdatedAt || 0);
-    window.postMessage({ type: "REFRESH_PLAYINFO" }, "*");
-    const startWait = Date.now();
-    while (Date.now() - startWait < timeoutMs) {
-        if (Number(appState.playInfoUpdatedAt || 0) > startAt && appState.playInfo) return true;
-        await sleep(60);
+async function refreshPlayInfoNow(timeoutMs = 2000) {
+    const pageBvid = window.location.href.match(/BV[a-zA-Z0-9]{10}/)?.[0] || "";
+
+    if (!appState.playInfo || appState.playInfo._bvid !== pageBvid) {
+        appState.playInfo = null;
+        window.postMessage({ type: "PLAYER_WAKE_UP" }, "*");
+        window.postMessage({ type: "REFRESH_PLAYINFO" }, "*");
+
+        const startWait = Date.now();
+        while (Date.now() - startWait < timeoutMs && (!appState.playInfo || appState.playInfo._bvid !== pageBvid)) {
+            const info = await requestFromInject(400);
+            if (info && normalizeBvidCase(info?._bvid || "") === normalizeBvidCase(pageBvid)) {
+                appState.playInfo = normalizeIncomingPlayInfo(info);
+                appState.playInfoUpdatedAt = Date.now();
+                break;
+            }
+            await sleep(200);
+        }
     }
-    return false;
+
+    if (appState.playInfo && appState.playInfo._bvid === pageBvid) {
+        logger.info("✅ 获取到匹配视频的 Playinfo:", pageBvid);
+        return appState.playInfo;
+    }
+
+    logger.error("❌ 无法获取到匹配当前 BVID 的音频流");
+    return null;
 }
 
 function closeExportMenu() {

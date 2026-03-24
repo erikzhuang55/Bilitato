@@ -15,6 +15,7 @@
     "scripting",
     "storage",
     "tabs",
+    "sidePanel",
     "declarativeNetRequest",
     "downloads"
   ],

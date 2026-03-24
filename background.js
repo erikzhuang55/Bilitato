@@ -177,19 +177,30 @@ const tabStateCache = new Map();
 const tabStateWriteTimers = new Map();
 const cacheMemory = new Map();
 let currentDebugMode = false;
-const logBackground = globalThis.AIPluginLogger.create("background", {
+const fallbackLoggerFactory = {
+    create() {
+        return {
+            info() {},
+            warn() {},
+            error() {},
+            debug() {}
+        };
+    }
+};
+const loggerFactory = globalThis.AIPluginLogger?.create ? globalThis.AIPluginLogger : fallbackLoggerFactory;
+const logBackground = loggerFactory.create("background", {
     getDebugMode: () => currentDebugMode,
     onEntry: (entry) => {
         pushGlobalLog(entry);
     }
 });
-const logAI = globalThis.AIPluginLogger.create("ai", {
+const logAI = loggerFactory.create("ai", {
     getDebugMode: () => currentDebugMode,
     onEntry: (entry) => {
         pushGlobalLog(entry);
     }
 });
-const logCache = globalThis.AIPluginLogger.create("cache", {
+const logCache = loggerFactory.create("cache", {
     getDebugMode: () => currentDebugMode,
     onEntry: (entry) => {
         pushGlobalLog(entry);
@@ -572,7 +583,7 @@ class ContentProvider {
                 updatedAt: Date.now()
             });
             await notifyTranscribeStatus(tabId, { stage: "start", level: "info", text: "检测到无字幕，正在转录音轨...", progress: 5, bvid });
-            const media = await this.extractAudioSourceFromTab(tabId);
+            const media = await this.extractAudioSourceFromTab(tabId, payload);
             if (!media?.url) throw new Error("未提取到音轨地址，可能是付费视频、CDN 限制或页面未完成加载");
             await updateTabState(tabId, { transcriptionProgress: 20, updatedAt: Date.now() });
             await notifyTranscribeStatus(tabId, { stage: "download", level: "info", text: "正在下载音轨...", progress: 20, bvid });
@@ -633,7 +644,13 @@ class ContentProvider {
         }
     }
 
-    static async extractAudioSourceFromTab(tabId) {
+    static async extractAudioSourceFromTab(tabId, payload) {
+        // 优先使用 content.js 传来的最新音频地址（已由 XHR hook 更新，保证是当前视频）
+        if (payload?.audioUrl) {
+            const title = String(payload.title || "").trim();
+            return { url: payload.audioUrl, title };
+        }
+        // 降级：executeScript 读 __playinfo__（兜底，SPA 下可能是旧视频数据）
         const results = await chrome.scripting.executeScript({
             target: { tabId },
             world: "MAIN",

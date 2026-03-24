@@ -20,6 +20,7 @@ const logger = {
     let autoTriggerStarted = false;
     let maskNode = null;
     let capturedBvid = "";
+    let latestPlayinfo = null; // 存储 XHR 拦截到的最新 dash 数据
     let routeMonitorTimer = null;
     let silentDeadlineTs = Date.now() + 2000;
     let subtitleStringCache = [];
@@ -37,7 +38,14 @@ const logger = {
     emitPlayInfo(); // Initial emission
 
     window.addEventListener("message", (event) => {
-        if (event.data && (event.data.type === "RE_EMIT_PLAYINFO" || event.data.type === "REFRESH_PLAYINFO")) {
+        if (event.data?.type === "GET_PLAY_INFO") {
+            window.postMessage({
+                type: "SEND_PLAY_INFO",
+                data: latestPlayinfo
+            }, "*");
+            return;
+        }
+        if (event.data && (event.data.type === "RE_EMIT_PLAYINFO" || event.data.type === "REFRESH_PLAYINFO" || event.data.type === "PLAYER_WAKE_UP")) {
             emitPlayInfo();
         }
     });
@@ -56,16 +64,47 @@ const logger = {
     };
 
     XMLHttpRequest.prototype.open = function (method, url) {
+        const rawUrl = String(url || "");
+        if (rawUrl.includes(".m4s") || rawUrl.includes("upos")) {
+            const currentBvid = window.location.href.match(/BV[a-zA-Z0-9]{10}/)?.[0] || "";
+            latestPlayinfo = {
+                dash: { audio: [{ baseUrl: rawUrl }] },
+                _bvid: currentBvid,
+                _ts: Date.now()
+            };
+        }
         this.__biliUrl = url;
         return originalOpen.apply(this, arguments);
     };
 
     XMLHttpRequest.prototype.send = function () {
-        if (isSubtitleRequest(this.__biliUrl || "")) {
-            emitLog("subtitle_detected", { source: "xhr", url: this.__biliUrl || "" });
+        const url = this.__biliUrl || "";
+
+        if (isSubtitleRequest(url)) {
+            emitLog("subtitle_detected", { source: "xhr", url });
             scheduleAutoTriggerFlow("xhr_detected");
             this.addEventListener("load", () => {
-                emitSubtitlePayload(this.responseText, this.__biliUrl || "");
+                emitSubtitlePayload(this.responseText, url);
+            });
+        }
+
+        if (isPlayurlRequest(url)) {
+            this.addEventListener("load", () => {
+                try {
+                    const dashData = JSON.parse(this.responseText);
+                    const playData = dashData?.data || dashData?.result || dashData;
+                    const dash = playData?.dash;
+                    if (dash) {
+                        const currentBvid = window.location.href.match(/BV[a-zA-Z0-9]{10}/)?.[0] || "";
+                        latestPlayinfo = {
+                            ...playData,
+                            _bvid: currentBvid,
+                            _ts: Date.now()
+                        };
+                        logger.info("Playinfo 已捕获并成功绑定 BVID:", currentBvid);
+                        emitLog("playinfo_updated", { source: "xhr_playurl", url, bvid: currentBvid });
+                    }
+                } catch (_) {}
             });
         }
         return originalSend.apply(this, arguments);
@@ -113,6 +152,11 @@ const logger = {
         if (/\/aisubtitle\//i.test(path)) return true;
         if (path.endsWith(".json") && path.includes("subtitle")) return true;
         return false;
+    }
+
+    function isPlayurlRequest(url) {
+        if (!url) return false;
+        return /\/x\/player\/(wbi\/)?playurl|\/pgc\/player\/web\/playurl/.test(url);
     }
 
     function emitLog(event, detail) {
@@ -246,6 +290,7 @@ const logger = {
         autoTriggerStarted = false;
         capturedBvid = String(nextBvid || "").trim();
         subtitleStringCache = [];
+        latestPlayinfo = null; // 切换视频时清空，防止旧视频数据残留
         silentDeadlineTs = Date.now() + 2000;
         stopAutoTriggerFlow();
         emitLog("subtitle_route_reset", { bvid: capturedBvid, reason });
@@ -364,11 +409,20 @@ const logger = {
         }
     }).observe(document, {subtree: true, childList: true});
 
+    // 路由守卫：防止 SPA 切换时旧数据残留
+    let lastLocation = window.location.href;
+    setInterval(() => {
+        if (window.location.href !== lastLocation) {
+            lastLocation = window.location.href;
+            latestPlayinfo = null;
+            console.log("%c[Inject] 检测到跳转，旧内存已物理抹除，等待新视频信号...", "color: white; background: #e67e22;");
+        }
+    }, 300);
+
     function resolvePlayInfo() {
         try {
-            const playInfo = window.__playinfo__;
-            if (!playInfo || !playInfo.data) return null;
-            const data = playInfo.data;
+            const data = latestPlayinfo || window.__playinfo__?.data || null;
+            if (!data) return null;
             
             // Collect all candidates
             let candidates = [];
@@ -477,7 +531,12 @@ const logger = {
                 audio.sort((a, b) => b.bandwidth - a.bandwidth);
             }
             
-            return { video: resultVideo, audio };
+            return {
+                video: resultVideo,
+                audio,
+                _bvid: String(data._bvid || getBvidFromUrl(location.href) || "").trim(),
+                _ts: Number(data._ts || 0)
+            };
         } catch (e) {
             window.postMessage({ type: "BILI_INJECT_LOG", event: "playinfo_error", detail: { error: e.message, stack: e.stack } }, "*");
             return null;

@@ -611,7 +611,14 @@ class ContentProvider {
 
             let transcription;
             try {
-                transcription = await this.requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid);
+                transcription = await this.requestGroqTranscription(
+                    audioFile,
+                    groqApiKey,
+                    groqModel,
+                    tabId,
+                    bvid,
+                    title || media.title || ""
+                );
             } finally {
                 clearInterval(progressTimer);
             }
@@ -722,12 +729,12 @@ class ContentProvider {
         return blob;
     }
 
-    static async requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid = "") {
+    static async requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid = "", videoTitle = "") {
         const formData = new FormData();
         formData.append("file", audioFile);
         formData.append("model", groqModel);
         formData.append("response_format", "verbose_json");
-        formData.append("prompt", "请输出带时间戳的中文字幕，尽量保留原句语义与标点。");
+        formData.append("prompt", buildGroqTranscriptionPrompt(videoTitle));
         formData.append("timestamp_granularities[]", "segment");
         const response = await fetch(GROQ_AUDIO_TRANSCRIBE_URL, {
             method: "POST",
@@ -838,6 +845,30 @@ function buildGroqQuotaLine(quota) {
     const tok = Number.isFinite(quota.remainingTokens) ? quota.remainingTokens : 0;
     const reset = Number.isFinite(quota.resetTokensSec) && quota.resetTokensSec > 0 ? `，Token 重置约 ${formatSecondsZh(quota.resetTokensSec)}` : "";
     return `剩余配额: ${req} 次 / ${tok} tokens${reset}`;
+}
+
+function buildGroqTranscriptionPrompt(videoTitle = "") {
+    const normalizedTitle = String(videoTitle || "").trim() || "未知标题";
+    return `
+只转写音频里真实说出的中文内容，并输出带时间戳的中文字幕。
+
+已知视频标题：
+《${normalizedTitle}》
+
+转写要求：
+1. 标题可作为识别上下文，用于辅助判断视频主题，以及纠正字幕中可能出现的专有名词错误。
+2. 如果音频中出现的人名、地名、品牌名、作品名、游戏名、动漫名、机构名、产品名、技术术语，与标题中的词语或其高相关词明显一致，应优先采用正确写法。
+3. 只在“明显是同音/近音/口音导致的误识别”时才修正，例如把错误音译、错别字、近音字修正为更合理的专有名词。
+4. 如果无法确定，不要强行套用标题中的词；宁可保留较接近原发音的写法，也不要臆造。
+5. 禁止输出任何任务说明、提示词、前言、总结、解释、备注、标题复述，禁止写出音频中未真实说出的文字。
+6. 尽量保留原句语义、语气词与标点；听不清时可略过，不要编造内容。
+7. 输出应是正常字幕文本，不要额外添加说明。
+
+特别注意：
+- 标题只作为纠错参考，不是全文替换词库。
+- 不要因为标题中出现某个名词，就对所有相似发音都进行强行替换。
+- 不要补充音频里没说出来的信息。
+`.trim();
 }
 
 function parseRetryAfterSeconds(retryHeader, detailText) {

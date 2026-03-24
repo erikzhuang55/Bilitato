@@ -4101,9 +4101,16 @@ async function startTranscriptionFromCapsule() {
         if (!res?.ok) throw new Error(res?.error || "Groq 转录失败");
     } catch (error) {
         appState.transcriptionSuppressUntil = Date.now() + 30000;
+        if (appState.tabState && typeof appState.tabState === "object") {
+            appState.tabState = {
+                ...appState.tabState,
+                transcriptionProgress: 0
+            };
+        }
         resetTranscriptionState();
-        updateProgress(100, progressTaskId, { error: true });
+        updateProgress(0, progressTaskId, { force: true });
         showToast(error.message || "Groq 转录失败");
+        renderContent();
         renderSubtitleTimelinePanel(document.getElementById("panel-body"));
     }
 }
@@ -4147,7 +4154,14 @@ async function handleRegenerateGroqSubtitle() {
         });
         if (!res?.ok) throw new Error(res?.error || "重新生成失败");
     } catch (error) {
+        if (appState.tabState && typeof appState.tabState === "object") {
+            appState.tabState = {
+                ...appState.tabState,
+                transcriptionProgress: 0
+            };
+        }
         resetTranscriptionState();
+        updateProgress(0, `transcribe:${injectBvid || "unknown"}`, { force: true });
         showToast(error.message || "重新生成失败");
         renderContent();
     }
@@ -4757,11 +4771,27 @@ function onBackgroundMessage(message) {
         const progressTaskId = `transcribe:${normalizeBvidCase(getTranscriptionBvid() || appState.injectBvid || resolveCurrentBvid() || "unknown")}`;
         const text = String(message?.text || "").trim();
         const quotaLine = String(message?.quotaLine || "").trim();
+        const isError = message?.level === "error";
         
         if (text) {
             patchTranscriptionState({ statusText: text });
         }
-        if (message?.stage !== "done" && message?.level !== "error") {
+        if (isError) {
+            if (appState.tabState && typeof appState.tabState === "object") {
+                appState.tabState = {
+                    ...appState.tabState,
+                    transcriptionProgress: 0
+                };
+            }
+            resetTranscriptionState();
+            appState.transcriptionSuppressUntil = Date.now() + 30000;
+            appState.transcriptionCapsuleVisible = true;
+            updateProgress(0, progressTaskId, { force: true });
+            renderContent();
+            renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+            return false;
+        }
+        if (message?.stage !== "done") {
             patchTranscriptionState({
                 phase: "running",
                 bvid: normalizeBvidCase(message?.bvid || getTranscriptionBvid() || appState.injectBvid || resolveCurrentBvid() || ""),
@@ -4797,14 +4827,6 @@ function onBackgroundMessage(message) {
                 }
                 showToast(`请等待 ${remain} 秒后重试`);
             }, 1000);
-        }
-        if (message?.level === "error") {
-            resetTranscriptionState();
-            appState.transcriptionSuppressUntil = Date.now() + 30000;
-            appState.transcriptionCapsuleVisible = true;
-            updateProgress(100, progressTaskId, { error: true });
-            renderContent();
-            renderSubtitleTimelinePanel(document.getElementById("panel-body"));
         }
         if (message?.stage === "done") {
             const taskBvid = getTranscriptionBvid();

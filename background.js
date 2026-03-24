@@ -20,6 +20,7 @@ const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
 const SUPABASE_DEFAULT_USAGE_RPC = "increment_feature_usage_with_token_log";
 const SUPABASE_DEFAULT_USAGE_STATS_TABLE = "usage_stats";
 const TASK_KEYS = ["summary", "segments", "rumors"];
+const CLOUD_CACHE_KEYS = ["subtitle", ...TASK_KEYS];
 const CLOUD_TASK_FIELD_MAP = {
     summary: ["summary", "summary_model", "summary_upvotes", "summary_downvotes"],
     segments: ["segments", "segments_model", "segments_upvotes", "segments_downvotes"],
@@ -383,7 +384,7 @@ async function handleMessage(msg, sender) {
         const tabState = await getTabState(tabId);
         const settings = await getResolvedSettings();
         if (tabState?.activeBvid && msg?.skipCloud !== true) {
-            await hydrateCloudCacheIfNeeded(tabState.activeBvid, TASK_KEYS, settings);
+            await hydrateCloudCacheIfNeeded(tabState.activeBvid, CLOUD_CACHE_KEYS, settings);
         }
         const cache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
         return { tabId, tabState, cache, settings, providers: PROVIDERS };
@@ -396,14 +397,14 @@ async function handleMessage(msg, sender) {
             const bvid = normalizeBvid(tabState?.activeBvid);
             const settings = await getResolvedSettings();
             if (bvid && msg?.skipCloud !== true) {
-                await hydrateCloudCacheIfNeeded(bvid, TASK_KEYS, settings);
+                await hydrateCloudCacheIfNeeded(bvid, CLOUD_CACHE_KEYS, settings);
             }
             const cache = bvid ? await getCache(bvid) : null;
             return { bvid, cache, tabState };
         }
         const settings = await getResolvedSettings();
         if (msg?.skipCloud !== true) {
-            await hydrateCloudCacheIfNeeded(expected, TASK_KEYS, settings);
+            await hydrateCloudCacheIfNeeded(expected, CLOUD_CACHE_KEYS, settings);
         }
         const cache = await getCache(expected);
         const tabState = tabId ? await getTabState(tabId) : null;
@@ -575,6 +576,7 @@ class ContentProvider {
         const normalizedSettings = normalizeSettings(settings);
         const groqApiKey = String(normalizedSettings.groqApiKey || "").trim();
         const groqModel = String(normalizedSettings.groqModel || "").trim() || "whisper-large-v3-turbo";
+        const startedAt = Date.now();
         if (!groqApiKey) throw new Error("请先在设置中填写 Groq API Key");
         try {
             await updateTabState(tabId, {
@@ -643,6 +645,12 @@ class ContentProvider {
                 progress: 100,
                 quotaLine: buildGroqQuotaLine(transcription.quota),
                 bvid
+            });
+            await reportFeatureUsage("transcribe", bvid, normalizedSettings, {
+                tokens: 0,
+                latencyMs: Math.max(0, Date.now() - startedAt),
+                provider: "groq",
+                model: groqModel
             });
             return { rows: rows.length, quota: transcription.quota };
         } catch (error) {
@@ -736,11 +744,24 @@ class ContentProvider {
         formData.append("response_format", "verbose_json");
         formData.append("prompt", buildGroqTranscriptionPrompt(videoTitle));
         formData.append("timestamp_granularities[]", "segment");
-        const response = await fetch(GROQ_AUDIO_TRANSCRIBE_URL, {
-            method: "POST",
-            headers: { Authorization: `Bearer ${groqApiKey}` },
-            body: formData
-        });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort("timeout"), TASK_TIMEOUT_MS);
+        let response;
+        try {
+            response = await fetch(GROQ_AUDIO_TRANSCRIBE_URL, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${groqApiKey}` },
+                body: formData,
+                signal: controller.signal
+            });
+        } catch (error) {
+            if (controller.signal.aborted) {
+                throw createTaskTimeoutError();
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeoutId);
+        }
         const quota = parseGroqQuotaHeaders(response.headers);
         await updateTabState(tabId, {
             quotaInfo: {
@@ -848,27 +869,9 @@ function buildGroqQuotaLine(quota) {
 }
 
 function buildGroqTranscriptionPrompt(videoTitle = "") {
-    const normalizedTitle = String(videoTitle || "").trim() || "未知标题";
-    return `
-只转写音频里真实说出的中文内容，并输出带时间戳的中文字幕。
-
-已知视频标题：
-《${normalizedTitle}》
-
-转写要求：
-1. 标题可作为识别上下文，用于辅助判断视频主题，以及纠正字幕中可能出现的专有名词错误。
-2. 如果音频中出现的人名、地名、品牌名、作品名、游戏名、动漫名、机构名、产品名、技术术语，与标题中的词语或其高相关词明显一致，应优先采用正确写法。
-3. 只在“明显是同音/近音/口音导致的误识别”时才修正，例如把错误音译、错别字、近音字修正为更合理的专有名词。
-4. 如果无法确定，不要强行套用标题中的词；宁可保留较接近原发音的写法，也不要臆造。
-5. 禁止输出任何任务说明、提示词、前言、总结、解释、备注、标题复述，禁止写出音频中未真实说出的文字。
-6. 尽量保留原句语义、语气词与标点；听不清时可略过，不要编造内容。
-7. 输出应是正常字幕文本，不要额外添加说明。
-
-特别注意：
-- 标题只作为纠错参考，不是全文替换词库。
-- 不要因为标题中出现某个名词，就对所有相似发音都进行强行替换。
-- 不要补充音频里没说出来的信息。
-`.trim();
+    const rawTitle = String(videoTitle || "").trim().replace(/\s+/g, " ");
+    const normalizedTitle = rawTitle ? rawTitle.slice(0, 80) : "未知标题";
+    return `只转写音频里真实说出的中文内容，并输出带时间戳的中文字幕。`.trim();
 }
 
 function parseRetryAfterSeconds(retryHeader, detailText) {
@@ -995,6 +998,13 @@ async function handleSubtitleCaptured(tabId, payload) {
         updatedAt: Date.now()
     });
     const latestCache = await getCache(bvid);
+    if (subtitleSource === "groq") {
+        const settings = await getResolvedSettings();
+        await persistCloudSubtitlePatch(bvid, settings, latestCache, {
+            title: payload.title || "",
+            subtitleSource
+        });
+    }
     await pushSubtitleSyncToTab(tabId, bvid, latestCache, "fresh");
 }
 
@@ -1114,7 +1124,10 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
             ...buildTaskSourcePatch([task], "local"),
             updatedAt: Date.now()
         });
-        await persistCloudFeaturePatch(bvid, settings, { [task]: result });
+        const cloudSaved = await persistCloudFeaturePatch(bvid, settings, { [task]: result });
+        if (cloudSaved) {
+            await incrementCloudVideoCallCount(bvid, settings, task);
+        }
         return result;
     } catch (error) {
         const status = error?.code === "TIMEOUT" ? "timeout" : "error";
@@ -1150,7 +1163,15 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
     if (results?.summary?.ok) cloudPatch.summary = results.summary.data;
     if (results?.segments?.ok) cloudPatch.segments = results.segments.data;
     if (Object.keys(cloudPatch).length) {
-        await persistCloudFeaturePatch(bvid, settings, cloudPatch);
+        const cloudSaved = await persistCloudFeaturePatch(bvid, settings, cloudPatch);
+        if (cloudSaved) {
+            if (Object.prototype.hasOwnProperty.call(cloudPatch, "summary")) {
+                await incrementCloudVideoCallCount(bvid, settings, "summary");
+            }
+            if (Object.prototype.hasOwnProperty.call(cloudPatch, "segments")) {
+                await incrementCloudVideoCallCount(bvid, settings, "segments");
+            }
+        }
     }
     const summaryOk = !!results?.summary?.ok;
     const segmentsOk = !!results?.segments?.ok;
@@ -1763,6 +1784,12 @@ function normalizeRumors(value) {
     };
 }
 
+function createTaskTimeoutError() {
+    const timeoutError = new Error("任务超时，请重试~");
+    timeoutError.code = "TIMEOUT";
+    return timeoutError;
+}
+
 async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort("timeout"), timeoutMs);
@@ -1778,8 +1805,7 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
     } catch (error) {
         logAI.error("ai_request_fail", { provider: settings.provider, error: error.message || "请求失败", stack: error.stack || "" });
         if (controller.signal.aborted) {
-            const timeoutError = new Error("任务超时（120 秒）");
-            timeoutError.code = "TIMEOUT";
+            const timeoutError = createTaskTimeoutError();
             logAI.error("ai_request_timeout", { provider: settings.provider, error: timeoutError.message, stack: timeoutError.stack || "" });
             throw timeoutError;
         }
@@ -1806,8 +1832,7 @@ async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, e
                 aborted.code = "ABORTED";
                 throw aborted;
             }
-            const timeoutError = new Error("任务超时（120 秒）");
-            timeoutError.code = "TIMEOUT";
+            const timeoutError = createTaskTimeoutError();
             throw timeoutError;
         }
         throw error;
@@ -2061,6 +2086,7 @@ function normalizeSettings(settings) {
 
 function hasTaskResult(cache, task) {
     if (!cache || typeof cache !== "object") return false;
+    if (task === "subtitle") return Array.isArray(cache.rawSubtitle) && cache.rawSubtitle.length > 0;
     if (task === "summary") return !!String(cache.summary || "").trim();
     if (task === "segments") return Array.isArray(cache.segments) && cache.segments.length > 0;
     if (task === "rumors") return !!normalizeRumors(cache.rumors);
@@ -2090,6 +2116,17 @@ function getTaskModelName(settings) {
 function buildCloudSelectColumns(tasks) {
     const columns = new Set(["bvid", "updated_at"]);
     (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        if (task === "subtitle") {
+            [
+                "title",
+                "subtitle_source",
+                "raw_subtitle",
+                "processed_subtitle",
+                "subtitle_upload_count",
+                "subtitle_uploaded_at"
+            ].forEach((field) => columns.add(field));
+            return;
+        }
         (CLOUD_TASK_FIELD_MAP[task] || []).forEach((field) => columns.add(field));
     });
     return [...columns];
@@ -2100,6 +2137,20 @@ function buildCloudPatchFromRow(row, tasks) {
         cloudUpdatedAt: String(row?.updated_at || "").trim()
     };
     (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        if (task === "subtitle") {
+            const rawSubtitle = normalizeRawSubtitle(Array.isArray(row?.raw_subtitle) ? row.raw_subtitle : []);
+            const processedSubtitle = normalizeRawSubtitle(Array.isArray(row?.processed_subtitle) ? row.processed_subtitle : []);
+            if (!rawSubtitle.length && !processedSubtitle.length) return;
+            patch.title = String(row?.title || "");
+            patch.rawSubtitle = rawSubtitle;
+            patch.processedSubtitle = processedSubtitle;
+            patch.rawHash = makeSubtitleHash(rawSubtitle);
+            patch.processedHash = makeSubtitleHash(processedSubtitle);
+            patch.subtitleSource = String(row?.subtitle_source || "");
+            patch.subtitleUploadCount = Math.max(0, Number(row?.subtitle_upload_count || 0));
+            patch.subtitleUploadedAt = String(row?.subtitle_uploaded_at || "");
+            return;
+        }
         if (task === "summary") {
             const summary = String(row?.summary || "").trim();
             if (!summary) return;
@@ -2133,6 +2184,7 @@ function buildCloudPatchFromRow(row, tasks) {
 function buildTaskSourcePatch(tasks, source) {
     const patch = {};
     (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        if (task === "subtitle") patch.subtitleCacheSource = source;
         if (task === "summary") patch.summaryCacheSource = source;
         if (task === "segments") patch.segmentsCacheSource = source;
         if (task === "rumors") patch.rumorsCacheSource = source;
@@ -2192,6 +2244,33 @@ async function hydrateCloudCacheIfNeeded(bvid, tasks, settings) {
 function buildSupabaseVideoPatch(bvid, settings, patch) {
     const row = { bvid: normalizeBvid(bvid), updated_at: new Date().toISOString() };
     const modelName = getTaskModelName(settings);
+    if (Object.prototype.hasOwnProperty.call(patch, "title")) {
+        row.title = String(patch.title || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "rawSubtitle")) {
+        row.raw_subtitle = normalizeRawSubtitle(Array.isArray(patch.rawSubtitle) ? patch.rawSubtitle : []);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "processedSubtitle")) {
+        row.processed_subtitle = normalizeRawSubtitle(Array.isArray(patch.processedSubtitle) ? patch.processedSubtitle : []);
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "subtitleSource")) {
+        row.subtitle_source = String(patch.subtitleSource || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "subtitleUploadCount")) {
+        row.subtitle_upload_count = Math.max(0, Number(patch.subtitleUploadCount || 0));
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "subtitleUploadedAt")) {
+        row.subtitle_uploaded_at = String(patch.subtitleUploadedAt || "");
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "summaryCallCount")) {
+        row.summary_call_count = Math.max(0, Number(patch.summaryCallCount || 0));
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "segmentsCallCount")) {
+        row.segments_call_count = Math.max(0, Number(patch.segmentsCallCount || 0));
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "rumorsCallCount")) {
+        row.rumors_call_count = Math.max(0, Number(patch.rumorsCallCount || 0));
+    }
     if (Object.prototype.hasOwnProperty.call(patch, "summary")) {
         row.summary = String(patch.summary || "");
         row.summary_model = modelName;
@@ -2207,25 +2286,175 @@ function buildSupabaseVideoPatch(bvid, settings, patch) {
     return row;
 }
 
+function hasEnoughSubtitleRows(list, minRows = 10) {
+    return Array.isArray(list) && list.length >= minRows;
+}
+
+function hasEnoughSummaryText(text, minLength = 100) {
+    return String(text || "").trim().length >= minLength;
+}
+
+function hasEnoughSegments(list, minCount = 3) {
+    return Array.isArray(list) && list.length >= minCount;
+}
+
+function hasEnoughRumorsContent(value, minLength = 100) {
+    if (!value || typeof value !== "object") return false;
+    return String(JSON.stringify(value) || "").length >= minLength;
+}
+
+function filterCloudFeaturePatch(patch) {
+    const next = {};
+    if (Object.prototype.hasOwnProperty.call(patch, "summary") && hasEnoughSummaryText(patch.summary)) {
+        next.summary = patch.summary;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "segments") && hasEnoughSegments(patch.segments)) {
+        next.segments = patch.segments;
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, "rumors") && hasEnoughRumorsContent(patch.rumors)) {
+        next.rumors = patch.rumors;
+    }
+    return next;
+}
+
+async function fetchVideoCacheMetaRow(bvid, settings, columns = []) {
+    if (!isSupabaseEnabled(settings)) return null;
+    const normalizedBvid = normalizeBvid(bvid);
+    const fieldList = ["bvid", ...(Array.isArray(columns) ? columns : [])]
+        .filter(Boolean)
+        .filter((value, index, arr) => arr.indexOf(value) === index);
+    if (!normalizedBvid || fieldList.length < 2) return null;
+    const url = new URL(`${settings.supabaseUrl}/rest/v1/${encodeURIComponent(settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE)}`);
+    url.searchParams.set("select", fieldList.join(","));
+    url.searchParams.set("bvid", `eq.${normalizedBvid}`);
+    url.searchParams.set("limit", "1");
+    const res = await fetch(url.toString(), {
+        method: "GET",
+        headers: buildSupabaseHeaders(settings, { Accept: "application/json" })
+    });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`video_cache 查询失败 ${res.status}: ${text}`);
+    }
+    const rows = await res.json();
+    return Array.isArray(rows) && rows.length ? rows[0] : null;
+}
+
+async function saveVideoCacheRow(bvid, settings, row, existingRow = null) {
+    const normalizedBvid = normalizeBvid(bvid);
+    if (!isSupabaseEnabled(settings) || !normalizedBvid || !row || typeof row !== "object") return false;
+    const table = encodeURIComponent(settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE);
+    const hasExisting = !!(existingRow && typeof existingRow === "object" && String(existingRow.bvid || "").trim());
+    const method = hasExisting ? "PATCH" : "POST";
+    const url = hasExisting
+        ? `${settings.supabaseUrl}/rest/v1/${table}?bvid=eq.${normalizedBvid}`
+        : `${settings.supabaseUrl}/rest/v1/${table}`;
+    const headers = buildSupabaseHeaders(settings, {
+        "Content-Type": "application/json",
+        Prefer: "return=minimal"
+    });
+    const res = await fetch(url, {
+        method,
+        headers,
+        body: JSON.stringify(row)
+    });
+    if (!res.ok) {
+        const text = await res.text();
+        throw new Error(`video_cache ${method} 失败 ${res.status}: ${text}`);
+    }
+    return true;
+}
+
+async function persistCloudSubtitlePatch(bvid, settings, cache, extra = {}) {
+    if (!isSupabaseEnabled(settings)) return false;
+    const normalizedBvid = normalizeBvid(bvid);
+    if (!normalizedBvid) return false;
+    const rawSubtitle = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+    const processedSubtitle = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+    if (!hasEnoughSubtitleRows(rawSubtitle) || !hasEnoughSubtitleRows(processedSubtitle)) {
+        logCache.info("cloud_subtitle_skip", {
+            bvid: normalizedBvid,
+            raw_count: rawSubtitle.length,
+            processed_count: processedSubtitle.length,
+            reason: "subtitle_too_short"
+        });
+        return false;
+    }
+    try {
+        const current = await fetchVideoCacheMetaRow(normalizedBvid, settings, ["subtitle_upload_count"]);
+        const row = buildSupabaseVideoPatch(normalizedBvid, settings, {
+            title: String(extra.title || cache?.title || ""),
+            rawSubtitle,
+            processedSubtitle,
+            subtitleSource: String(settings?.groqModel || extra.subtitleSource || ""),
+            subtitleUploadCount: Math.max(0, Number(current?.subtitle_upload_count || 0)) + 1,
+            subtitleUploadedAt: new Date().toISOString()
+        });
+        const meaningfulKeys = Object.keys(row).filter((key) => key !== "bvid" && key !== "updated_at");
+        if (!meaningfulKeys.length) return false;
+        await saveVideoCacheRow(normalizedBvid, settings, row, current);
+        logCache.info("cloud_subtitle_write", { bvid: normalizedBvid, fields: meaningfulKeys });
+        return true;
+    } catch (error) {
+        logBackground.error("cloud_subtitle_write_fail", {
+            bvid: normalizedBvid,
+            error: error.message || "cloud subtitle write failed"
+        });
+        return false;
+    }
+}
+
+async function incrementCloudVideoCallCount(bvid, settings, task) {
+    if (!isSupabaseEnabled(settings)) return false;
+    const normalizedTask = String(task || "").trim();
+    const fieldMap = {
+        summary: "summary_call_count",
+        segments: "segments_call_count",
+        rumors: "rumors_call_count"
+    };
+    const targetField = fieldMap[normalizedTask];
+    const normalizedBvid = normalizeBvid(bvid);
+    if (!targetField || !normalizedBvid) return false;
+    try {
+        const current = await fetchVideoCacheMetaRow(normalizedBvid, settings, [targetField]);
+        const nextValue = Math.max(0, Number(current?.[targetField] || 0)) + 1;
+        const patchKey = normalizedTask === "summary"
+            ? "summaryCallCount"
+            : normalizedTask === "segments"
+                ? "segmentsCallCount"
+                : "rumorsCallCount";
+        const row = buildSupabaseVideoPatch(normalizedBvid, settings, {
+            [patchKey]: nextValue
+        });
+        await saveVideoCacheRow(normalizedBvid, settings, row, current);
+        logCache.info("cloud_call_count_increment", { bvid: normalizedBvid, task: normalizedTask, value: nextValue });
+        return true;
+    } catch (error) {
+        logBackground.error("cloud_call_count_increment_fail", {
+            bvid: normalizedBvid,
+            task: normalizedTask,
+            error: error.message || "cloud call count increment failed"
+        });
+        return false;
+    }
+}
+
 async function persistCloudFeaturePatch(bvid, settings, patch) {
     if (!isSupabaseEnabled(settings)) return false;
-    const row = buildSupabaseVideoPatch(bvid, settings, patch);
+    const filteredPatch = filterCloudFeaturePatch(patch || {});
+    const row = buildSupabaseVideoPatch(bvid, settings, filteredPatch);
     const meaningfulKeys = Object.keys(row).filter((key) => key !== "bvid" && key !== "updated_at");
-    if (!row.bvid || !meaningfulKeys.length) return false;
-    try {
-        const url = `${settings.supabaseUrl}/rest/v1/${encodeURIComponent(settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE)}?on_conflict=bvid`;
-        const res = await fetch(url, {
-            method: "POST",
-            headers: buildSupabaseHeaders(settings, {
-                "Content-Type": "application/json",
-                Prefer: "resolution=merge-duplicates,return=minimal"
-            }),
-            body: JSON.stringify(row)
+    if (!row.bvid || !meaningfulKeys.length) {
+        logCache.info("cloud_cache_skip", {
+            bvid: normalizeBvid(bvid),
+            fields: Object.keys(patch || {}),
+            reason: "content_too_short"
         });
-        if (!res.ok) {
-            const text = await res.text();
-            throw new Error(`Supabase 写入失败 ${res.status}: ${text}`);
-        }
+        return false;
+    }
+    try {
+        const current = await fetchVideoCacheMetaRow(row.bvid, settings, []);
+        await saveVideoCacheRow(row.bvid, settings, row, current);
         logCache.info("cloud_cache_write", { bvid: row.bvid, fields: meaningfulKeys });
         return true;
     } catch (error) {
@@ -2312,8 +2541,9 @@ async function updateUsageStats(featureName, tokenCount, settings) {
 
 async function reportFeatureUsage(featureName, bvid, settings, metrics) {
     if (!isSupabaseEnabled(settings)) return false;
-    const tokenCount = Number(metrics?.tokens || 0);
-    if (!tokenCount) return false;
+    const tokenCount = Math.max(0, Number(metrics?.tokens || 0));
+    const normalizedFeature = String(featureName || "").trim();
+    if (!normalizedFeature) return false;
     try {
         const userId = await getOrCreateAnonymousUserId();
         const url = `${settings.supabaseUrl}/rest/v1/rpc/${encodeURIComponent(settings.supabaseUsageRpcName || SUPABASE_DEFAULT_USAGE_RPC)}`;
@@ -2324,7 +2554,7 @@ async function reportFeatureUsage(featureName, bvid, settings, metrics) {
                 Accept: "application/json"
             }),
             body: JSON.stringify({
-                f_name: String(featureName || "").trim(),
+                f_name: normalizedFeature,
                 u_id: userId,
                 t_count: tokenCount,
                 v_id: normalizeBvid(bvid)
@@ -2334,9 +2564,9 @@ async function reportFeatureUsage(featureName, bvid, settings, metrics) {
             const text = await res.text();
             throw new Error(`Supabase RPC 失败 ${res.status}: ${text}`);
         }
-        await updateUsageStats(featureName, tokenCount, settings);
+        await updateUsageStats(normalizedFeature, tokenCount, settings);
         logAI.info("usage_reported", {
-            feature: String(featureName || ""),
+            feature: normalizedFeature,
             bvid: normalizeBvid(bvid),
             tokens: tokenCount
         });

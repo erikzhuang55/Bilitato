@@ -131,8 +131,12 @@ const appState = {
     routeWatchTimer: null,
     routeWatchBvid: "",
     subtitleTimeline: [],
-    transcriptionRunning: false,
-    transcriptionRequestedBvid: "",
+    transcription: {
+        phase: "idle",
+        bvid: "",
+        progress: 0,
+        statusText: ""
+    },
     transcriptionDeclinedBvid: "",
     transcriptionSuppressUntil: 0,
     transcribeCountdownTimer: null,
@@ -141,7 +145,6 @@ const appState = {
     subtitleCheckTargetBvid: "",
     transcriptionCapsuleVisible: false,
     transcriptionCapsuleMeta: null,
-    isTranscribing: false, // New locking state
     lastCacheSyncTime: 0,
     lastCacheSyncBvid: "",
     isStateDirty: true,
@@ -149,7 +152,6 @@ const appState = {
     subtitleObserveUntil: 0,
     subtitleDomDetected: false,
     injectBvidChangedAt: Date.now(),
-    transcriptionProgress: 0,
     progressTaskId: "",
     progressLastTick: 0,
     progressTimeoutTimer: null,
@@ -172,9 +174,48 @@ const appState = {
     isCollapsed: false,
     segmentsCollapsed: false,
     playInfo: null,
-    playInfoUpdatedAt: 0,
-    transcribeStatusText: ""
+    playInfoUpdatedAt: 0
 };
+
+function getDefaultTranscriptionState() {
+    return {
+        phase: "idle",
+        bvid: "",
+        progress: 0,
+        statusText: ""
+    };
+}
+
+function getTranscriptionState() {
+    return {
+        ...getDefaultTranscriptionState(),
+        ...(appState.transcription || {})
+    };
+}
+
+function patchTranscriptionState(patch = {}) {
+    appState.transcription = {
+        ...getTranscriptionState(),
+        ...(patch || {})
+    };
+    return appState.transcription;
+}
+
+function resetTranscriptionState(patch = {}) {
+    appState.transcription = {
+        ...getDefaultTranscriptionState(),
+        ...(patch || {})
+    };
+    return appState.transcription;
+}
+
+function isTranscriptionRunning() {
+    return getTranscriptionState().phase === "running";
+}
+
+function getTranscriptionBvid() {
+    return normalizeBvidCase(getTranscriptionState().bvid || "");
+}
 const logContent = globalThis.AIPluginLogger.create("content", {
     getDebugMode: () => !!appState.settings?.debugMode
 });
@@ -278,7 +319,7 @@ async function onInjectMessage(event) {
     }
     if (msgType === "BILI_ROUTE_SWITCH") {
         // Notify background to abort ongoing transcription for previous BVID
-        chrome.runtime.sendMessage({ action: "ABORT_TRANSCRIPTION", bvid: appState.transcriptionRequestedBvid }).catch(() => {});
+        chrome.runtime.sendMessage({ action: "ABORT_TRANSCRIPTION", bvid: getTranscriptionBvid() }).catch(() => {});
         resetAllState();
         waitForAlignedPlayInfo(normalizeBvidCase(getBvidFromUrl(location.href) || "")).catch(() => {});
         return;
@@ -1331,15 +1372,15 @@ function renderSummary(panel) {
         </div>
     `;
 
-    if (!isLoading && (!hasContent || appState.isTranscribing)) {
+    if (!isLoading && (!hasContent || isTranscriptionRunning())) {
         panel.classList.remove("is-segments-expanded");
         const hasSubtitle = Array.isArray(appState.cache?.rawSubtitle) && appState.cache.rawSubtitle.length > 0;
-        let btnDisabled = (!hasSubtitle && !appState.isTranscribing) ? "disabled" : "";
+        let btnDisabled = (!hasSubtitle && !isTranscriptionRunning()) ? "disabled" : "";
         let tipText = hasSubtitle ? "去除噪音，抓住重点。" : "当前视频未检测到字幕，无法总结";
-        let btnOpacity = (hasSubtitle || appState.isTranscribing) ? "1" : "0.5";
+        let btnOpacity = (hasSubtitle || isTranscriptionRunning()) ? "1" : "0.5";
         let btnText = "生成 AI 总结";
 
-        if (appState.isTranscribing) {
+        if (isTranscriptionRunning()) {
             btnDisabled = "disabled";
             tipText = "正在生成字幕，请稍候...";
             btnOpacity = "0.5";
@@ -1568,9 +1609,11 @@ function renderCC(panel, rowsOverride) {
     const cacheBvid = normalizeBvidCase(appState.cache?.bvid || "");
     const cacheReadyForCurrent = !!currentBvid && cacheBvid === currentBvid;
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
-    const progress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? appState.transcriptionProgress ?? 0)));
+    const transcription = getTranscriptionState();
+    const progress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? transcription.progress ?? 0)));
     const isGroqSubtitle = subtitleSource === "groq" || subtitleSource === "whisper";
-    const shouldShowRegenerate = isGroqSubtitle && !appState.transcriptionRunning;
+    const running = isTranscriptionRunning();
+    const shouldShowRegenerate = isGroqSubtitle && !running;
 
     const sourceText = rows.length ? (isGroqSubtitle ? "ASR转录生成" : "官方AI字幕") : "未检测到字幕";
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
@@ -1578,7 +1621,7 @@ function renderCC(panel, rowsOverride) {
     const searchBoxHtml = `<div class="cc-search-container"><input type="text" id="cc-search-input" class="cc-search-input" placeholder="搜索字幕..." /><button type="button" class="cc-search-clear" aria-label="清空">×</button></div>`;
     const progressBarHtml = '';
 
-    const controlCenterHtml = `<div class="transcription-control-center"><div class="cc-transcribe-head">${searchBoxHtml}<div class="cc-header-right"><div class="cc-transcribe-status">${escapeHtml(sourceText)}</div><div class="cc-transcribe-actions">${regenBtnHtml}</div></div></div>${(rows.length > 0 || appState.transcriptionRunning) ? progressBarHtml : ''}</div>`;
+    const controlCenterHtml = `<div class="transcription-control-center"><div class="cc-transcribe-head">${searchBoxHtml}<div class="cc-header-right"><div class="cc-transcribe-status">${escapeHtml(sourceText)}</div><div class="cc-transcribe-actions">${regenBtnHtml}</div></div></div>${(rows.length > 0 || running) ? progressBarHtml : ''}</div>`;
 
     if (rows.length > 0) {
         const rowsHtml = rows.map((row, index) => {
@@ -1602,7 +1645,7 @@ function renderCC(panel, rowsOverride) {
     } else {
         const detectElapsedMs = Date.now() - Number(appState.injectBvidChangedAt || 0);
         const detectTimeoutReached = detectElapsedMs >= SUBTITLE_DETECT_TIMEOUT_MS;
-        const isDetectingSubtitle = !appState.transcriptionRunning && (!appState.cache || !cacheReadyForCurrent) && !detectTimeoutReached;
+        const isDetectingSubtitle = !running && (!appState.cache || !cacheReadyForCurrent) && !detectTimeoutReached;
         if (isDetectingSubtitle && !appState.subtitleDetectTimeoutTimer) {
             const forceRenderInMs = Math.max(100, SUBTITLE_DETECT_TIMEOUT_MS - detectElapsedMs + 100);
             appState.subtitleDetectTimeoutTimer = setTimeout(() => {
@@ -1613,17 +1656,17 @@ function renderCC(panel, rowsOverride) {
             clearTimeout(appState.subtitleDetectTimeoutTimer);
             appState.subtitleDetectTimeoutTimer = null;
         }
-        const capsuleDisabled = (appState.transcriptionRunning || isDetectingSubtitle) ? "disabled" : "";
+        const capsuleDisabled = (running || isDetectingSubtitle) ? "disabled" : "";
         const statusText = isDetectingSubtitle
             ? "正在读取字幕，请稍候..."
-            : ((appState.transcriptionRunning && appState.transcribeStatusText)
-                ? escapeHtml(appState.transcribeStatusText)
+            : ((running && transcription.statusText)
+                ? escapeHtml(transcription.statusText)
                 : "未检测到字幕，可开启在线转录");
             
         const capsuleHtml = `<div class="subtitle-empty-container">
             <div class="action-container">
                 <p class="action-tip">${statusText}</p>
-                <button id="start-groq-transcribe" class="action-btn" data-action="transcription-start" ${capsuleDisabled}>${appState.transcriptionRunning ? "转录中..." : (isDetectingSubtitle ? "检测中..." : "开始在线转录")}</button>
+                <button id="start-groq-transcribe" class="action-btn" data-action="transcription-start" ${capsuleDisabled}>${running ? "转录中..." : (isDetectingSubtitle ? "检测中..." : "开始在线转录")}</button>
             </div>
         </div>`;
         panel.innerHTML = `
@@ -2881,15 +2924,12 @@ function resetPageStateByBvidSwitch() {
     appState.navActionActive = "";
     appState.lastSubtitleForwardAt = 0;
     appState.subtitleTimeline = [];
-    appState.transcriptionRunning = false;
-    appState.isTranscribing = false;
-    appState.transcriptionRequestedBvid = "";
+    resetTranscriptionState();
     appState.transcriptionDeclinedBvid = "";
     appState.transcriptionSuppressUntil = 0;
     appState.transcriptionCapsuleVisible = false;
     appState.transcriptionCapsuleMeta = null;
     appState.subtitleDomDetected = false;
-    appState.transcriptionProgress = 0;
     appState.subtitleObserveUntil = 0;
     appState.subtitleCheckTargetBvid = "";
     appState.expandedSummaryHeight = 0;
@@ -2900,7 +2940,6 @@ function resetPageStateByBvidSwitch() {
     clearPseudoProgressTicker();
     appState.progressTaskId = "";
     appState.progressLastTick = 0;
-    appState.transcribeStatusText = "";
     appState.pseudoProgressTaskId = "";
     appState.pseudoProgressValue = 0;
     appState.pseudoProgressStartedAt = 0;
@@ -2929,21 +2968,18 @@ function resetPageStateByBvidSwitch() {
 
 function resetAllState() {
     appState.subtitleDomDetected = false;
-    appState.transcriptionProgress = 0;
+    resetTranscriptionState();
     appState.subtitleObserveUntil = 0;
     appState.subtitleCheckTargetBvid = "";
     appState.expandedSummaryHeight = 0;
     appState.lastCacheSyncTime = 0;
     appState.lastCacheSyncBvid = "";
     appState.isStateDirty = true;
-    appState.isTranscribing = false;
-    appState.transcriptionRunning = false;
     appState.transcriptionCapsuleVisible = false;
     appState.transcriptionCapsuleMeta = null;
     appState.pendingSubtitle = null;
     appState.cache = null; // Explicitly clear cache including summary, segments, etc.
     appState.playInfo = null; // Explicitly clear playInfo
-    appState.transcribeStatusText = "";
     
     clearStreamCache();
     clearStepProgressTimers();
@@ -3895,7 +3931,7 @@ function escapeHtml(text) {
 }
 
 async function triggerDefaultSubtitleCapture() {
-    if (appState.isTranscribing) return; // Transcription lock guard
+    if (isTranscriptionRunning()) return; // Transcription lock guard
     if (appState.subtitleCaptureLock) return;
     const bvid = resolveCurrentBvid();
     if (!bvid) return;
@@ -3942,7 +3978,7 @@ async function triggerDefaultSubtitleCapture() {
 }
 
 function scheduleTranscriptionCapsuleIfNeeded(meta) {
-    if (appState.isTranscribing) return; // Transcription lock guard
+    if (isTranscriptionRunning()) return; // Transcription lock guard
     const bvid = normalizeBvidCase(meta?.bvid || "");
     const injectBvid = normalizeBvidCase(appState.injectBvid || "");
     const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
@@ -3993,7 +4029,7 @@ function evaluateTranscriptionNeedAfterDelay(meta) {
     if (!bvid || !injectBvid || !currentBvid || bvid !== injectBvid || currentBvid !== injectBvid) return;
     if (appState.subtitleCheckTargetBvid !== bvid) return;
     if (!appState.injectReady) return;
-    if (appState.isTranscribing) return; // Skip warnings/updates if transcribing
+    if (isTranscriptionRunning()) return; // Skip warnings/updates if transcribing
     if (Date.now() < Number(appState.subtitleObserveUntil || 0)) return;
     if (appState.subtitleCapturedBvid === bvid) return;
     if (Array.isArray(appState.cache?.rawSubtitle) && appState.cache.rawSubtitle.length) return;
@@ -4043,15 +4079,16 @@ async function startTranscriptionFromCapsule() {
         showToast("当前视频状态已变化，请稍后重试");
         return;
     }
-    if (appState.transcriptionRunning || appState.isTranscribing) {
+    if (isTranscriptionRunning()) {
         showToast("正在转录中，请稍候...");
         return;
     }
-    appState.transcriptionRunning = true;
-    appState.isTranscribing = true;
-    appState.transcriptionProgress = 0;
-    appState.transcribeStatusText = "正在请求转录...";
-    appState.transcriptionRequestedBvid = bvid;
+    patchTranscriptionState({
+        phase: "running",
+        bvid,
+        progress: 0,
+        statusText: "正在请求转录..."
+    });
     appState.transcriptionCapsuleVisible = true;
     updateProgress(10, progressTaskId);
     renderSubtitleTimelinePanel(document.getElementById("panel-body"));
@@ -4063,10 +4100,8 @@ async function startTranscriptionFromCapsule() {
         });
         if (!res?.ok) throw new Error(res?.error || "Groq 转录失败");
     } catch (error) {
-        appState.transcriptionRequestedBvid = "";
         appState.transcriptionSuppressUntil = Date.now() + 30000;
-        appState.transcriptionRunning = false;
-        appState.isTranscribing = false;
+        resetTranscriptionState();
         updateProgress(100, progressTaskId, { error: true });
         showToast(error.message || "Groq 转录失败");
         renderSubtitleTimelinePanel(document.getElementById("panel-body"));
@@ -4090,9 +4125,12 @@ async function handleRegenerateGroqSubtitle() {
         rawHash: "",
         processedHash: ""
     };
-    appState.transcriptionRunning = true;
-    appState.transcriptionProgress = 0;
-    appState.transcribeStatusText = "正在重新请求转录...";
+    patchTranscriptionState({
+        phase: "running",
+        bvid: injectBvid,
+        progress: 0,
+        statusText: "正在重新请求转录..."
+    });
     renderContent();
     const payload = {
         bvid: injectBvid,
@@ -4109,7 +4147,7 @@ async function handleRegenerateGroqSubtitle() {
         });
         if (!res?.ok) throw new Error(res?.error || "重新生成失败");
     } catch (error) {
-        appState.transcriptionRunning = false;
+        resetTranscriptionState();
         showToast(error.message || "重新生成失败");
         renderContent();
     }
@@ -4613,10 +4651,10 @@ async function syncActiveCacheByBvid(expectedBvid) {
         appState.cache = nextCache && normalizeBvidCase(nextCache?.bvid || "") === target ? nextCache : null;
         if (Array.isArray(appState.cache?.rawSubtitle) && appState.cache.rawSubtitle.length) {
             appState.subtitleCapturedBvid = target;
-            if (!appState.transcriptionRunning) {
-        appState.transcriptionCapsuleVisible = false;
-        appState.transcriptionCapsuleMeta = null;
-    }
+            if (!isTranscriptionRunning()) {
+                appState.transcriptionCapsuleVisible = false;
+                appState.transcriptionCapsuleMeta = null;
+            }
         }
         appState.isStateDirty = false;
         renderContent();
@@ -4631,23 +4669,29 @@ function hasSubtitleCacheForBvid(targetBvid) {
 
 function reconcileTranscriptionState(targetBvid) {
     const target = normalizeBvidCase(targetBvid || resolveCurrentBvid() || "");
-    const requestBvid = normalizeBvidCase(appState.transcriptionRequestedBvid || "");
+    const requestBvid = getTranscriptionBvid();
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
-    const progress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? appState.transcriptionProgress ?? 0)));
+    const localState = getTranscriptionState();
+    const progress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? localState.progress ?? 0)));
     const hasSubtitle = hasSubtitleCacheForBvid(target);
     const sameTask = !!(target && requestBvid && target === requestBvid);
 
     if (hasSubtitle) {
-        appState.transcriptionRunning = false;
-        appState.isTranscribing = false;
-        appState.transcriptionRequestedBvid = "";
+        resetTranscriptionState();
         appState.transcriptionCapsuleVisible = false;
         appState.transcriptionCapsuleMeta = null;
         return;
     }
 
-    const shouldKeepRunning = appState.isTranscribing || (sameTask && subtitleSource === "groq" && progress > 0 && progress < 100);
-    appState.transcriptionRunning = shouldKeepRunning;
+    const shouldKeepRunning = localState.phase === "running" || (sameTask && subtitleSource === "groq" && progress > 0 && progress < 100);
+    patchTranscriptionState({
+        phase: shouldKeepRunning ? "running" : localState.phase,
+        bvid: shouldKeepRunning && target ? target : localState.bvid,
+        progress
+    });
+    if (!shouldKeepRunning && localState.phase === "running") {
+        resetTranscriptionState();
+    }
 }
 
 async function syncCacheFromBackground(bvid, options = {}) {
@@ -4710,22 +4754,26 @@ function onBackgroundMessage(message) {
         return false;
     }
     if (action === "TRANSCRIBE_STATUS") {
-        const progressTaskId = `transcribe:${normalizeBvidCase(appState.transcriptionRequestedBvid || appState.injectBvid || resolveCurrentBvid() || "unknown")}`;
+        const progressTaskId = `transcribe:${normalizeBvidCase(getTranscriptionBvid() || appState.injectBvid || resolveCurrentBvid() || "unknown")}`;
         const text = String(message?.text || "").trim();
         const quotaLine = String(message?.quotaLine || "").trim();
         
         if (text) {
-            appState.transcribeStatusText = text;
+            patchTranscriptionState({ statusText: text });
         }
         if (message?.stage !== "done" && message?.level !== "error") {
-            appState.transcriptionRunning = true;
-            appState.isTranscribing = true;
+            patchTranscriptionState({
+                phase: "running",
+                bvid: normalizeBvidCase(message?.bvid || getTranscriptionBvid() || appState.injectBvid || resolveCurrentBvid() || ""),
+                statusText: text || getTranscriptionState().statusText
+            });
         }
 
         if (Number.isFinite(Number(message?.progress))) {
-            appState.transcriptionProgress = Math.max(0, Math.min(100, Number(message.progress)));
-            updateProgress(Math.max(10, appState.transcriptionProgress), progressTaskId);
-        } else if (appState.transcriptionRunning) {
+            const progress = Math.max(0, Math.min(100, Number(message.progress)));
+            patchTranscriptionState({ progress });
+            updateProgress(Math.max(10, progress), progressTaskId);
+        } else if (isTranscriptionRunning()) {
             updateProgress(20, progressTaskId);
         }
         const retryAfterSec = Number(message?.retryAfterSec || 0);
@@ -4751,25 +4799,20 @@ function onBackgroundMessage(message) {
             }, 1000);
         }
         if (message?.level === "error") {
-            appState.transcriptionRunning = false;
-            appState.isTranscribing = false;
-            appState.transcriptionProgress = 0;
+            resetTranscriptionState();
             appState.transcriptionSuppressUntil = Date.now() + 30000;
-            appState.transcriptionRequestedBvid = "";
             appState.transcriptionCapsuleVisible = true;
             updateProgress(100, progressTaskId, { error: true });
             renderContent();
             renderSubtitleTimelinePanel(document.getElementById("panel-body"));
         }
         if (message?.stage === "done") {
-            const taskBvid = normalizeBvidCase(appState.transcriptionRequestedBvid);
+            const taskBvid = getTranscriptionBvid();
             const currentBvid = normalizeBvidCase(appState.injectBvid || resolveCurrentBvid() || "");
             
             if (taskBvid && currentBvid && taskBvid !== currentBvid) {
                 console.warn("转录任务已过期（视频已切换），丢弃结果", { taskBvid, currentBvid });
-                appState.transcriptionRunning = false;
-                appState.isTranscribing = false;
-                appState.transcriptionProgress = 100;
+                resetTranscriptionState({ phase: "done", progress: 100 });
                 appState.transcriptionCapsuleVisible = false;
                 appState.transcriptionCapsuleMeta = null;
                 appState.isStateDirty = true;
@@ -4777,9 +4820,7 @@ function onBackgroundMessage(message) {
                 return;
             }
             
-            appState.transcriptionRunning = false;
-            appState.isTranscribing = false;
-            appState.transcriptionProgress = 100;
+            resetTranscriptionState({ phase: "done", progress: 100 });
             appState.transcriptionCapsuleVisible = false;
             appState.transcriptionCapsuleMeta = null;
             appState.isStateDirty = true;

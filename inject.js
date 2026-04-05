@@ -21,6 +21,7 @@ const logger = {
     let maskNode = null;
     let capturedBvid = "";
     let latestPlayinfo = null; // 存储 XHR 拦截到的最新 dash 数据
+    let latestAudioProbe = null;
     let routeMonitorTimer = null;
     let silentDeadlineTs = Date.now() + 2000;
     let subtitleStringCache = [];
@@ -66,12 +67,7 @@ const logger = {
     XMLHttpRequest.prototype.open = function (method, url) {
         const rawUrl = String(url || "");
         if (rawUrl.includes(".m4s") || rawUrl.includes("upos")) {
-            const currentBvid = window.location.href.match(/BV[a-zA-Z0-9]{10}/)?.[0] || "";
-            latestPlayinfo = {
-                dash: { audio: [{ baseUrl: rawUrl }] },
-                _bvid: currentBvid,
-                _ts: Date.now()
-            };
+            latestAudioProbe = rawUrl;
         }
         this.__biliUrl = url;
         return originalOpen.apply(this, arguments);
@@ -291,6 +287,7 @@ const logger = {
         capturedBvid = String(nextBvid || "").trim();
         subtitleStringCache = [];
         latestPlayinfo = null; // 切换视频时清空，防止旧视频数据残留
+        latestAudioProbe = null;
         silentDeadlineTs = Date.now() + 2000;
         stopAutoTriggerFlow();
         emitLog("subtitle_route_reset", { bvid: capturedBvid, reason });
@@ -415,6 +412,7 @@ const logger = {
         if (window.location.href !== lastLocation) {
             lastLocation = window.location.href;
             latestPlayinfo = null;
+            latestAudioProbe = null;
             console.log("%c[Inject] 检测到跳转，旧内存已物理抹除，等待新视频信号...", "color: white; background: #e67e22;");
         }
     }, 300);

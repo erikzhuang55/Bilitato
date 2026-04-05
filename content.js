@@ -13,7 +13,7 @@ const SUBTITLE_DETECT_TIMEOUT_MS = 5000;
 const CACHE_SYNC_THROTTLE_MS = 500;
 const SUBTITLE_OBSERVE_GRACE_MS = 3500;
 const STEP_PROGRESS_TIMEOUT_MS = 60000;
-const CLOUD_READ_TIMEOUT_MS = 500;
+const CLOUD_READ_TIMEOUT_MS = 1000;
 const TASK_PROMPTS_DEFAULT = {
     summary: `
 任务：总结视频核心内容。
@@ -174,8 +174,20 @@ const appState = {
     isCollapsed: false,
     segmentsCollapsed: false,
     playInfo: null,
-    playInfoUpdatedAt: 0
+    playInfoUpdatedAt: 0,
+    isPlayInfoReady: false
 };
+
+function hasUsablePlayInfoForBvid(info, bvid) {
+    const expectedBvid = normalizeBvidCase(bvid || "");
+    const normalized = normalizeIncomingPlayInfo(info);
+    if (!normalized || !expectedBvid) return false;
+    if (normalizeBvidCase(normalized._bvid || "") !== expectedBvid) return false;
+    return (
+        (Array.isArray(normalized.audio) && normalized.audio.length > 0) ||
+        (Array.isArray(normalized.video) && normalized.video.length > 0)
+    );
+}
 
 function getDefaultTranscriptionState() {
     return {
@@ -308,12 +320,24 @@ async function onInjectMessage(event) {
     }
     if (msgType === "BILI_PLAYINFO_DATA") {
         if (event.data?.info) {
-            appState.playInfo = event.data.info;
-            appState.playInfoUpdatedAt = Date.now();
-            logContent.info("playinfo_received", { 
-                video_count: appState.playInfo.video?.length || 0,
-                audio_count: appState.playInfo.audio?.length || 0 
-            });
+            const normalizedInfo = normalizeIncomingPlayInfo(event.data.info);
+            const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+            const infoBvid = normalizeBvidCase(normalizedInfo?._bvid || "");
+            if (normalizedInfo && (!pageBvid || !infoBvid || infoBvid === pageBvid)) {
+                appState.playInfo = normalizedInfo;
+                appState.playInfoUpdatedAt = Date.now();
+                appState.isPlayInfoReady = hasUsablePlayInfoForBvid(normalizedInfo, pageBvid || infoBvid);
+                logContent.info("playinfo_received", {
+                    bvid: infoBvid,
+                    video_count: normalizedInfo.video?.length || 0,
+                    audio_count: normalizedInfo.audio?.length || 0,
+                    ready: appState.isPlayInfoReady
+                });
+                const exportMenu = panelShadowRoot ? panelShadowRoot.getElementById("export-option-menu") : null;
+                if (exportMenu && exportMenu.querySelector('[data-action="download-video"]')) {
+                    renderExportMainMenu(exportMenu);
+                }
+            }
         }
         return;
     }
@@ -1343,13 +1367,6 @@ function renderSummary(panel) {
     const segmentsStatus = appState.tabState?.taskStatus?.segments || "idle";
     const isLoading = summaryStatus === "processing" || segmentsStatus === "processing";
     const hasContent = !!String(summary || "").trim() || segments.length > 0;
-    const cloudReading = isCloudReadLoadingForCurrentVideo();
-
-    if (cloudReading && !hasContent) {
-        panel.dataset.lastSignature = `cloud-loading:${normalizeBvidCase(resolveCurrentBvid() || "")}`;
-        panel.innerHTML = renderCloudLoadingState("总结", "读取云端数据中...");
-        return;
-    }
 
     const signature = JSON.stringify({
         summary,
@@ -1794,12 +1811,6 @@ function renderChat(panel) {
     }
     const history = Array.isArray(appState.cache?.history) ? appState.cache.history : [];
     const pending = Array.isArray(appState.chatPending) ? appState.chatPending : [];
-    const cloudReading = isCloudReadLoadingForCurrentVideo();
-    if (cloudReading && !history.length && !pending.length) {
-        panel.dataset.lastSignature = `chat-cloud-loading:${normalizeBvidCase(resolveCurrentBvid() || "")}`;
-        panel.innerHTML = renderCloudLoadingState("聊天", "读取云端数据中...");
-        return;
-    }
     
     const signature = JSON.stringify({
         h: history.length,
@@ -1959,12 +1970,6 @@ function renderReal(panel) {
     const claims = Array.isArray(rumors?.claims) ? rumors.claims : [];
     const rumorsStatus = appState.tabState?.taskStatus?.rumors || "idle";
     const hasRumorsCache = !!String(rumors?.overview || "").trim() || claims.length > 0;
-    const cloudReading = isCloudReadLoadingForCurrentVideo();
-    if (cloudReading && !hasRumorsCache) {
-        panel.dataset.lastSignature = `rumors-cloud-loading:${normalizeBvidCase(resolveCurrentBvid() || "")}`;
-        panel.innerHTML = renderCloudLoadingState("验真助手", "读取云端数据中...");
-        return;
-    }
     
     // Sort claims by timestamp
     const sortedClaims = [...claims].sort((a, b) => {
@@ -3208,12 +3213,26 @@ function isCloudReadLoadingForCurrentVideo() {
         && appState.cloudReadState?.status === "loading";
 }
 
+function shouldAttemptCloudReadForVideo(bvid) {
+    const target = normalizeBvidCase(bvid || resolveCurrentBvid() || "");
+    if (!target) return false;
+    const state = appState.cloudReadState || {};
+    if (normalizeBvidCase(state.bvid || "") === target && (state.status === "loading" || state.status === "success" || state.status === "failed")) {
+        return false;
+    }
+    const cache = appState.cache || null;
+    const hasSubtitle = Array.isArray(cache?.rawSubtitle) && cache.rawSubtitle.length > 0;
+    const hasSummary = !!String(cache?.summary || "").trim();
+    const hasSegments = Array.isArray(cache?.segments) && cache.segments.length > 0;
+    const hasRumors = !!String(cache?.rumors?.overview || "").trim() || (Array.isArray(cache?.rumors?.claims) && cache.rumors.claims.length > 0);
+    return !(hasSubtitle && (hasSummary || hasSegments) && hasRumors);
+}
+
 function shouldAttemptCloudReadForPage(page) {
     const target = normalizeBvidCase(resolveCurrentBvid() || "");
     if (!target) return false;
     if (!["summary", "real"].includes(String(page || ""))) return false;
-    const state = appState.cloudReadState || {};
-    if (normalizeBvidCase(state.bvid || "") === target && (state.status === "loading" || state.status === "success" || state.status === "failed")) {
+    if (!shouldAttemptCloudReadForVideo(target)) {
         return false;
     }
     if (page === "summary") {
@@ -3224,9 +3243,10 @@ function shouldAttemptCloudReadForPage(page) {
     return !(!!String(appState.cache?.rumors?.overview || "").trim() || Array.isArray(appState.cache?.rumors?.claims) && appState.cache.rumors.claims.length > 0);
 }
 
-function startCloudReadForCurrentVideo() {
-    const target = normalizeBvidCase(resolveCurrentBvid() || "");
+function startCloudReadForCurrentVideo(options = {}) {
+    const target = normalizeBvidCase(options?.bvid || resolveCurrentBvid() || "");
     if (!target) return;
+    const silent = options?.silent !== false;
     const nextRequestId = Number(appState.cloudReadState?.requestId || 0) + 1;
     appState.cloudReadState = {
         bvid: target,
@@ -3234,7 +3254,7 @@ function startCloudReadForCurrentVideo() {
         requestId: nextRequestId,
         startedAt: Date.now()
     };
-    renderContent();
+    if (!silent) renderContent();
     const request = chrome.runtime.sendMessage({ action: "GET_CACHE", bvid: target });
     const timeout = new Promise((_, reject) => {
         setTimeout(() => reject(new Error("CLOUD_TIMEOUT")), CLOUD_READ_TIMEOUT_MS);
@@ -3243,8 +3263,19 @@ function startCloudReadForCurrentVideo() {
         .then((res) => {
             if (normalizeBvidCase(appState.cloudReadState?.bvid || "") !== target) return;
             if (Number(appState.cloudReadState?.requestId || 0) !== nextRequestId) return;
-            if (!res?.ok) throw new Error(res?.error || "访问云端数据库失败");
+            if (!res?.ok) {
+                appState.cloudReadState = {
+                    bvid: target,
+                    status: "failed",
+                    requestId: nextRequestId,
+                    startedAt: Date.now()
+                };
+                if (!silent) renderContent();
+                showToast("访问云端数据库失败");
+                return;
+            }
             const cache = res?.cache || null;
+            const cacheUpdated = !!(cache && normalizeBvidCase(cache?.bvid || "") === target);
             if (cache && normalizeBvidCase(cache?.bvid || "") === target) {
                 appState.cache = cache;
             }
@@ -3255,9 +3286,9 @@ function startCloudReadForCurrentVideo() {
                 requestId: nextRequestId,
                 startedAt: Date.now()
             };
-            renderContent();
+            if (cacheUpdated || !silent) renderContent();
         })
-        .catch(() => {
+        .catch((error) => {
             if (normalizeBvidCase(appState.cloudReadState?.bvid || "") !== target) return;
             if (Number(appState.cloudReadState?.requestId || 0) !== nextRequestId) return;
             appState.cloudReadState = {
@@ -3266,8 +3297,10 @@ function startCloudReadForCurrentVideo() {
                 requestId: nextRequestId,
                 startedAt: Date.now()
             };
-            renderContent();
-            showToast("访问云端数据库失败！");
+            if (!silent) renderContent();
+            if (String(error?.message || "") && String(error.message) !== "CLOUD_TIMEOUT") {
+                showToast("访问云端数据库失败");
+            }
         });
 }
 
@@ -4519,6 +4552,7 @@ function startRouteWatcher() {
 function clearStreamCache() {
     appState.playInfo = null;
     appState.playInfoUpdatedAt = 0;
+    appState.isPlayInfoReady = false;
     window.postMessage({ type: "REFRESH_PLAYINFO" }, "*");
 }
 
@@ -4580,21 +4614,22 @@ async function waitForAlignedPlayInfo(targetBvid) {
     let freshData = null;
     for (let i = 0; i < 30; i++) {
         const info = await requestFromInject(500);
-        const infoBvid = normalizeBvidCase(info?._bvid || "");
-        if (info && infoBvid === expectedBvid) {
-            freshData = info;
+        if (hasUsablePlayInfoForBvid(info, expectedBvid)) {
+            freshData = normalizeIncomingPlayInfo(info);
             break;
         }
         await sleep(200);
     }
 
     if (freshData && normalizeBvidCase(getBvidFromUrl(location.href) || "") === expectedBvid) {
-        appState.playInfo = normalizeIncomingPlayInfo(freshData);
+        appState.playInfo = freshData;
         appState.playInfoUpdatedAt = Date.now();
+        appState.isPlayInfoReady = true;
         logContent.info("playinfo_received", { source: "route_wait_ready", bvid: expectedBvid });
         return appState.playInfo;
     }
 
+    appState.isPlayInfoReady = false;
     logContent.warn("playinfo_received", { source: "route_wait_timeout", bvid: expectedBvid });
     return null;
 }
@@ -4730,6 +4765,9 @@ async function syncCacheFromBackground(bvid, options = {}) {
             reconcileTranscriptionState(target);
             appState.isStateDirty = false;
             renderContent();
+            if (shouldAttemptCloudReadForVideo(target)) {
+                startCloudReadForCurrentVideo({ bvid: target, silent: true });
+            }
             return false;
         }
         appState.cache = cache;
@@ -4738,6 +4776,9 @@ async function syncCacheFromBackground(bvid, options = {}) {
         reconcileTranscriptionState(target);
         appState.isStateDirty = false;
         renderContent();
+        if (shouldAttemptCloudReadForVideo(target)) {
+            startCloudReadForCurrentVideo({ bvid: target, silent: true });
+        }
         return true;
     } catch (_) {}
     return false;
@@ -5056,9 +5097,12 @@ function toggleExportMenu(buttonNode) {
 }
 
 function renderExportMainMenu(menuContainer) {
+    const downloadReady = !!appState.isPlayInfoReady;
+    const downloadVideoLabel = downloadReady ? "下载视频" : "正在获取视频流...";
+    const downloadAudioLabel = downloadReady ? "下载音频" : "正在获取视频流...";
     menuContainer.innerHTML = `
-        <button type="button" class="copy-option-btn" data-action="download-video">下载视频</button>
-        <button type="button" class="copy-option-btn" data-action="download-audio">下载音频</button>
+        <button type="button" class="copy-option-btn" data-action="download-video" style="opacity:${downloadReady ? "1" : "0.72"}">${downloadVideoLabel}</button>
+        <button type="button" class="copy-option-btn" data-action="download-audio" style="opacity:${downloadReady ? "1" : "0.72"}">${downloadAudioLabel}</button>
         <div class="menu-divider" style="height:1px;background:#eee;margin:4px 0;"></div>
         <button type="button" class="copy-option-btn" data-action="export-srt">导出字幕 (SRT)</button>
     `;
@@ -5068,13 +5112,37 @@ function renderExportMainMenu(menuContainer) {
         handleExportSrt();
     });
     
-    menuContainer.querySelector('[data-action="download-video"]').addEventListener("click", (e) => {
+    menuContainer.querySelector('[data-action="download-video"]').addEventListener("click", async (e) => {
         e.stopPropagation();
+        const btn = e.currentTarget;
+        if (!appState.isPlayInfoReady) {
+            btn.disabled = true;
+            btn.textContent = "正在获取视频流...";
+            const info = await refreshPlayInfoNow(7000).catch(() => null);
+            if (!hasUsablePlayInfoForBvid(info, getBvidFromUrl(location.href) || "")) {
+                showToast("正在获取视频流，请稍后重试");
+                renderExportMainMenu(menuContainer);
+                return;
+            }
+            renderExportMainMenu(menuContainer);
+        }
         renderQualityList(menuContainer, "video");
     });
     
-    menuContainer.querySelector('[data-action="download-audio"]').addEventListener("click", (e) => {
+    menuContainer.querySelector('[data-action="download-audio"]').addEventListener("click", async (e) => {
         e.stopPropagation();
+        const btn = e.currentTarget;
+        if (!appState.isPlayInfoReady) {
+            btn.disabled = true;
+            btn.textContent = "正在获取视频流...";
+            const info = await refreshPlayInfoNow(7000).catch(() => null);
+            if (!hasUsablePlayInfoForBvid(info, getBvidFromUrl(location.href) || "")) {
+                showToast("正在获取视频流，请稍后重试");
+                renderExportMainMenu(menuContainer);
+                return;
+            }
+            renderExportMainMenu(menuContainer);
+        }
         renderQualityList(menuContainer, "audio");
     });
 }
@@ -5093,12 +5161,26 @@ function renderQualityList(menuContainer, type) {
         showToast("下载链接已经失效，请刷新页面后重试");
         return;
     }
-    if (!appState.playInfo) {
-        showToast("视频信息加载中，请稍候...");
-        // 尝试重新触发获取
-        window.postMessage({ type: "REFRESH_PLAYINFO" }, "*");
+    const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+    if (!hasUsablePlayInfoForBvid(appState.playInfo, pageBvid)) {
+        appState.isPlayInfoReady = false;
+        showToast("正在获取视频流，请稍候...");
+        refreshPlayInfoNow(7000)
+            .then((info) => {
+                if (!hasUsablePlayInfoForBvid(info, pageBvid)) {
+                    showToast("暂未拿到可用视频流，请稍后重试");
+                    renderExportMainMenu(menuContainer);
+                    return;
+                }
+                renderQualityList(menuContainer, type);
+            })
+            .catch(() => {
+                showToast("暂未拿到可用视频流，请稍后重试");
+                renderExportMainMenu(menuContainer);
+            });
         return;
     }
+    appState.isPlayInfoReady = true;
     const streams = appState.playInfo[type] || [];
     if (!streams.length) {
         showToast(`未找到${type === "video" ? "视频" : "音频"}流`);
@@ -5452,31 +5534,43 @@ function renderQualityList(menuContainer, type) {
     }
 }
 
-async function refreshPlayInfoNow(timeoutMs = 2000) {
+async function refreshPlayInfoNow(timeoutMs = 7000) {
+    const waitTimeoutMs = Math.max(6000, Number(timeoutMs) || 0);
     const pageBvid = window.location.href.match(/BV[a-zA-Z0-9]{10}/)?.[0] || "";
+    const hasUsableStream =
+        appState.playInfo &&
+        normalizeBvidCase(appState.playInfo._bvid) === normalizeBvidCase(pageBvid) &&
+        (
+            (Array.isArray(appState.playInfo.audio) && appState.playInfo.audio.length > 0) ||
+            (Array.isArray(appState.playInfo.video) && appState.playInfo.video.length > 0)
+        );
 
-    if (!appState.playInfo || appState.playInfo._bvid !== pageBvid) {
+    if (!hasUsableStream) {
         appState.playInfo = null;
+        appState.isPlayInfoReady = false;
         window.postMessage({ type: "PLAYER_WAKE_UP" }, "*");
         window.postMessage({ type: "REFRESH_PLAYINFO" }, "*");
 
         const startWait = Date.now();
-        while (Date.now() - startWait < timeoutMs && (!appState.playInfo || appState.playInfo._bvid !== pageBvid)) {
+        while (Date.now() - startWait < waitTimeoutMs) {
             const info = await requestFromInject(400);
-            if (info && normalizeBvidCase(info?._bvid || "") === normalizeBvidCase(pageBvid)) {
+            if (hasUsablePlayInfoForBvid(info, pageBvid)) {
                 appState.playInfo = normalizeIncomingPlayInfo(info);
                 appState.playInfoUpdatedAt = Date.now();
+                appState.isPlayInfoReady = true;
                 break;
             }
             await sleep(200);
         }
     }
 
-    if (appState.playInfo && appState.playInfo._bvid === pageBvid) {
+    if (hasUsablePlayInfoForBvid(appState.playInfo, pageBvid)) {
+        appState.isPlayInfoReady = true;
         logger.info("✅ 获取到匹配视频的 Playinfo:", pageBvid);
         return appState.playInfo;
     }
 
+    appState.isPlayInfoReady = false;
     logger.error("❌ 无法获取到匹配当前 BVID 的音频流");
     return null;
 }

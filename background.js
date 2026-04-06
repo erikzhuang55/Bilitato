@@ -226,12 +226,6 @@ chrome.runtime.onInstalled.addListener(async () => {
     logBackground.info("storage_update", { source: "on_installed", debug_mode: currentDebugMode });
 });
 
-if (chrome.action?.onClicked) {
-    chrome.action.onClicked.addListener(() => {
-        chrome.tabs.create({ url: "https://github.com/erikzhuang55/" }).catch(() => {});
-    });
-}
-
 chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local") return;
     logBackground.debug("storage_listener_trigger", { keys: Object.keys(changes || {}) });

@@ -51,6 +51,10 @@ function repairUnescapedQuotes(str) {
   return out;
 }
 
+function isDebugEnabled() {
+  return !!globalThis.AIPluginLogger?.isDebugEnabled?.();
+}
+
 export function robustJSONParse(str) {
   if (!str) return null;
 
@@ -108,7 +112,9 @@ export function robustJSONParse(str) {
              return JSON.parse(repaired);
           }
       } catch (e2) {
-          console.error("JSON Parse Failed:", e2, content);
+          if (isDebugEnabled()) {
+              console.error("JSON Parse Failed:", e2, content);
+          }
           return null; // Return null instead of throwing to avoid crashing
       }
   }

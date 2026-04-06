@@ -1,10 +1,14 @@
 let IS_DEBUG_MODE = false;
 
 const logger = {
-    info: (...args) => { if (IS_DEBUG_MODE) console.log("[Content]", ...args); },
-    warn: (...args) => { if (IS_DEBUG_MODE) console.warn("[Content]", ...args); },
-    error: (...args) => { if (IS_DEBUG_MODE) console.error("[Content]", ...args); }
+    info: (...args) => { if (isDebugLoggingEnabled()) console.log("[Content]", ...args); },
+    warn: (...args) => { if (isDebugLoggingEnabled()) console.warn("[Content]", ...args); },
+    error: (...args) => { if (isDebugLoggingEnabled()) console.error("[Content]", ...args); }
 };
+
+function isDebugLoggingEnabled() {
+    return !!(IS_DEBUG_MODE || appState?.settings?.debugMode);
+}
 
 const UI_ICON_BASE_DIR = "assets/ui";
 const FOLLOW_RESUME_MS = 5000;
@@ -253,6 +257,7 @@ async function bootstrap() {
     startRouteWatcher();
     await waitPanelMount();
     await loadBootstrapData();
+    globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
     appState.injectBvid = normalizeBvidCase(appState.tabState?.activeBvid || getBvidFromUrl(location.href) || "");
     appState.injectBvidChangedAt = Date.now();
     beginSubtitleObservation(appState.injectBvid);
@@ -394,7 +399,10 @@ function onStorageChanged(changes, areaName) {
     const beforeBvid = normalizeBvidCase(appState.tabState?.activeBvid);
     const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href));
     const tabStateBefore = appState.tabState;
-    if (changes.settings?.newValue) appState.settings = changes.settings.newValue;
+    if (changes.settings?.newValue) {
+        appState.settings = changes.settings.newValue;
+        globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
+    }
     if (changes.providers?.newValue) appState.providers = changes.providers.newValue;
     const newKey = String(changes.settings?.newValue?.apiKey || "").trim();
     const prevKey = String(changes.settings?.oldValue?.apiKey || "").trim();
@@ -488,7 +496,7 @@ async function waitPanelMount() {
         // 如果找不到右侧栏，尝试再次等待
         await sleep(1000);
         if (!document.querySelector(".right-container")) {
-             console.warn("Bilibili Assistant: No right container found.");
+             if (isDebugLoggingEnabled()) console.warn("Bilibili Assistant: No right container found.");
              return;
         }
     }
@@ -932,6 +940,7 @@ function bindPanelDelegatedEvents() {
             
             if (logoClickCount >= 5) {
                 IS_DEBUG_MODE = !IS_DEBUG_MODE;
+                globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
                 showToast(`Debug Mode ${IS_DEBUG_MODE ? "Enabled" : "Disabled"}`);
                 logoClickCount = 0;
                 refreshLogoDebugCaptureState();
@@ -1062,6 +1071,10 @@ function bindPanelDelegatedEvents() {
         }
         if (action === "settings-save") {
             saveSettingsFromPanel();
+            return;
+        }
+        if (action === "settings-authorize-custom-origin") {
+            authorizeCustomOriginFromPanel();
             return;
         }
         if (action === "settings-open-reg") {
@@ -1304,6 +1317,11 @@ async function takePanelScreenshot() {
         showToast("无法找到插件容器");
         return;
     }
+    const screenshotFn = globalThis.html2canvas;
+    if (typeof screenshotFn !== "function") {
+        showToast("截图组件未加载，当前版本暂不支持截图");
+        return;
+    }
 
     try {
         const oldOverflow = pluginBox.style.overflow;
@@ -1315,7 +1333,7 @@ async function takePanelScreenshot() {
         
         // We capture the whole plugin box, so no need to find the specific page body.
         
-        const canvas = await html2canvas(pluginBox, {
+        const canvas = await screenshotFn(pluginBox, {
             backgroundColor: null,
             scale: 2,
             useCORS: true,
@@ -1342,7 +1360,7 @@ async function takePanelScreenshot() {
         document.body.removeChild(a);
         showToast("截图已保存");
     } catch (err) {
-        console.error("Screenshot failed:", err);
+        if (isDebugLoggingEnabled()) console.error("Screenshot failed:", err);
         showToast("截图失败");
     }
 }
@@ -2300,6 +2318,7 @@ function renderSettings(panel) {
                     </select>
                     <label>Base URL</label>
                     <input id="settings-base-url" type="text" value="${escapeHtml(settings.customBaseUrl || "")}" placeholder="示例：https://api.example.com/v1">
+                    <button type="button" class="panel-btn ghost" data-action="settings-authorize-custom-origin">授权当前域名</button>
                 </div>
                 <div class="settings-group-title">ASR（音频识别）模型配置</div>
                 <label>Groq API Key</label>
@@ -2643,7 +2662,7 @@ function renderAssistantBubble(text, metrics) {
             safeText = `<div class="rich-text-block">${escapeHtml(text)}</div>`;
         }
     } catch (e) {
-        console.error("Render rich content failed:", e);
+        if (isDebugLoggingEnabled()) console.error("Render rich content failed:", e);
         safeText = `<div class="rich-text-block">${escapeHtml(text || "")}</div>`;
     }
 
@@ -3381,9 +3400,71 @@ function normalizePromptSettingsState(raw) {
     };
 }
 
-async function saveSettingsFromPanel(isAutoSave = false) {
+async function authorizeCustomOriginFromPanel() {
+    const panel = panelShadowRoot ? panelShadowRoot.getElementById("page-settings") : null;
+    if (!panel) return false;
+    const statusEl = panel.querySelector("#save-status");
+    const selectedOption = panel.querySelector("#settings-provider-select .custom-option.selected");
+    const providerValue = selectedOption ? selectedOption.dataset.value : "modelscope";
+    if (providerValue !== "custom") {
+        showToast("请先切换到自定义 Provider");
+        return false;
+    }
+    const customUrl = String(panel.querySelector("#settings-base-url")?.value || "").trim();
+    if (!customUrl) {
+        showToast("请先填写 Base URL");
+        return false;
+    }
+    if (statusEl) {
+        statusEl.textContent = "请在新窗口中完成授权...";
+        statusEl.className = "show syncing pulse";
+    }
+    try {
+        const openRes = await chrome.runtime.sendMessage({
+            action: "OPEN_PERMISSION_REQUEST_PAGE",
+            baseUrl: customUrl
+        });
+        if (!openRes?.ok) {
+            throw new Error("打开授权窗口失败");
+        }
+        const startedAt = Date.now();
+        let granted = false;
+        while (Date.now() - startedAt < 60000) {
+            const permissionRes = await chrome.runtime.sendMessage({
+                action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION",
+                baseUrl: customUrl,
+                request: false
+            });
+            if (permissionRes?.granted) {
+                granted = true;
+                break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        if (!granted) {
+            throw new Error("未授权访问该自定义 API 域名");
+        }
+        if (statusEl) {
+            statusEl.textContent = "域名已授权，正在同步...";
+            statusEl.className = "show syncing pulse";
+        }
+        await saveSettingsFromPanel(true);
+        showToast("自定义 API 域名已授权");
+        return true;
+    } catch (error) {
+        if (statusEl) {
+            statusEl.textContent = "域名授权失败";
+            statusEl.className = "show syncing";
+        }
+        showToast(error?.message || "授权失败");
+        return false;
+    }
+}
+
+async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
     const panel = panelShadowRoot ? panelShadowRoot.getElementById("page-settings") : null;
     if (!panel) return;
+    const opts = options && typeof options === "object" ? options : {};
     
     // Validate API Key globally before saving
     const apiKeyInput = panel.querySelector("#settings-api-key");
@@ -3456,6 +3537,27 @@ async function saveSettingsFromPanel(isAutoSave = false) {
         payload.customBaseUrl = appState.settings?.customBaseUrl || payload.customBaseUrl;
     }
     try {
+        if (providerValue === "custom") {
+            const customUrl = String(payload.customBaseUrl || "").trim();
+            if (!customUrl) {
+                throw new Error("自定义 Provider 需要填写 Base URL");
+            }
+            const permissionRes = await chrome.runtime.sendMessage({
+                action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION",
+                baseUrl: customUrl,
+                request: !!opts.requestCustomPermission
+            });
+            if (!permissionRes?.granted) {
+                if (isAutoSave) {
+                    if (statusEl) {
+                        statusEl.textContent = "请点击“授权当前域名”以启用自定义 API";
+                        statusEl.className = "show syncing";
+                    }
+                    return;
+                }
+                throw new Error("请先授权访问该自定义 API 域名");
+            }
+        }
         const res = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: payload });
         if (!res?.ok) throw new Error(res?.error || "保存失败");
         appState.settings = res.settings || payload;
@@ -4874,7 +4976,7 @@ function onBackgroundMessage(message) {
             const currentBvid = normalizeBvidCase(appState.injectBvid || resolveCurrentBvid() || "");
             
             if (taskBvid && currentBvid && taskBvid !== currentBvid) {
-                console.warn("转录任务已过期（视频已切换），丢弃结果", { taskBvid, currentBvid });
+                if (isDebugLoggingEnabled()) console.warn("转录任务已过期（视频已切换），丢弃结果", { taskBvid, currentBvid });
                 resetTranscriptionState({ phase: "done", progress: 100 });
                 appState.transcriptionCapsuleVisible = false;
                 appState.transcriptionCapsuleMeta = null;
@@ -5045,6 +5147,9 @@ function serializeTimelineDetail(detail) {
 function toggleExportMenu(buttonNode) {
     const existing = panelShadowRoot ? panelShadowRoot.getElementById("export-option-menu") : null;
     if (existing) {
+        if (existing.dataset.streamLoading === "1") {
+            return;
+        }
         closeExportMenu();
         return;
     }
@@ -5096,7 +5201,29 @@ function toggleExportMenu(buttonNode) {
     }
 }
 
+function renderExportLoadingState(menuContainer, type) {
+    if (!menuContainer) return;
+    const title = type === "audio" ? "正在获取音频流..." : "正在获取视频流...";
+    menuContainer.dataset.streamLoading = "1";
+    menuContainer.innerHTML = `
+        <div class="quality-list-header" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #eee;margin-bottom:4px;">
+            <button class="back-btn" style="border:none;background:none;cursor:pointer;font-size:16px;padding:0 4px;">←</button>
+            <span style="font-size:13px;font-weight:600;">${title}</span>
+        </div>
+        <div class="quality-list-body" style="padding:18px 16px 16px;color:#61666d;font-size:13px;line-height:1.7;">
+            正在拉取当前视频的最新播放地址，请稍候...
+        </div>
+    `;
+    menuContainer.querySelector(".back-btn")?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        menuContainer.dataset.streamLoading = "";
+        renderExportMainMenu(menuContainer);
+    });
+}
+
 function renderExportMainMenu(menuContainer) {
+    if (!menuContainer) return;
+    menuContainer.dataset.streamLoading = "";
     const downloadReady = !!appState.isPlayInfoReady;
     const downloadVideoLabel = downloadReady ? "下载视频" : "正在获取视频流...";
     const downloadAudioLabel = downloadReady ? "下载音频" : "正在获取视频流...";
@@ -5114,10 +5241,8 @@ function renderExportMainMenu(menuContainer) {
     
     menuContainer.querySelector('[data-action="download-video"]').addEventListener("click", async (e) => {
         e.stopPropagation();
-        const btn = e.currentTarget;
         if (!appState.isPlayInfoReady) {
-            btn.disabled = true;
-            btn.textContent = "正在获取视频流...";
+            renderExportLoadingState(menuContainer, "video");
             const info = await refreshPlayInfoNow(7000).catch(() => null);
             if (!hasUsablePlayInfoForBvid(info, getBvidFromUrl(location.href) || "")) {
                 showToast("正在获取视频流，请稍后重试");
@@ -5131,10 +5256,8 @@ function renderExportMainMenu(menuContainer) {
     
     menuContainer.querySelector('[data-action="download-audio"]').addEventListener("click", async (e) => {
         e.stopPropagation();
-        const btn = e.currentTarget;
         if (!appState.isPlayInfoReady) {
-            btn.disabled = true;
-            btn.textContent = "正在获取视频流...";
+            renderExportLoadingState(menuContainer, "audio");
             const info = await refreshPlayInfoNow(7000).catch(() => null);
             if (!hasUsablePlayInfoForBvid(info, getBvidFromUrl(location.href) || "")) {
                 showToast("正在获取视频流，请稍后重试");
@@ -5157,6 +5280,8 @@ async function probeUrlInPage(url) {
 }
 
 function renderQualityList(menuContainer, type) {
+    if (!menuContainer) return;
+    menuContainer.dataset.streamLoading = "";
     if (!chrome.runtime?.id) {
         showToast("下载链接已经失效，请刷新页面后重试");
         return;
@@ -5308,6 +5433,32 @@ function renderQualityList(menuContainer, type) {
         urlToButtons.set(key, list);
     };
 
+    const refreshMenuWhenAllExpired = async () => {
+        if (menuContainer.dataset.expiredRefreshAttempted === "1") return false;
+        menuContainer.dataset.expiredRefreshAttempted = "1";
+        try {
+            const info = await refreshPlayInfoNow(7000).catch(() => null);
+            const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+            if (!hasUsablePlayInfoForBvid(info, pageBvid)) {
+                showToast("当前下载链接已失效，请刷新页面后重试");
+                return false;
+            }
+            renderQualityList(menuContainer, type);
+            return true;
+        } catch (_) {
+            showToast("当前下载链接已失效，请刷新页面后重试");
+            return false;
+        }
+    };
+
+    const hasAnyUsableButton = () => {
+        const actionButtons = Array.from(menuContainer.querySelectorAll(".download-default-btn, .codec-btn, .download-stream-btn"));
+        return actionButtons.some((btn) => {
+            const status = String(btn?.dataset?.probeStatus || "");
+            return status === "ok" || status === "unknown";
+        });
+    };
+
     const syncDefaultButtonState = (groupIndex) => {
         if (type !== "video") return;
         const defaultBtn = menuContainer.querySelector(`.download-default-btn[data-group="${groupIndex}"]`);
@@ -5413,6 +5564,9 @@ function renderQualityList(menuContainer, type) {
                 if (btn.dataset.probeStatus === "pending") applyProbeState(btn, "unknown");
             });
             syncAllDefaultButtons();
+            if (!hasAnyUsableButton()) {
+                await refreshMenuWhenAllExpired();
+            }
         } catch (_) {
             if (!isProbeTargetAlive() || menuContainer.dataset.probeSessionId !== probeSessionId) return;
             pendingButtons.forEach((btn) => applyProbeState(btn, "unknown"));
@@ -5478,7 +5632,7 @@ function renderQualityList(menuContainer, type) {
                 const groupIndex = parseInt(btn.dataset.group, 10);
                 const streamIndex = parseInt(btn.dataset.stream, 10);
                 if (!Number.isFinite(groupIndex) || !Number.isFinite(streamIndex) || streamIndex < 0) {
-                    showToast("当前清晰度暂无可用流");
+                    refreshMenuWhenAllExpired().catch(() => {});
                     return;
                 }
                 triggerVideoDownload(btn, groupIndex, streamIndex);

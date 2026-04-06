@@ -27,8 +27,7 @@
     }
 
     function shouldPrint(level, debugMode) {
-        if (debugMode) return true;
-        return level === "warn" || level === "error";
+        return !!debugMode;
     }
 
     function toConsole(entry) {
@@ -64,6 +63,7 @@
 
         function write(levelName, eventName, detail) {
             const level = LEVELS.has(levelName) ? levelName : "info";
+            const debugMode = !!getDebugMode();
             const entry = {
                 time: new Date().toISOString(),
                 level,
@@ -71,10 +71,11 @@
                 event: normalizeEvent(eventName),
                 detail: safeDetail(detail)
             };
-            try {
-                onEntry(entry);
-            } catch (_) {}
-            const debugMode = !!getDebugMode();
+            if (debugMode) {
+                try {
+                    onEntry(entry);
+                } catch (_) {}
+            }
             if (printConsole && shouldPrint(level, debugMode)) {
                 toConsole(entry);
             }
@@ -99,6 +100,15 @@
 
     global.AIPluginLogger = {
         create,
-        normalizeEvent
+        normalizeEvent,
+        isDebugEnabled() {
+            return !!global.__AI_PLUGIN_DEBUG__;
+        },
+        setDebugEnabled(value) {
+            global.__AI_PLUGIN_DEBUG__ = !!value;
+        }
     };
+    if (typeof global.__AI_PLUGIN_DEBUG__ === "undefined") {
+        global.__AI_PLUGIN_DEBUG__ = false;
+    }
 })(globalThis);

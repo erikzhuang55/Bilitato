@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>授权自定义 API 域名</title>
+    <style>
+        :root {
+            color-scheme: light;
+            --bg: #f7f9fb;
+            --card: #ffffff;
+            --text: #1f2937;
+            --muted: #6b7280;
+            --accent: #fb7299;
+            --accent-dark: #e85f87;
+            --border: #e5e7eb;
+        }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            background: linear-gradient(180deg, #fff8fb 0%, var(--bg) 100%);
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .card {
+            width: 100%;
+            max-width: 420px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            box-shadow: 0 14px 30px rgba(15, 23, 42, 0.08);
+            padding: 24px;
+            box-sizing: border-box;
+        }
+        h1 {
+            margin: 0 0 12px;
+            font-size: 22px;
+        }
+        p {
+            margin: 0 0 12px;
+            line-height: 1.6;
+            color: var(--muted);
+        }
+        .domain {
+            margin: 16px 0;
+            padding: 14px 16px;
+            border-radius: 12px;
+            background: #fff4f7;
+            border: 1px solid #ffd4e1;
+            color: var(--text);
+            word-break: break-all;
+        }
+        .actions {
+            display: flex;
+            gap: 12px;
+            margin-top: 18px;
+        }
+        button {
+            border: 0;
+            border-radius: 12px;
+            padding: 12px 16px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        #grant-btn {
+            flex: 1;
+            background: var(--accent);
+            color: #fff;
+        }
+        #grant-btn:hover {
+            background: var(--accent-dark);
+        }
+        #close-btn {
+            background: #eef2f7;
+            color: var(--text);
+        }
+        #status {
+            min-height: 24px;
+            margin-top: 14px;
+            font-size: 14px;
+            color: var(--muted);
+        }
+        #status.success {
+            color: #0f766e;
+        }
+        #status.error {
+            color: #b91c1c;
+        }
+    </style>
+</head>
+<body>
+    <main class="card">
+        <h1>授权自定义 API 域名</h1>
+        <p>为了让插件访问你填写的自定义接口，需要单独授权这个域名。</p>
+        <div id="domain" class="domain">正在解析域名...</div>
+        <div class="actions">
+            <button id="grant-btn" type="button">允许访问此域名</button>
+            <button id="close-btn" type="button">取消</button>
+        </div>
+        <div id="status"></div>
+    </main>
+    <script src="permission-request.js"></script>
+</body>
+</html>

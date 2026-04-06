@@ -11,6 +11,11 @@ const logger = {
     error: (...args) => { if (IS_DEBUG_MODE) console.error("[Background]", ...args); }
 };
 
+function syncRuntimeDebugFlag(enabled) {
+    IS_DEBUG_MODE = !!enabled;
+    globalThis.AIPluginLogger?.setDebugEnabled?.(!!enabled);
+}
+
 const MAX_GLOBAL_CONCURRENCY = 1;
 const TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
@@ -209,9 +214,6 @@ const logCache = loggerFactory.create("cache", {
 });
 
 syncDebugModeFromStorage();
-if (chrome.sidePanel?.setPanelBehavior) {
-    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
-}
 
 chrome.runtime.onInstalled.addListener(async () => {
     const { settings } = await chrome.storage.local.get(["settings"]);
@@ -220,9 +222,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     const promptSettings = await getPromptSettingsFromSync();
     await chrome.storage.sync.set({ promptSettings });
     currentDebugMode = !!normalized.debugMode;
-    if (chrome.sidePanel?.setPanelBehavior) {
-        chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});
-    }
+    syncRuntimeDebugFlag(currentDebugMode);
     logBackground.info("storage_update", { source: "on_installed", debug_mode: currentDebugMode });
 });
 
@@ -237,6 +237,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
     logBackground.debug("storage_listener_trigger", { keys: Object.keys(changes || {}) });
     if (changes.settings?.newValue) {
         currentDebugMode = !!changes.settings.newValue.debugMode;
+        syncRuntimeDebugFlag(currentDebugMode);
     }
     Object.keys(changes || {}).forEach((key) => {
         const change = changes[key];
@@ -281,6 +282,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.downloads.onChanged.addListener((delta) => {
+    if (!currentDebugMode) return;
     if (delta.state && delta.state.current) {
         if (delta.state.current === "interrupted") {
             console.error(`[DOWNLOAD] ID: ${delta.id} | 状态: Interrupted | 原因: ${delta.error?.current || "未知"}`);
@@ -437,12 +439,54 @@ async function handleMessage(msg, sender) {
         const incoming = msg.settings || {};
         const merged = await mergeSettings(incoming);
         currentDebugMode = !!merged.debugMode;
+        syncRuntimeDebugFlag(currentDebugMode);
         logBackground.info("storage_update", { source: "save_settings", debug_mode: currentDebugMode });
         return { settings: merged };
     }
     if (msg.action === "GET_SETTINGS") {
         const settings = await getResolvedSettings();
         return { settings, providers: PROVIDERS };
+    }
+    if (msg.action === "ENSURE_OPTIONAL_ORIGIN_PERMISSION") {
+        const baseUrl = String(msg?.baseUrl || "").trim();
+        if (!baseUrl) throw new Error("缺少自定义 API 地址");
+        let origin;
+        try {
+            const url = new URL(baseUrl);
+            if (url.protocol !== "https:") {
+                throw new Error("自定义 API 地址必须使用 https");
+            }
+            origin = url.origin;
+        } catch (error) {
+            throw new Error(error?.message || "自定义 API 地址格式无效");
+        }
+        const pattern = `${origin}/*`;
+        const contains = await chrome.permissions.contains({ origins: [pattern] });
+        if (contains) {
+            return { granted: true, pattern };
+        }
+        if (msg?.request !== true) {
+            return { granted: false, pattern };
+        }
+        const granted = await chrome.permissions.request({ origins: [pattern] });
+        return { granted: !!granted, pattern };
+    }
+    if (msg.action === "OPEN_PERMISSION_REQUEST_PAGE") {
+        const baseUrl = String(msg?.baseUrl || "").trim();
+        if (!baseUrl) throw new Error("缺少自定义 API 地址");
+        const authUrl = chrome.runtime.getURL(`permission-request.html?baseUrl=${encodeURIComponent(baseUrl)}`);
+        if (chrome.windows?.create) {
+            const created = await chrome.windows.create({
+                url: authUrl,
+                type: "popup",
+                width: 420,
+                height: 560,
+                focused: true
+            });
+            return { ok: true, windowId: created?.id || null };
+        }
+        const createdTab = await chrome.tabs.create({ url: authUrl, active: true });
+        return { ok: true, tabId: createdTab?.id || null };
     }
     throw new Error("未知 action");
 }
@@ -2787,5 +2831,6 @@ async function syncDebugModeFromStorage() {
         const { settings } = await chrome.storage.local.get(["settings"]);
         const normalized = normalizeSettings(settings);
         currentDebugMode = !!normalized.debugMode;
+        syncRuntimeDebugFlag(currentDebugMode);
     } catch (_) {}
 }

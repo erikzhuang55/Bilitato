@@ -14,14 +14,9 @@
   "permissions": [
     "scripting",
     "storage",
-    "tabs",
-    "sidePanel",
     "declarativeNetRequest",
     "downloads"
   ],
-  "side_panel": {
-    "default_path": "popup.html"
-  },
   "host_permissions": [
     "*://*.bilibili.com/*",
     "*://*.bilivideo.com/*",
@@ -34,7 +29,10 @@
     "https://open.bigmodel.cn/*",
     "https://api.moonshot.cn/*",
     "https://api.groq.com/*",
-    "https://*.supabase.co/*"
+    "https://qdksdauixnbgrgkilgac.supabase.co/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ],
   "declarative_net_request": {
     "rule_resources": [

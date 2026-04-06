@@ -413,7 +413,9 @@ const logger = {
             lastLocation = window.location.href;
             latestPlayinfo = null;
             latestAudioProbe = null;
-            console.log("%c[Inject] 检测到跳转，旧内存已物理抹除，等待新视频信号...", "color: white; background: #e67e22;");
+            if (IS_DEBUG_MODE) {
+                console.log("%c[Inject] 检测到跳转，旧内存已物理抹除，等待新视频信号...", "color: white; background: #e67e22;");
+            }
         }
     }, 300);
 

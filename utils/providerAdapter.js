@@ -56,6 +56,10 @@ export const PROVIDERS = {
     }
 };
 
+function isDebugEnabled() {
+    return !!globalThis.AIPluginLogger?.isDebugEnabled?.();
+}
+
 function isQwenModel(model) {
     return /qwen/i.test(String(model || ""));
 }
@@ -112,7 +116,9 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
         }
     }
 
-    console.log(`[Provider] Calling ${provider.name} at ${finalUrl} (Base: ${baseUrl}) with model ${model}`);
+    if (isDebugEnabled()) {
+        console.log(`[Provider] Calling ${provider.name} at ${finalUrl} (Base: ${baseUrl}) with model ${model}`);
+    }
 
     const headers = {
         "Content-Type": "application/json"
@@ -188,7 +194,9 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
 export async function callAI(providerKey, config, messages, signal) {
     const req = resolveProviderRequest(providerKey, config, messages, false);
     const requestBody = req.body || {};
-    console.log("[DEBUG request body]", JSON.stringify(requestBody));
+    if (isDebugEnabled()) {
+        console.log("[DEBUG request body]", JSON.stringify(requestBody));
+    }
     const res = await fetch(req.finalUrl, {
         method: "POST",
         headers: req.headers,
@@ -226,7 +234,9 @@ export async function callAI(providerKey, config, messages, signal) {
 export async function callAIStream(providerKey, config, messages, signal, onDelta) {
     const req = resolveProviderRequest(providerKey, config, messages, true);
     const requestBody = req.body || {};
-    console.log("[DEBUG request body]", JSON.stringify(requestBody));
+    if (isDebugEnabled()) {
+        console.log("[DEBUG request body]", JSON.stringify(requestBody));
+    }
     if (req.provider.type === "google" || (req.isCustom && req.protocol === "claude")) {
         const once = await callAI(providerKey, config, messages, signal);
         if (typeof onDelta === "function" && once.text) onDelta(once.text);
@@ -274,7 +284,9 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
                 const delta = parsed?.choices?.[0]?.delta || parsed?.choices?.[0]?.message || {};
                 const content = delta?.content || delta?.reasoning_content || delta?.text || "";
                 if (!delta?.content && !delta?.reasoning_content && !delta?.text) {
-                    console.error("[DEBUG SSE chunk]", JSON.stringify(parsed).slice(0, 300));
+                    if (isDebugEnabled()) {
+                        console.error("[DEBUG SSE chunk]", JSON.stringify(parsed).slice(0, 300));
+                    }
                 }
                 const token = Array.isArray(content) ? content.map((item) => item?.text || "").join("") : String(content || "");
                 if (!token) continue;

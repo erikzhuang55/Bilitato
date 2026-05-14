@@ -112,9 +112,18 @@ export function robustJSONParse(str) {
              return JSON.parse(repaired);
           }
       } catch (e2) {
-          if (isDebugEnabled()) {
-              console.error("JSON Parse Failed:", e2, content);
-          }
+          globalThis.AIPluginLogger?.create?.("ai", {
+              getDebugMode: isDebugEnabled,
+              onEntry: () => {},
+              printConsole: true
+          })?.debug("json_parse_failed", {
+              task: "json_parse",
+              code: "JSON_PARSE_ERROR",
+              detail: {
+                  error_message: e2?.message || "JSON parse failed",
+                  content_chars: String(content || "").length
+              }
+          });
           return null; // Return null instead of throwing to avoid crashing
       }
   }

@@ -1,14 +1,3 @@
-// ==========================================
-// 全局调试控制
-// ==========================================
-let IS_DEBUG_MODE = false;
-
-const logger = {
-    info: (...args) => { if (IS_DEBUG_MODE) console.log("[Inject]", ...args); },
-    warn: (...args) => { if (IS_DEBUG_MODE) console.warn("[Inject]", ...args); },
-    error: (...args) => { if (IS_DEBUG_MODE) console.error("[Inject]", ...args); }
-};
-
 (function () {
     if (window.__BILI_AI_INJECT_READY__) {
         window.postMessage({ type: "BILI_INJECT_READY" }, "*");
@@ -97,8 +86,7 @@ const logger = {
                             _bvid: currentBvid,
                             _ts: Date.now()
                         };
-                        logger.info("Playinfo 已捕获并成功绑定 BVID:", currentBvid);
-                        emitLog("playinfo_updated", { source: "xhr_playurl", url, bvid: currentBvid });
+                        emitLog("playinfo_updated", { source: "xhr_playurl", url_host: getUrlHost(url), bvid: currentBvid });
                     }
                 } catch (_) {}
             });
@@ -115,7 +103,7 @@ const logger = {
         try {
             data = JSON.parse(rawText);
         } catch (_) {
-            emitLog("json_parse_error", { source: "inject_subtitle", url });
+            emitLog("json_parse_error", { source: "inject_subtitle", url_host: getUrlHost(url) });
             return;
         }
         const body = data?.body || data?.data?.body || data?.content || data?.result?.body || (Array.isArray(data) ? data : null);
@@ -156,8 +144,15 @@ const logger = {
     }
 
     function emitLog(event, detail) {
-        if (!IS_DEBUG_MODE) return;
         window.postMessage({ type: "BILI_INJECT_LOG", event, detail }, "*");
+    }
+
+    function getUrlHost(url) {
+        try {
+            return new URL(String(url || "")).host;
+        } catch (_) {
+            return "";
+        }
     }
 
     function scheduleAutoTriggerFlow(reason) {
@@ -392,7 +387,7 @@ const logger = {
         if (info) {
             window.postMessage({ type: "BILI_PLAYINFO_DATA", info }, "*");
         } else {
-            logger.info("[Bilitato] playInfo not available or empty");
+            emitLog("playinfo_missing", { source: "resolve_playinfo" });
         }
     }
 
@@ -413,9 +408,7 @@ const logger = {
             lastLocation = window.location.href;
             latestPlayinfo = null;
             latestAudioProbe = null;
-            if (IS_DEBUG_MODE) {
-                console.log("%c[Inject] 检测到跳转，旧内存已物理抹除，等待新视频信号...", "color: white; background: #e67e22;");
-            }
+            emitLog("route_memory_reset", { bvid: getBvidFromUrl(window.location.href) });
         }
     }, 300);
 
@@ -497,7 +490,6 @@ const logger = {
                 }));
             
             if (candidates.length > resultVideo.length) {
-                // logger.info("[Cleanup] 已自动合并同清晰度的重复下载源。"); // logged above
             }
             
             // Audio streams
@@ -538,7 +530,11 @@ const logger = {
                 _ts: Number(data._ts || 0)
             };
         } catch (e) {
-            window.postMessage({ type: "BILI_INJECT_LOG", event: "playinfo_error", detail: { error: e.message, stack: e.stack } }, "*");
+            emitLog("playinfo_error", {
+                code: "PLAYINFO_PARSE_FAILED",
+                error_message: e.message || "playinfo parse failed",
+                stack_preview: String(e.stack || "").split("\n").slice(0, 3).join("\n")
+            });
             return null;
         }
     }

@@ -78,12 +78,6 @@ const {
     renderErrorPanel
 } = globalThis.BilitatoContentErrorMessages || {};
 
-const logger = {
-    info: (...args) => { if (isDebugLoggingEnabled()) console.log("[Content]", ...args); },
-    warn: (...args) => { if (isDebugLoggingEnabled()) console.warn("[Content]", ...args); },
-    error: (...args) => { if (isDebugLoggingEnabled()) console.error("[Content]", ...args); }
-};
-
 function isDebugLoggingEnabled() {
     return !!(IS_DEBUG_MODE || appState?.settings?.debugMode);
 }
@@ -120,6 +114,7 @@ const appState = {
     chatStreamTimer: null,
     chatPort: null,
     chatActiveMessageId: "",
+    debugLogPollTimer: null,
     chatAutoScrollPausedUntil: 0,
     pendingSubtitle: null,
     timelineSearchTerm: "",
@@ -261,6 +256,11 @@ function notifyMappedError(error, fallbackMessage = "请求失败") {
 function runErrorDisplayDemo(code, target = "summary") {
     const normalizedCode = String(code || "UNKNOWN").trim();
     const page = String(target || "summary");
+    logUI.info("debug_error_demo", {
+        task: "debug",
+        code: normalizedCode,
+        detail: { target: page }
+    });
     const error = {
         code: normalizedCode,
         status: normalizedCode.match(/^HTTP_(\d{3})$/)?.[1] ? Number(normalizedCode.match(/^HTTP_(\d{3})$/)?.[1]) : undefined,
@@ -282,13 +282,16 @@ function runErrorDisplayDemo(code, target = "summary") {
     renderContent();
 }
 const logContent = globalThis.AIPluginLogger.create("content", {
-    getDebugMode: () => !!appState.settings?.debugMode
+    getDebugMode: () => isDebugLoggingEnabled()
 });
 const logUI = globalThis.AIPluginLogger.create("ui", {
-    getDebugMode: () => !!appState.settings?.debugMode
+    getDebugMode: () => isDebugLoggingEnabled()
+});
+const logDownload = globalThis.AIPluginLogger.create("download", {
+    getDebugMode: () => isDebugLoggingEnabled()
 });
 const logInject = globalThis.AIPluginLogger.create("inject", {
-    getDebugMode: () => !!appState.settings?.debugMode
+    getDebugMode: () => isDebugLoggingEnabled()
 });
 let logWindowVisible = false;
 
@@ -332,7 +335,11 @@ function injectScriptBridge() {
     script.onerror = () => {
         script.remove();
         appState.injectReady = true;
-        logContent.error("subtitle_detected", { source: "inject_load_error", src: script.src });
+        logContent.error("inject_load_error", {
+            task: "subtitle",
+            code: "INJECT_LOAD_FAILED",
+            detail: { has_src: !!script.src }
+        });
         scheduleInjectRetry();
     };
     (document.head || document.documentElement).appendChild(script);
@@ -545,7 +552,7 @@ async function waitPanelMount() {
         // 如果找不到右侧栏，尝试再次等待
         await sleep(1000);
         if (!document.querySelector(".right-container")) {
-             if (isDebugLoggingEnabled()) console.warn("Bilibili Assistant: No right container found.");
+             logUI.warn("mount_target_missing", { task: "ui", detail: { selector: "right-container" } });
              return;
         }
     }
@@ -961,6 +968,17 @@ function refreshLogoDebugCaptureState() {
     logoImg.title = IS_DEBUG_MODE ? "点击截图当前面板" : "";
 }
 
+function syncRuntimeDebugModeToBackground() {
+    try {
+        const result = chrome.runtime?.sendMessage?.({
+            action: "SET_RUNTIME_DEBUG",
+            enabled: isDebugLoggingEnabled(),
+            source: "content_debug_toggle"
+        });
+        if (result && typeof result.catch === "function") result.catch(() => {});
+    } catch (_) {}
+}
+
 function bindPanelDelegatedEvents() {
     const panelRoot = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
     if (!panelRoot || panelRoot.dataset.bound === "1") return;
@@ -981,6 +999,7 @@ function bindPanelDelegatedEvents() {
             if (logoClickCount >= 5) {
                 IS_DEBUG_MODE = !IS_DEBUG_MODE;
                 globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
+                syncRuntimeDebugModeToBackground();
                 showToast(`Debug Mode ${IS_DEBUG_MODE ? "Enabled" : "Disabled"}`);
                 logoClickCount = 0;
                 refreshLogoDebugCaptureState();
@@ -1016,6 +1035,9 @@ function bindPanelDelegatedEvents() {
                 appState.chatJustSwitched = true;
                 const chatPanel = panelShadowRoot ? panelShadowRoot.getElementById("page-chat") : null;
                 if (chatPanel) chatPanel.dataset.lastSignature = "";
+            }
+            if (navId === "debug" && appState.activePage !== "debug") {
+                logUI.info("debug_page_open", { task: "debug" });
             }
             appState.activePage = navId;
             setNavActionActive("");
@@ -1174,6 +1196,7 @@ function bindPanelDelegatedEvents() {
             return;
         }
         if (action === "debug-clear-errors") {
+            logUI.info("debug_clear_errors", { task: "debug" });
             appState.panelErrors = {};
             renderContent();
             showToast("已清空错误测试状态");
@@ -1346,6 +1369,7 @@ function renderNav() {
 function renderContent() {
     const panel = panelShadowRoot ? panelShadowRoot.getElementById("panel-body") : null;
     if (!panel) return;
+    if (appState.activePage !== "debug") stopRealtimeLogPolling();
     renderTopRemaining();
     ensureCloudReadForActivePage();
 
@@ -1429,7 +1453,11 @@ async function takePanelScreenshot() {
         document.body.removeChild(a);
         showToast("截图已保存");
     } catch (err) {
-        if (isDebugLoggingEnabled()) console.error("Screenshot failed:", err);
+        logUI.error("screenshot_failed", {
+            task: "ui",
+            code: "SCREENSHOT_FAILED",
+            detail: { error_message: err.message || "截图失败" }
+        });
         showToast("截图失败");
     }
 }
@@ -2390,6 +2418,23 @@ function renderSettings(panel) {
     
     const currentProviderName = providers[providerKey]?.name || providerKey;
     const arrowIcon = `<svg class="custom-select-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+    const renderCustomSelect = (id, items, selectedValue) => {
+        const selected = items.find((item) => String(item.value) === String(selectedValue)) || items[0] || { value: "", label: "" };
+        return `
+            <select id="${escapeHtmlAttr(id)}" class="settings-native-select-hidden">
+                ${items.map((item) => `<option value="${escapeHtmlAttr(item.value)}" ${String(item.value) === String(selected.value) ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}
+            </select>
+            <div class="custom-select-container settings-custom-select" data-target-select="${escapeHtmlAttr(id)}">
+                <div class="custom-select-trigger">
+                    <span class="current-value">${escapeHtml(selected.label)}</span>
+                    ${arrowIcon}
+                </div>
+                <div class="custom-select-options">
+                    ${items.map((item) => `<div class="custom-option ${String(item.value) === String(selected.value) ? "selected" : ""}" data-value="${escapeHtmlAttr(item.value)}">${escapeHtml(item.label)}</div>`).join("")}
+                </div>
+            </div>
+        `;
+    };
     const promptSettings = normalizePromptSettingsState(settings.promptSettings);
     const promptMode = promptSettings.mode === "custom" ? "custom" : "guided";
     const promptSummary = String(promptSettings.custom.summary || "");
@@ -2448,10 +2493,10 @@ function renderSettings(panel) {
                 <input id="settings-groq-model" type="text" value="${escapeHtml(groqModel)}" placeholder="示例：whisper-large-v3-turbo">
                 <div class="settings-group-title">个性化</div>
                 <label>修改模式</label>
-                <select id="settings-prompt-mode">
-                    <option value="guided" ${promptMode === "guided" ? "selected" : ""}>简单模式</option>
-                    <option value="custom" ${promptMode === "custom" ? "selected" : ""}>专业模式</option>
-                </select>
+                ${renderCustomSelect("settings-prompt-mode", [
+                    { value: "guided", label: "简单模式" },
+                    { value: "custom", label: "专业模式" }
+                ], promptMode)}
                 <div id="settings-prompt-guided-wrap" class="${guidedVisible}">
                     <label>语言风格</label>
                     <div class="slider-group">
@@ -2495,23 +2540,23 @@ function renderSettings(panel) {
                 <button type="button" class="panel-btn ghost" data-action="settings-reset-prompts">恢复默认</button>
                 <div class="settings-group-title">调用与显示模式</div>
                 <label>调用模式</label>
-                <select id="settings-pref-mode">
-                    <option value="quality" ${settings.prefMode === "quality" ? "selected" : ""}>质量模式</option>
-                    <option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>节流模式</option>
-                </select>
+                ${renderCustomSelect("settings-pref-mode", [
+                    { value: "quality", label: "质量模式" },
+                    { value: "efficiency", label: "节流模式" }
+                ], settings.prefMode === "quality" ? "quality" : "efficiency")}
                 <label>默认开屏页</label>
-                <select id="settings-default-open-page">
-                    <option value="CC" ${defaultOpenPage === "CC" ? "selected" : ""}>字幕</option>
-                    <option value="summary" ${defaultOpenPage === "summary" ? "selected" : ""}>总结</option>
-                    <option value="chat" ${defaultOpenPage === "chat" ? "selected" : ""}>聊天</option>
-                    <option value="real" ${defaultOpenPage === "real" ? "selected" : ""}>验真</option>
-                </select>
+                ${renderCustomSelect("settings-default-open-page", [
+                    { value: "CC", label: "字幕" },
+                    { value: "summary", label: "总结" },
+                    { value: "chat", label: "聊天" },
+                    { value: "real", label: "验真" }
+                ], defaultOpenPage)}
                 <div class="settings-group-title">异常诊断</div>
                 <label>允许上报异常</label>
-                <select id="settings-sentry-enabled">
-                    <option value="false" ${settings.sentryEnabled ? "" : "selected"}>关闭</option>
-                    <option value="true" ${settings.sentryEnabled ? "selected" : ""}>开启</option>
-                </select>
+                ${renderCustomSelect("settings-sentry-enabled", [
+                    { value: "false", label: "关闭" },
+                    { value: "true", label: "开启" }
+                ], settings.sentryEnabled ? "true" : "false")}
                 <!--
                 <label>Debug</label>
                 <select id="settings-debug-mode">
@@ -2539,7 +2584,7 @@ function renderSettings(panel) {
             e.stopPropagation();
             const isOpen = selectContainer.classList.contains("open");
             // Close all other selects if any (future proofing)
-            document.querySelectorAll(".custom-select-container.open").forEach(el => {
+            panel.querySelectorAll(".custom-select-container.open").forEach(el => {
                 if(el !== selectContainer) el.classList.remove("open");
             });
             selectContainer.classList.toggle("open");
@@ -2592,6 +2637,7 @@ function renderSettings(panel) {
         selectContainer._closeHandler = closeDropdown;
         document.addEventListener("click", closeDropdown);
     }
+    bindSettingsCustomSelects(panel);
 
     panel.querySelector("#settings-base-url")?.addEventListener("input", () => updateSettingsProviderHint(panel));
     updateSettingsProviderHint(panel);
@@ -2756,8 +2802,42 @@ function renderDebugPanel(panel) {
         </div>
         <div class="page-body debug-page-body">
             ${renderErrorDemoControls()}
+            ${renderRealtimeLogPanel()}
         </div>
     `;
+    bindRealtimeLogPanel(panel);
+    renderRealtimeLogData();
+    startRealtimeLogPolling();
+}
+
+function renderRealtimeLogPanel() {
+    return `
+        <div class="settings-group-title">实时日志</div>
+        <div class="debug-log-panel">
+            <div class="debug-log-toolbar">
+                <span class="debug-log-status" id="debug-log-status">自动刷新中</span>
+                <div class="debug-log-actions">
+                    <button type="button" class="panel-btn ghost" data-action="debug-logs-refresh">刷新</button>
+                    <button type="button" class="panel-btn ghost" data-action="debug-logs-copy">复制</button>
+                    <button type="button" class="panel-btn ghost" data-action="debug-logs-clear">清空</button>
+                </div>
+            </div>
+            <pre class="debug-log-body" id="debug-log-body">正在读取日志...</pre>
+        </div>
+    `;
+}
+
+function bindRealtimeLogPanel(panel) {
+    if (!panel) return;
+    panel.querySelector('[data-action="debug-logs-refresh"]')?.addEventListener("click", () => {
+        renderRealtimeLogData();
+    });
+    panel.querySelector('[data-action="debug-logs-copy"]')?.addEventListener("click", () => {
+        copyRealtimeLogData();
+    });
+    panel.querySelector('[data-action="debug-logs-clear"]')?.addEventListener("click", () => {
+        clearRealtimeLogs();
+    });
 }
 
 async function runTasks(tasks) {
@@ -2783,7 +2863,16 @@ async function runTasks(tasks) {
         finishAsymptoticPseudoProgress(taskId, false);
     } catch (error) {
         finishAsymptoticPseudoProgress(taskId, true);
-        logContent.error("task_abort", { tasks, error: error.message || "任务失败", stack: error.stack || "" });
+        logContent.error("task_abort", {
+            task: "generate",
+            code: error?.code || "",
+            status: Number(error?.status || 0) || 0,
+            detail: {
+                tasks,
+                error_message: error.message || "任务失败",
+                stack_preview: String(error.stack || "").split("\n").slice(0, 3).join("\n")
+            }
+        });
         reportContentError?.(error, { task: tasks.join(","), source: "run_tasks" });
         const targetPage = tasks.includes("rumors") ? "real" : "summary";
         const view = setPanelError(targetPage, error, error.message || "任务失败");
@@ -2825,7 +2914,11 @@ function renderChatHistoryItem(item) {
     return renderChatHistoryItemHtml(item, {
         hideMetrics: shouldHideRuntimeMetrics(),
         onRenderError: (error) => {
-            if (isDebugLoggingEnabled()) console.error("Render rich content failed:", error);
+            logUI.error("rich_content_render_failed", {
+                task: "chat",
+                code: "RENDER_FAILED",
+                detail: { error_message: error.message || "渲染失败" }
+            });
         }
     });
 }
@@ -2834,7 +2927,11 @@ function renderAssistantBubble(text, metrics) {
     return renderAssistantBubbleHtml(text, metrics, {
         hideMetrics: shouldHideRuntimeMetrics(),
         onRenderError: (error) => {
-            if (isDebugLoggingEnabled()) console.error("Render rich content failed:", error);
+            logUI.error("rich_content_render_failed", {
+                task: "chat",
+                code: "RENDER_FAILED",
+                detail: { error_message: error.message || "渲染失败" }
+            });
         }
     });
 }
@@ -3417,6 +3514,44 @@ async function authorizeCustomOriginFromPanel() {
         showToast(error?.message || "授权失败");
         return false;
     }
+}
+
+function bindSettingsCustomSelects(panel) {
+    if (panel.dataset.customSelectCloseBound !== "1") {
+        panel.dataset.customSelectCloseBound = "1";
+        panel.addEventListener("click", () => {
+            panel.querySelectorAll(".custom-select-container.open").forEach((item) => item.classList.remove("open"));
+        });
+    }
+    panel.querySelectorAll(".settings-custom-select").forEach((selectContainer) => {
+        const targetId = selectContainer.dataset.targetSelect || "";
+        const nativeSelect = targetId ? panel.querySelector(`#${CSS.escape(targetId)}`) : null;
+        const selectTrigger = selectContainer.querySelector(".custom-select-trigger");
+        const selectOptions = selectContainer.querySelector(".custom-select-options");
+        if (!nativeSelect || !selectTrigger || !selectOptions) return;
+
+        selectTrigger.addEventListener("click", (event) => {
+            event.stopPropagation();
+            const wasOpen = selectContainer.classList.contains("open");
+            panel.querySelectorAll(".custom-select-container.open").forEach((item) => {
+                if (item !== selectContainer) item.classList.remove("open");
+            });
+            selectContainer.classList.toggle("open", !wasOpen);
+        });
+
+        selectOptions.querySelectorAll(".custom-option").forEach((option) => {
+            option.addEventListener("click", (event) => {
+                event.stopPropagation();
+                const value = String(option.dataset.value || "");
+                nativeSelect.value = value;
+                selectContainer.querySelector(".current-value").textContent = option.textContent || "";
+                selectOptions.querySelectorAll(".custom-option").forEach((item) => item.classList.remove("selected"));
+                option.classList.add("selected");
+                selectContainer.classList.remove("open");
+                nativeSelect.dispatchEvent(new Event("change", { bubbles: true }));
+            });
+        });
+    });
 }
 
 async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
@@ -4005,7 +4140,11 @@ async function triggerDefaultSubtitleCapture() {
     } catch (error) {
         appState.injectReady = true;
         pushSubtitleTimeline("default_capture_error", { bvid, error: error.message || "unknown_error" });
-        logContent.debug("subtitle_detected", { bvid, source: "default_fetch_miss", error: error.message || "unknown_error" });
+        logContent.debug("subtitle_detected", {
+            bvid,
+            source: "default_fetch_miss",
+            detail: { error_message: error.message || "unknown_error" }
+        });
     } finally {
         appState.subtitleCaptureLock = false;
     }
@@ -4110,13 +4249,35 @@ async function startTranscriptionFromCapsule() {
     const progressTaskId = `transcribe:${bvid || "unknown"}`;
     const injectBvid = normalizeBvidCase(appState.injectBvid || "");
     if (!meta || !bvid || !injectBvid || bvid !== injectBvid) {
+        logContent.warn("asr_start_blocked", {
+            task: "asr",
+            bvid,
+            code: "ASR_VIDEO_STATE_CHANGED",
+            detail: {
+                inject_bvid: injectBvid,
+                has_meta: !!meta
+            }
+        });
         showToast("当前视频状态已变化，请稍后重试");
         return;
     }
     if (isTranscriptionRunning()) {
+        logContent.warn("asr_start_blocked", {
+            task: "asr",
+            bvid,
+            code: "ASR_ALREADY_RUNNING"
+        });
         showToast("正在转录中，请稍候...");
         return;
     }
+    logContent.info("asr_start_clicked", {
+        task: "asr",
+        bvid,
+        detail: {
+            cid: Number(meta?.cid || 0),
+            has_audio_url: !!appState.playInfo?.audio?.[0]?.url
+        }
+    });
     patchTranscriptionState({
         phase: "running",
         bvid,
@@ -4134,6 +4295,13 @@ async function startTranscriptionFromCapsule() {
         });
         if (!res?.ok) throw new Error(res?.error || "Groq 转录失败");
     } catch (error) {
+        logContent.error("asr_start_failed", {
+            task: "asr",
+            bvid,
+            code: error?.code || "ASR_START_FAILED",
+            status: Number(error?.status || 0) || 0,
+            detail: { error_message: error.message || "Groq 转录失败" }
+        });
         appState.transcriptionSuppressUntil = Date.now() + 30000;
         if (appState.tabState && typeof appState.tabState === "object") {
             appState.tabState = {
@@ -4329,7 +4497,86 @@ async function renderLogWindowData() {
             .join("\n");
     } catch (error) {
         box.textContent = `读取日志失败：${error.message || "未知错误"}`;
-        logContent.error("cache_read", { key: "global_logs", error: error.message || "读取日志失败", stack: error.stack || "" });
+        logContent.error("cache_read_failed", {
+            task: "logs",
+            code: "LOG_READ_FAILED",
+            detail: {
+                key: "global_logs",
+                error_message: error.message || "读取日志失败"
+            }
+        });
+    }
+}
+
+async function renderRealtimeLogData() {
+    const box = panelShadowRoot ? panelShadowRoot.getElementById("debug-log-body") : null;
+    const status = panelShadowRoot ? panelShadowRoot.getElementById("debug-log-status") : null;
+    if (!box) return;
+    try {
+        const res = await chrome.runtime.sendMessage({ action: "GET_LOGS" });
+        if (!res?.ok) throw new Error(res?.error || "读取日志失败");
+        const logs = Array.isArray(res.logs) ? res.logs : [];
+        box.textContent = logs.length
+            ? logs.slice(-200).map(formatLogEntryLine).join("\n")
+            : "暂无日志。请先在测试页或插件里触发一次操作。";
+        if (status) status.textContent = `${logs.length} 条，${formatTimelineTime(Date.now())} 已刷新`;
+    } catch (error) {
+        box.textContent = `读取日志失败：${error.message || "未知错误"}`;
+        if (status) status.textContent = "读取失败";
+        logContent.error("cache_read_failed", {
+            task: "logs",
+            code: "LOG_READ_FAILED",
+            detail: {
+                key: "global_logs",
+                error_message: error.message || "读取日志失败"
+            }
+        });
+    }
+}
+
+function formatLogEntryLine(item) {
+    const detail = item?.detail && typeof item.detail === "object" ? item.detail : {};
+    const meta = [
+        item?.task ? `task=${item.task}` : "",
+        item?.bvid ? `bvid=${item.bvid}` : "",
+        item?.provider ? `provider=${item.provider}` : "",
+        item?.model ? `model=${item.model}` : "",
+        item?.code ? `code=${item.code}` : "",
+        item?.status ? `status=${item.status}` : "",
+        item?.duration_ms ? `duration=${item.duration_ms}ms` : ""
+    ].filter(Boolean).join(" ");
+    const detailText = JSON.stringify(detail || {});
+    return `${item?.time || ""} ${String(item?.level || "").toUpperCase()} [${item?.module || ""}] ${item?.event || ""}${meta ? ` | ${meta}` : ""} | ${detailText}`;
+}
+
+function copyRealtimeLogData() {
+    const box = panelShadowRoot ? panelShadowRoot.getElementById("debug-log-body") : null;
+    const text = box?.textContent || "";
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+        showToast("日志已复制");
+    }).catch((error) => {
+        showToast("复制失败");
+        logContent.error("task_abort", {
+            task: "copy_logs",
+            code: "LOG_COPY_FAILED",
+            detail: { error_message: error.message || "复制失败" }
+        });
+    });
+}
+
+async function clearRealtimeLogs() {
+    try {
+        await chrome.runtime.sendMessage({ action: "CLEAR_LOGS" });
+        await renderRealtimeLogData();
+        showToast("日志已清空");
+    } catch (error) {
+        showToast("清空失败");
+        logContent.error("task_abort", {
+            task: "clear_logs",
+            code: "LOG_CLEAR_FAILED",
+            detail: { error_message: error.message || "清空失败" }
+        });
     }
 }
 
@@ -4341,7 +4588,11 @@ function copyLogWindowData() {
         showToast("日志已复制");
     }).catch((error) => {
         showToast("复制失败");
-        logContent.error("task_abort", { task: "copy_logs", error: error.message || "复制失败", stack: error.stack || "" });
+        logContent.error("task_abort", {
+            task: "copy_logs",
+            code: "LOG_COPY_FAILED",
+            detail: { error_message: error.message || "复制失败" }
+        });
     });
 }
 
@@ -4374,6 +4625,23 @@ function stopLogWindowPolling() {
     if (!appState.logPollTimer) return;
     clearInterval(appState.logPollTimer);
     appState.logPollTimer = null;
+}
+
+function startRealtimeLogPolling() {
+    stopRealtimeLogPolling();
+    appState.debugLogPollTimer = setInterval(() => {
+        if (appState.activePage !== "debug") {
+            stopRealtimeLogPolling();
+            return;
+        }
+        renderRealtimeLogData();
+    }, 1000);
+}
+
+function stopRealtimeLogPolling() {
+    if (!appState.debugLogPollTimer) return;
+    clearInterval(appState.debugLogPollTimer);
+    appState.debugLogPollTimer = null;
 }
 
 function syncPanelHeightMode() {
@@ -4609,7 +4877,15 @@ async function forwardSubtitlePayload(payload, source) {
         logContent.info("subtitle_detected", { bvid, cid: appState.injectCid || 0, count: Array.isArray(payload.subtitle) ? payload.subtitle.length : 0, source });
     } catch (error) {
         pushSubtitleTimeline("subtitle_forward_error", { source, bvid, error: error.message || "转发字幕失败" });
-        logContent.error("task_abort", { task: "subtitle_forward", bvid, error: error.message || "转发字幕失败", stack: error.stack || "" });
+        logContent.error("task_abort", {
+            task: "subtitle_forward",
+            bvid,
+            code: error?.code || "SUBTITLE_FORWARD_FAILED",
+            detail: {
+                source,
+                error_message: error.message || "转发字幕失败"
+            }
+        });
         reportContentError?.(error, { task: "subtitle_forward", source });
     }
 }
@@ -4811,7 +5087,11 @@ function onBackgroundMessage(message) {
             const currentBvid = normalizeBvidCase(appState.injectBvid || resolveCurrentBvid() || "");
             
             if (taskBvid && currentBvid && taskBvid !== currentBvid) {
-                if (isDebugLoggingEnabled()) console.warn("转录任务已过期（视频已切换），丢弃结果", { taskBvid, currentBvid });
+                logContent.warn("transcription_stale_result_drop", {
+                    task: "asr",
+                    bvid: taskBvid,
+                    detail: { current_bvid: currentBvid }
+                });
                 resetTranscriptionState({ phase: "done", progress: 100 });
                 appState.transcriptionCapsuleVisible = false;
                 appState.transcriptionCapsuleMeta = null;
@@ -5400,13 +5680,34 @@ function renderQualityList(menuContainer, type) {
         const stream = group?.streams?.[streamIndex];
         if (!stream) return;
 
-        logger.info(`[UI] 用户选择了: [${group.desc}] - [${stream.codecName}]`);
+        logDownload.info("download_option_selected", {
+            task: "download",
+            bvid: getBvidFromUrl(location.href) || "",
+            detail: {
+                asset_type: "video",
+                quality: group.desc || "",
+                quality_id: Number(group.quality || 0),
+                codec: stream.codecName || "",
+                has_video: true,
+                has_audio: true
+            }
+        });
         const originalText = btn.textContent;
         btn.textContent = "准备中...";
         btn.disabled = true;
         btn.style.opacity = "0.7";
 
         try {
+            const prepareStartedAt = Date.now();
+            logDownload.info("download_url_prepare_start", {
+                task: "download",
+                bvid: getBvidFromUrl(location.href) || "",
+                detail: {
+                    asset_type: "video",
+                    quality: group.desc || "",
+                    codec: stream.codecName || ""
+                }
+            });
             await refreshPlayInfoNow();
             // Re-find the matching stream from fresh data
             const freshGroups = appState.playInfo?.video || [];
@@ -5427,6 +5728,18 @@ function renderQualityList(menuContainer, type) {
                 showToast("下载链接已经失效，请刷新页面后重试");
                 return;
             }
+            logDownload.info("download_url_prepare_success", {
+                task: "download",
+                bvid: getBvidFromUrl(location.href) || "",
+                duration_ms: Date.now() - prepareStartedAt,
+                detail: {
+                    asset_type: "video",
+                    quality: freshGroup.desc || group.desc || "",
+                    codec: freshStream.codecName || "",
+                    has_url: !!urlToDownload,
+                    file_ext: "mp4"
+                }
+            });
             
             await chrome.runtime.sendMessage({
                 action: "DOWNLOAD_STREAM",
@@ -5434,7 +5747,18 @@ function renderQualityList(menuContainer, type) {
             });
             showToast("下载已触发，请查看浏览器下载");
         } catch (err) {
-            logger.error("Download error:", err);
+            logDownload.error("download_url_prepare_failed", {
+                task: "download",
+                bvid: getBvidFromUrl(location.href) || "",
+                code: err?.code || "DOWNLOAD_URL_PREPARE_FAILED",
+                status: Number(err?.status || 0) || 0,
+                detail: {
+                    asset_type: "video",
+                    quality: group.desc || "",
+                    codec: stream.codecName || "",
+                    reason: err.message || "下载失败"
+                }
+            });
             notifyMappedError({ ...err, code: err?.code || "DOWNLOAD_FAILED" }, "下载失败: " + (err.message || ""));
         } finally {
             btn.textContent = originalText;
@@ -5476,6 +5800,16 @@ function renderQualityList(menuContainer, type) {
                 btn.disabled = true;
                 
                 try {
+                    const prepareStartedAt = Date.now();
+                    logDownload.info("download_url_prepare_start", {
+                        task: "download",
+                        bvid: getBvidFromUrl(location.href) || "",
+                        detail: {
+                            asset_type: "audio",
+                            quality: stream.desc || "",
+                            codec: stream.codecName || ""
+                        }
+                    });
                     await refreshPlayInfoNow();
                     const freshAudio = appState.playInfo?.audio || [];
                     const freshStream = freshAudio.find(a => a.id === stream.id) || freshAudio[index];
@@ -5489,6 +5823,18 @@ function renderQualityList(menuContainer, type) {
                         showToast("下载链接已经失效，请刷新页面后重试");
                         return;
                     }
+                    logDownload.info("download_url_prepare_success", {
+                        task: "download",
+                        bvid: getBvidFromUrl(location.href) || "",
+                        duration_ms: Date.now() - prepareStartedAt,
+                        detail: {
+                            asset_type: "audio",
+                            quality: freshStream.desc || "",
+                            codec: freshStream.codecName || "",
+                            has_url: !!freshStream.url,
+                            file_ext: "m4a"
+                        }
+                    });
                     
                     await chrome.runtime.sendMessage({
                         action: "DOWNLOAD_STREAM",
@@ -5496,6 +5842,16 @@ function renderQualityList(menuContainer, type) {
                     });
                     showToast("下载已触发，请查看浏览器下载");
                 } catch (err) {
+                    logDownload.error("download_url_prepare_failed", {
+                        task: "download",
+                        bvid: getBvidFromUrl(location.href) || "",
+                        code: err?.code || "DOWNLOAD_URL_PREPARE_FAILED",
+                        status: Number(err?.status || 0) || 0,
+                        detail: {
+                            asset_type: "audio",
+                            reason: err.message || "下载失败"
+                        }
+                    });
                     notifyMappedError({ ...err, code: err?.code || "DOWNLOAD_FAILED" }, "失败: " + (err.message || ""));
                 } finally {
                     btn.textContent = originalText;
@@ -5520,6 +5876,14 @@ async function refreshPlayInfoNow(timeoutMs = 7000) {
     if (!hasUsableStream) {
         appState.playInfo = null;
         appState.isPlayInfoReady = false;
+        logDownload.info("download_capture_start", {
+            task: "download",
+            bvid: pageBvid,
+            detail: {
+                source_candidates: ["window_playinfo", "inject_bridge"],
+                timeout_ms: waitTimeoutMs
+            }
+        });
         window.postMessage({ type: "PLAYER_WAKE_UP" }, "*");
         window.postMessage({ type: "REFRESH_PLAYINFO" }, "*");
 
@@ -5530,6 +5894,16 @@ async function refreshPlayInfoNow(timeoutMs = 7000) {
                 appState.playInfo = normalizeIncomingPlayInfo(info);
                 appState.playInfoUpdatedAt = Date.now();
                 appState.isPlayInfoReady = true;
+                logDownload.info("download_playinfo_found", {
+                    task: "download",
+                    bvid: pageBvid,
+                    duration_ms: Date.now() - startWait,
+                    detail: {
+                        source: "inject_bridge",
+                        video_stream_count: Array.isArray(appState.playInfo?.video) ? appState.playInfo.video.length : 0,
+                        audio_stream_count: Array.isArray(appState.playInfo?.audio) ? appState.playInfo.audio.length : 0
+                    }
+                });
                 break;
             }
             await sleep(200);
@@ -5538,12 +5912,27 @@ async function refreshPlayInfoNow(timeoutMs = 7000) {
 
     if (hasUsablePlayInfoForBvid(appState.playInfo, pageBvid)) {
         appState.isPlayInfoReady = true;
-        logger.info("✅ 获取到匹配视频的 Playinfo:", pageBvid);
+        logDownload.info("download_streams_parse_success", {
+            task: "download",
+            bvid: pageBvid,
+            detail: {
+                source: "playinfo",
+                video_group_count: Array.isArray(appState.playInfo?.video) ? appState.playInfo.video.length : 0,
+                audio_stream_count: Array.isArray(appState.playInfo?.audio) ? appState.playInfo.audio.length : 0
+            }
+        });
         return appState.playInfo;
     }
 
     appState.isPlayInfoReady = false;
-    logger.error("❌ 无法获取到匹配当前 BVID 的音频流");
+    logDownload.warn("download_playinfo_missing", {
+        task: "download",
+        bvid: pageBvid,
+        code: "DOWNLOAD_PLAYINFO_MISSING",
+        detail: {
+            checked_sources: ["window_playinfo", "inject_bridge"]
+        }
+    });
     return null;
 }
 

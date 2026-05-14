@@ -62,6 +62,14 @@ function isDebugEnabled() {
     return !!globalThis.AIPluginLogger?.isDebugEnabled?.();
 }
 
+function getProviderLogger() {
+    return globalThis.AIPluginLogger?.create?.("ai", {
+        getDebugMode: isDebugEnabled,
+        onEntry: () => {},
+        printConsole: true
+    });
+}
+
 function isQwenModel(model) {
     return /qwen/i.test(String(model || ""));
 }
@@ -118,9 +126,17 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
         }
     }
 
-    if (isDebugEnabled()) {
-        console.log(`[Provider] Calling ${provider.name} at ${finalUrl} (Base: ${baseUrl}) with model ${model}`);
-    }
+    getProviderLogger()?.debug("provider_request_resolved", {
+        task: "ai",
+        provider: providerKey || config.provider,
+        model,
+        detail: {
+            provider_name: provider.name,
+            protocol,
+            is_custom: isCustom,
+            url_host: safeUrlHost(finalUrl)
+        }
+    });
 
     const headers = {
         "Content-Type": "application/json"
@@ -196,9 +212,16 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
 export async function callAI(providerKey, config, messages, signal) {
     const req = resolveProviderRequest(providerKey, config, messages, false);
     const requestBody = req.body || {};
-    if (isDebugEnabled()) {
-        console.log("[DEBUG request body]", JSON.stringify(requestBody));
-    }
+    getProviderLogger()?.debug("provider_request_body_built", {
+        task: "ai",
+        provider: providerKey,
+        model: requestBody.model || "",
+        detail: {
+            message_count: Array.isArray(requestBody.messages) ? requestBody.messages.length : 0,
+            max_tokens: Number(requestBody.max_tokens || 0),
+            stream: !!requestBody.stream
+        }
+    });
     const res = await fetch(req.finalUrl, {
         method: "POST",
         headers: req.headers,
@@ -236,9 +259,16 @@ export async function callAI(providerKey, config, messages, signal) {
 export async function callAIStream(providerKey, config, messages, signal, onDelta) {
     const req = resolveProviderRequest(providerKey, config, messages, true);
     const requestBody = req.body || {};
-    if (isDebugEnabled()) {
-        console.log("[DEBUG request body]", JSON.stringify(requestBody));
-    }
+    getProviderLogger()?.debug("provider_request_body_built", {
+        task: "ai",
+        provider: providerKey,
+        model: requestBody.model || "",
+        detail: {
+            message_count: Array.isArray(requestBody.messages) ? requestBody.messages.length : 0,
+            max_tokens: Number(requestBody.max_tokens || 0),
+            stream: !!requestBody.stream
+        }
+    });
     if (req.provider.type === "google" || (req.isCustom && req.protocol === "claude")) {
         const once = await callAI(providerKey, config, messages, signal);
         if (typeof onDelta === "function" && once.text) onDelta(once.text);
@@ -286,9 +316,15 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
                 const delta = parsed?.choices?.[0]?.delta || parsed?.choices?.[0]?.message || {};
                 const content = delta?.content || delta?.reasoning_content || delta?.text || "";
                 if (!delta?.content && !delta?.reasoning_content && !delta?.text) {
-                    if (isDebugEnabled()) {
-                        console.error("[DEBUG SSE chunk]", JSON.stringify(parsed).slice(0, 300));
-                    }
+                    getProviderLogger()?.debug("provider_stream_empty_delta", {
+                        task: "ai",
+                        provider: providerKey,
+                        model: req.model || "",
+                        detail: {
+                            has_usage: !!parsed?.usage,
+                            choice_count: Array.isArray(parsed?.choices) ? parsed.choices.length : 0
+                        }
+                    });
                 }
                 const token = Array.isArray(content) ? content.map((item) => item?.text || "").join("") : String(content || "");
                 if (!token) continue;
@@ -302,4 +338,12 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
         headers: res.headers,
         usage
     };
+}
+
+function safeUrlHost(url) {
+    try {
+        return new URL(String(url || "")).host;
+    } catch (_) {
+        return "";
+    }
 }

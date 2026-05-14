@@ -1498,6 +1498,62 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .debug-page-body {
     padding: 10px;
+    gap: 10px;
+}
+
+.debug-log-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 240px;
+    border: 1px solid #eef1f5;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #111827;
+}
+
+.debug-log-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.debug-log-status {
+    min-width: 0;
+    color: #cbd5e1;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.debug-log-actions {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.debug-log-actions .panel-btn {
+    height: 26px;
+    padding: 0 8px;
+    font-size: 11px;
+}
+
+.debug-log-body {
+    flex: 1;
+    min-height: 190px;
+    max-height: 360px;
+    margin: 0;
+    padding: 10px;
+    overflow: auto;
+    color: #bfdbfe;
+    font-size: 11px;
+    line-height: 1.45;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .settings-tip {
@@ -1528,6 +1584,10 @@ input[type="range"]:active::-webkit-slider-thumb {
 .custom-select-container {
     position: relative;
     width: 100%;
+}
+
+.settings-native-select-hidden {
+    display: none !important;
 }
 
 .custom-select-trigger {
@@ -2213,6 +2273,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 .summary-result-text,
 .subtitle-timeline-list,
 .plugin-log-body,
+.debug-log-body,
 .rich-table-wrap,
 .settings-scroll-body,
 .chat-display-area,
@@ -2228,6 +2289,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 .summary-result-text::-webkit-scrollbar,
 .subtitle-timeline-list::-webkit-scrollbar,
 .plugin-log-body::-webkit-scrollbar,
+.debug-log-body::-webkit-scrollbar,
 .rich-table-wrap::-webkit-scrollbar,
 /* 针对所有可滚动区域（Shadow DOM 内部生效） */ 
 .page-body, 

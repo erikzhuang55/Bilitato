@@ -22,12 +22,6 @@ import "./logger.js";
 
 let IS_DEBUG_MODE = false;
 
-const logger = {
-    info: (...args) => { if (IS_DEBUG_MODE) console.log("[Background]", ...args); },
-    warn: (...args) => { if (IS_DEBUG_MODE) console.warn("[Background]", ...args); },
-    error: (...args) => { if (IS_DEBUG_MODE) console.error("[Background]", ...args); }
-};
-
 function syncRuntimeDebugFlag(enabled) {
     IS_DEBUG_MODE = !!enabled;
     globalThis.AIPluginLogger?.setDebugEnabled?.(!!enabled);
@@ -135,6 +129,24 @@ const logCache = loggerFactory.create("cache", {
         pushGlobalLog(entry);
     }
 });
+const logDownload = loggerFactory.create("download", {
+    getDebugMode: () => currentDebugMode,
+    onEntry: (entry) => {
+        pushGlobalLog(entry);
+    }
+});
+const logASR = loggerFactory.create("asr", {
+    getDebugMode: () => currentDebugMode,
+    onEntry: (entry) => {
+        pushGlobalLog(entry);
+    }
+});
+const logSubtitle = loggerFactory.create("subtitle", {
+    getDebugMode: () => currentDebugMode,
+    onEntry: (entry) => {
+        pushGlobalLog(entry);
+    }
+});
 
 syncDebugModeFromStorage();
 
@@ -226,19 +238,31 @@ globalThis.addEventListener?.("unhandledrejection", (event) => {
 });
 
 chrome.downloads.onChanged.addListener((delta) => {
-    if (!currentDebugMode) return;
     if (delta.state && delta.state.current) {
         if (delta.state.current === "interrupted") {
-            console.error(`[DOWNLOAD] ID: ${delta.id} | 状态: Interrupted | 原因: ${delta.error?.current || "未知"}`);
+            logDownload.error("download_interrupted", {
+                task: "download",
+                code: "DOWNLOAD_INTERRUPTED",
+                detail: {
+                    download_id: delta.id,
+                    reason: delta.error?.current || "unknown"
+                }
+            });
         } else if (delta.state.current === "complete") {
-            console.log(`[DOWNLOAD] ID: ${delta.id} | 状态: Complete`);
+            logDownload.info("download_complete", {
+                task: "download",
+                detail: { download_id: delta.id }
+            });
         } else {
-            console.log(`[DOWNLOAD] ID: ${delta.id} | 状态: ${delta.state.current}`);
+            logDownload.debug("download_state_changed", {
+                task: "download",
+                detail: {
+                    download_id: delta.id,
+                    state: delta.state.current
+                }
+            });
         }
     }
-    // 简单的进度日志（如果有 bytesReceived 和 totalBytes 变化）
-    // 注意：Chrome 可能不频繁触发 bytesReceived 更新，或者没有 totalBytes
-    // 这里仅作示例，生产环境可能不需要过于频繁的日志
 });
 
 async function handleMessage(msg, sender) {
@@ -254,38 +278,54 @@ async function handleMessage(msg, sender) {
         const { url, filename } = msg.payload || {};
         const tabId = msg.tabId || sender.tab?.id;
         if (!url) throw new Error("URL is required");
-
-        // Step 1: URL 获取日志
-        logger.info("[DOWNLOAD] Step 1: Received URL", { url, filename, tabId });
+        const urlMeta = getUrlMeta(url);
+        const fileExt = getFileExtension(filename || "download.mp4");
+        logDownload.info("download_chrome_api_start", {
+            task: "download",
+            source: "background",
+            detail: {
+                tab_id: tabId || 0,
+                has_url: !!url,
+                url_host: urlMeta.host,
+                file_ext: fileExt,
+                save_as: true,
+                conflict_action: "uniquify"
+            }
+        });
 
         try {
-            // 直接下载；Referer 由 DNR 规则注入
             const downloadId = await chrome.downloads.download({
                 url: url,
                 filename: filename || "download.mp4",
                 saveAs: true
             });
-
-            // Step 2: 任务创建日志
-            logger.info("[DOWNLOAD] Step 2: Task created", { downloadId });
             if (!downloadId && chrome.runtime.lastError) {
-                logger.error("[DOWNLOAD] Creation failed", chrome.runtime.lastError);
                 throw new Error(chrome.runtime.lastError.message);
             }
-
-            // Step 3: 进度追踪
-            // 注意：onChanged 是全局监听，为了简单起见，这里仅注册一次监听器（或依赖全局已有的监听器）
-            // 实际工程中可能需要维护 downloadId 映射来过滤特定任务的日志
-            // 这里为了演示“详细指标”，我们临时添加一个监听器，注意内存泄漏风险（仅作演示，或者建议在全局初始化时注册）
-            
-            // 更好的做法是：仅打印日志，不在此处动态添加全局监听器以免重复。
-            // 假设我们只关心创建成功：
+            logDownload.info("download_chrome_api_success", {
+                task: "download",
+                source: "background",
+                detail: {
+                    tab_id: tabId || 0,
+                    download_id: downloadId,
+                    file_ext: fileExt,
+                    url_host: urlMeta.host
+                }
+            });
             return { success: true, downloadId };
 
         } catch (error) {
-            logBackground.error("download_failed", { url, error: error.message });
-            // Step 4: 健壮性 - 输出具体错误
-            logger.error("[DOWNLOAD] Error:", error);
+            logDownload.error("download_chrome_api_failed", {
+                task: "download",
+                source: "background",
+                code: "DOWNLOAD_CHROME_API_FAILED",
+                detail: {
+                    tab_id: tabId || 0,
+                    url_host: urlMeta.host,
+                    file_ext: fileExt,
+                    reason: error.message || "download failed"
+                }
+            });
             throw error;
         }
     }
@@ -303,6 +343,21 @@ async function handleMessage(msg, sender) {
     }
     if (msg.action === "GET_LOGS") {
         return { logs: [...globalLogs] };
+    }
+    if (msg.action === "CLEAR_LOGS") {
+        globalLogs.length = 0;
+        return { cleared: true };
+    }
+    if (msg.action === "SET_RUNTIME_DEBUG") {
+        currentDebugMode = !!msg.enabled;
+        syncRuntimeDebugFlag(currentDebugMode);
+        if (currentDebugMode) {
+            logBackground.info("runtime_debug_enabled", {
+                task: "debug",
+                detail: { source: msg.source || "content" }
+            });
+        }
+        return { enabled: currentDebugMode };
     }
     const tabId = msg.tabId || sender.tab?.id;
     if (msg.action === "SUBTITLE_CAPTURED") {
@@ -443,6 +498,20 @@ async function handleMessage(msg, sender) {
     throw new Error("未知 action");
 }
 
+function getUrlMeta(url) {
+    try {
+        const parsed = new URL(String(url || ""));
+        return { host: parsed.host || "", protocol: parsed.protocol || "" };
+    } catch (_) {
+        return { host: "", protocol: "" };
+    }
+}
+
+function getFileExtension(filename) {
+    const match = String(filename || "").toLowerCase().match(/\.([a-z0-9]{1,8})(?:$|\?)/);
+    return match ? match[1] : "";
+}
+
 async function probeDownloadContentType(url) {
     const target = String(url || "").trim();
     if (!target) return null;
@@ -575,6 +644,17 @@ class ContentProvider {
         const startedAt = Date.now();
         if (!groqApiKey) throw new Error("请先在设置中填写 Groq API Key");
         try {
+            logASR.info("asr_start", {
+                bvid,
+                task: "asr",
+                provider: "groq",
+                model: groqModel,
+                detail: {
+                    tab_id: tabId,
+                    cid: Number.isFinite(cid) ? cid : 0,
+                    has_payload_audio_url: !!payload?.audioUrl
+                }
+            });
             await updateTabState(tabId, {
                 subtitleSource: "groq",
                 transcriptionProgress: 5,
@@ -585,9 +665,23 @@ class ContentProvider {
             if (!media?.url) throw new Error("未提取到音轨地址，可能是付费视频、CDN 限制或页面未完成加载");
             await updateTabState(tabId, { transcriptionProgress: 20, updatedAt: Date.now() });
             await notifyTranscribeStatus(tabId, { stage: "download", level: "info", text: "正在下载音轨...", progress: 20, bvid });
+            const audioFetchStartedAt = Date.now();
             const audioBlob = await this.fetchResourceToBlob(media.url, tabId, bvid);
+            const audioFetchMs = Date.now() - audioFetchStartedAt;
+            logASR.info("asr_audio_fetch_success", {
+                bvid,
+                task: "asr",
+                provider: "groq",
+                model: groqModel,
+                duration_ms: audioFetchMs,
+                detail: {
+                    audio_bytes: audioBlob.size || 0,
+                    audio_type: audioBlob.type || "",
+                    url_host: getUrlMeta(media.url).host
+                }
+            });
             if (audioBlob.size >= GROQ_MAX_AUDIO_BYTES) {
-                throw new Error("该视频音轨文件大小超出限制（>=24MB），目前暂不支持");
+                throw createAppError("ASR_FILE_TOO_LARGE", "该视频音轨文件大小超出限制（>=24MB），目前暂不支持");
             }
             const audioFile = new File([audioBlob], "audio.m4a", { type: audioBlob.type || "audio/mp4" });
             await updateTabState(tabId, { transcriptionProgress: 55, updatedAt: Date.now() });
@@ -608,6 +702,7 @@ class ContentProvider {
             }, 2000);
 
             let transcription;
+            const asrRequestStartedAt = Date.now();
             try {
                 transcription = await this.requestGroqTranscription(
                     audioFile,
@@ -617,6 +712,17 @@ class ContentProvider {
                     bvid,
                     title || media.title || ""
                 );
+                logASR.info("asr_request_success", {
+                    bvid,
+                    task: "asr",
+                    provider: "groq",
+                    model: groqModel,
+                    duration_ms: Date.now() - asrRequestStartedAt,
+                    detail: {
+                        audio_bytes: audioBlob.size || 0,
+                        quota: buildGroqQuotaLine(transcription.quota)
+                    }
+                });
             } finally {
                 clearInterval(progressTimer);
             }
@@ -642,6 +748,17 @@ class ContentProvider {
                 quotaLine: buildGroqQuotaLine(transcription.quota),
                 bvid
             });
+            logASR.info("asr_success", {
+                bvid,
+                task: "asr",
+                provider: "groq",
+                model: groqModel,
+                duration_ms: Date.now() - startedAt,
+                detail: {
+                    rows: rows.length,
+                    audio_bytes: audioBlob.size || 0
+                }
+            });
             await reportFeatureUsage("transcribe", bvid, normalizedSettings, {
                 tokens: 0,
                 latencyMs: Math.max(0, Date.now() - startedAt),
@@ -651,6 +768,17 @@ class ContentProvider {
             return { rows: rows.length, quota: transcription.quota };
         } catch (error) {
             await updateTabState(tabId, { transcriptionProgress: 0, updatedAt: Date.now() });
+            logASR.error("asr_failed", buildFailureLog(error, {
+                bvid,
+                task: "asr",
+                provider: "groq",
+                model: groqModel,
+                duration_ms: Date.now() - startedAt,
+                detail: {
+                    tab_id: tabId,
+                    cid: Number.isFinite(cid) ? cid : 0
+                }
+            }));
             throw error;
         }
     }
@@ -888,7 +1016,14 @@ async function handleSubtitleCaptured(tabId, payload) {
     if (!tabId) return;
     const bvid = normalizeBvid(payload?.bvid);
     if (!bvid) {
-        logBackground.error("task_abort", { task: "subtitle_capture", tab_id: tabId, error: "missing_bvid_in_payload" });
+        logBackground.error("task_abort", {
+            task: "subtitle_capture",
+            code: "MISSING_BVID",
+            detail: {
+                tab_id: tabId,
+                reason: "missing_bvid_in_payload"
+            }
+        });
         return;
     }
     const cid = Number(payload.cid || 0);
@@ -1086,9 +1221,9 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
     } catch (error) {
         const status = error?.code === "TIMEOUT" ? "timeout" : "error";
         if (status === "timeout") {
-            logBackground.error("task_timeout", { tab_id: tabId, bvid, task, error: error.message || "任务超时", stack: error.stack || "" });
+            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task, code: "TIMEOUT" }));
         } else {
-            logBackground.error("task_abort", { tab_id: tabId, bvid, task, error: error.message || "任务失败", stack: error.stack || "" });
+            logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task }));
         }
         await setTaskStatus(tabId, [task], status, error.message || "任务失败");
         throw error;
@@ -1173,9 +1308,9 @@ async function runChatForTab(tabId, text, messageId) {
     } catch (error) {
         const status = error?.code === "TIMEOUT" ? "timeout" : "error";
         if (status === "timeout") {
-            logBackground.error("task_timeout", { tab_id: tabId, bvid, task: "chat", error: error.message || "聊天超时", stack: error.stack || "" });
+            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat", code: "TIMEOUT" }));
         } else {
-            logBackground.error("task_abort", { tab_id: tabId, bvid, task: "chat", error: error.message || "聊天失败", stack: error.stack || "" });
+            logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat" }));
         }
         await setTaskStatus(tabId, ["chat"], status, error.message || "聊天失败");
         throw error;
@@ -1235,9 +1370,9 @@ async function runChatForPort(port, msg) {
         }
         const status = error?.code === "TIMEOUT" ? "timeout" : "error";
         if (status === "timeout") {
-            logBackground.error("task_timeout", { tab_id: tabId, bvid, task: "chat_stream", error: error.message || "聊天超时", stack: error.stack || "" });
+            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat_stream", code: "TIMEOUT" }));
         } else {
-            logBackground.error("task_abort", { tab_id: tabId, bvid, task: "chat_stream", error: error.message || "聊天失败", stack: error.stack || "" });
+            logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat_stream" }));
         }
         await setTaskStatus(tabId, ["chat"], status, error.message || "聊天失败");
         safePortPost(port, { type: "error", messageId, error: error.message || "聊天失败" });
@@ -1264,11 +1399,37 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
         task,
         mode: "single",
         provider: settings.provider,
-        prompt
+        prompt,
+        promptSettings: settings.promptSettings
     });
-    logAI.info("ai_request_start", { bvid, task, provider: settings.provider });
+    logAI.info("ai_request_start", {
+        bvid,
+        task,
+        provider: settings.provider,
+        model: settings.model || "",
+        detail: {
+            subtitle_chars: subtitleText.length,
+            prompt_chars: prompt.length,
+            prompt_mode: settings.promptSettings?.mode || "guided",
+            pref_mode: settings.prefMode || ""
+        }
+    });
     const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS);
-    logAI.info("ai_request_success", { bvid, task, provider: settings.provider, latency_ms: aiRes.metrics?.latencyMs || 0, tokens: aiRes.metrics?.tokens || 0 });
+    logAI.info("ai_request_success", {
+        bvid,
+        task,
+        provider: settings.provider,
+        model: settings.model || "",
+        duration_ms: aiRes.metrics?.latencyMs || 0,
+        detail: {
+            tokens: aiRes.metrics?.tokens || 0,
+            input_tokens: aiRes.metrics?.inputTokens || 0,
+            output_tokens: aiRes.metrics?.outputTokens || 0,
+            subtitle_chars: subtitleText.length,
+            prompt_chars: prompt.length,
+            output_chars: String(aiRes.text || "").length
+        }
+    });
     await appendMetrics(bvid, null, task, aiRes.metrics);
     await reportFeatureUsage(task, bvid, settings, aiRes.metrics);
     if (task === "summary") {
@@ -1279,20 +1440,22 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
         if (parsed) {
             logBackground.info("json_parse_success", { task: "segments", bvid });
         } else {
-            logBackground.error("json_parse_error", { task: "segments", bvid, reason: "empty_result" });
+            logAI.error("json_parse_error", { task: "segments", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
         }
         const normalized = normalizeSegments(parsed);
         if (!normalized.length) throw createAppError("JSON_PARSE_ERROR", "分段 JSON 解析失败");
+        logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "single" });
         return normalized;
     }
     const parsed = robustJSONParse(aiRes.text);
     if (parsed) {
         logBackground.info("json_parse_success", { task: "rumors", bvid });
     } else {
-        logBackground.error("json_parse_error", { task: "rumors", bvid, reason: "empty_result" });
+        logAI.error("json_parse_error", { task: "rumors", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
     }
     const normalized = normalizeRumors(parsed);
     if (!normalized) throw createAppError("JSON_PARSE_ERROR", "验真 JSON 解析失败");
+    logRumorsQualitySummary(bvid, normalized, { mode: "single", outputChars: String(aiRes.text || "").length });
     return normalized;
 }
 
@@ -1396,22 +1559,66 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
         results.summary = { ok: true, data: String(cache.summary || ""), error: null };
     } else {
         const summaryPrompt = buildPrompt({ type: "summary", subtitle: subtitleText, mode, guided, customPrompts, taskContext });
-        logAIPromptBuilt({ bvid, task: "summary", provider: settings.provider, mode: "quality", prompt: summaryPrompt });
+        logAIPromptBuilt({ bvid, task: "summary", provider: settings.provider, mode: "quality", prompt: summaryPrompt, promptSettings: settings.promptSettings });
         tasks.push((async () => {
             try {
-                logAI.info("ai_request_start", { bvid, task: "summary", provider: settings.provider, mode: "quality" });
+                logAI.info("ai_request_start", {
+                    bvid,
+                    task: "summary",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    detail: {
+                        mode: "quality",
+                        subtitle_chars: subtitleText.length,
+                        prompt_chars: summaryPrompt.length,
+                        prompt_mode: mode,
+                        pref_mode: settings.prefMode || ""
+                    }
+                });
                 const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: summaryPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true });
                 const summaryText = String(aiRes.text || "").trim();
                 if (!summaryText) throw new Error("总结生成为空");
+                logSummaryQualitySummary(bvid, summaryText, {
+                    subtitleChars: subtitleText.length,
+                    promptChars: summaryPrompt.length,
+                    promptMode: mode,
+                    fromCache: false
+                });
                 await appendMetrics(bvid, null, "summary", aiRes.metrics);
                 await reportFeatureUsage("summary", bvid, settings, aiRes.metrics);
                 results.summary = { ok: true, data: summaryText, error: null };
                 await applySummarySegmentsResults(tabId, bvid, { summary: results.summary });
-                logAI.info("ai_request_success", { bvid, task: "summary", provider: settings.provider, mode: "quality", latency_ms: aiRes.metrics?.latencyMs || 0, tokens: aiRes.metrics?.tokens || 0 });
+                logAI.info("ai_request_success", {
+                    bvid,
+                    task: "summary",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    duration_ms: aiRes.metrics?.latencyMs || 0,
+                    detail: {
+                        mode: "quality",
+                        tokens: aiRes.metrics?.tokens || 0,
+                        input_tokens: aiRes.metrics?.inputTokens || 0,
+                        output_tokens: aiRes.metrics?.outputTokens || 0,
+                        subtitle_chars: subtitleText.length,
+                        prompt_chars: summaryPrompt.length,
+                        output_chars: summaryText.length
+                    }
+                });
             } catch (error) {
                 results.summary = { ok: false, data: null, error };
                 await applySummarySegmentsResults(tabId, bvid, { summary: results.summary });
-                logBackground.error("ai_request_fail", { task: "summary", bvid, mode: "quality", error: error.message || "请求失败", stack: error.stack || "" });
+                logAI.error("ai_request_failed", buildFailureLog(error, {
+                    task: "summary",
+                    bvid,
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    detail: {
+                        mode: "quality",
+                        subtitle_chars: subtitleText.length,
+                        prompt_chars: summaryPrompt.length,
+                        prompt_mode: mode
+                    }
+                }));
             }
         })());
     }
@@ -1420,23 +1627,62 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
         results.segments = { ok: true, data: cache.segments, error: null };
     } else {
         const segmentsPrompt = buildPrompt({ type: "segments", subtitle: subtitleText, mode, guided, customPrompts, taskContext });
-        logAIPromptBuilt({ bvid, task: "segments", provider: settings.provider, mode: "quality", prompt: segmentsPrompt });
+        logAIPromptBuilt({ bvid, task: "segments", provider: settings.provider, mode: "quality", prompt: segmentsPrompt, promptSettings: settings.promptSettings });
         tasks.push((async () => {
             try {
-                logAI.info("ai_request_start", { bvid, task: "segments", provider: settings.provider, mode: "quality" });
+                logAI.info("ai_request_start", {
+                    bvid,
+                    task: "segments",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    detail: {
+                        mode: "quality",
+                        subtitle_chars: subtitleText.length,
+                        prompt_chars: segmentsPrompt.length,
+                        prompt_mode: mode,
+                        pref_mode: settings.prefMode || ""
+                    }
+                });
                 const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: segmentsPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true });
                 const parsed = robustJSONParse(aiRes.text);
                 const normalized = normalizeSegments(parsed);
                 if (!normalized.length) throw createAppError("JSON_PARSE_ERROR", "分段 JSON 解析失败");
+                logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "quality" });
                 await appendMetrics(bvid, null, "segments", aiRes.metrics);
                 await reportFeatureUsage("segments", bvid, settings, aiRes.metrics);
                 results.segments = { ok: true, data: normalized, error: null };
                 await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
-                logAI.info("ai_request_success", { bvid, task: "segments", provider: settings.provider, mode: "quality", latency_ms: aiRes.metrics?.latencyMs || 0, tokens: aiRes.metrics?.tokens || 0 });
+                logAI.info("ai_request_success", {
+                    bvid,
+                    task: "segments",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    duration_ms: aiRes.metrics?.latencyMs || 0,
+                    detail: {
+                        mode: "quality",
+                        tokens: aiRes.metrics?.tokens || 0,
+                        input_tokens: aiRes.metrics?.inputTokens || 0,
+                        output_tokens: aiRes.metrics?.outputTokens || 0,
+                        subtitle_chars: subtitleText.length,
+                        prompt_chars: segmentsPrompt.length,
+                        output_chars: String(aiRes.text || "").length
+                    }
+                });
             } catch (error) {
                 results.segments = { ok: false, data: null, error };
                 await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
-                logBackground.error("ai_request_fail", { task: "segments", bvid, mode: "quality", error: error.message || "请求失败", stack: error.stack || "" });
+                logAI.error("ai_request_failed", buildFailureLog(error, {
+                    task: "segments",
+                    bvid,
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    detail: {
+                        mode: "quality",
+                        subtitle_chars: subtitleText.length,
+                        prompt_chars: segmentsPrompt.length,
+                        prompt_mode: mode
+                    }
+                }));
             }
         })());
     }
@@ -1471,16 +1717,44 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
         task: "summary_segments_merged",
         provider: settings.provider,
         mode: "efficiency",
-        prompt
+        prompt,
+        promptSettings: settings.promptSettings
     });
 
     const results = createSummarySegmentsResult();
     let streamBuffer = "";
     let summaryApplied = false;
     let summaryApplyPromise = Promise.resolve();
+    const requestStartedAt = Date.now();
+    let firstChunkMs = 0;
     try {
-        logAI.info("ai_request_start", { bvid, task: "summary_segments_merged", provider: settings.provider, mode: "efficiency" });
+        logAI.info("ai_request_start", {
+            bvid,
+            task: "summary_segments_merged",
+            provider: settings.provider,
+            model: settings.model || "",
+            detail: {
+                mode: "efficiency",
+                subtitle_chars: subtitleText.length,
+                prompt_chars: prompt.length,
+                prompt_mode: mode,
+                pref_mode: settings.prefMode || ""
+            }
+        });
         const aiRes = await callAIWithTimeoutStream(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, (delta) => {
+            if (!firstChunkMs) {
+                firstChunkMs = Date.now() - requestStartedAt;
+                logAI.info("ai_first_chunk", {
+                    bvid,
+                    task: "summary_segments_merged",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    duration_ms: firstChunkMs,
+                    detail: {
+                        mode: "efficiency"
+                    }
+                });
+            }
             streamBuffer += String(delta || "");
             if (summaryApplied) return;
             const section = extractProtocolSection(streamBuffer, "<<<SUMMARY_START>>>", "<<<SUMMARY_END>>>");
@@ -1493,11 +1767,15 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
         });
         await summaryApplyPromise;
         const fullText = String(streamBuffer || aiRes.text || "");
-        // DEBUG
-        logger.error("[DEBUG] streamBuffer length:", streamBuffer.length);
-        logger.error("[DEBUG] aiRes.text length:", (aiRes?.text || "").length);
-        logger.error("[DEBUG] fullText final length:", fullText.length);
-        logger.error("[DEBUG] fullText first 500:", JSON.stringify(fullText.slice(0, 500)));
+        logAI.debug("ai_stream_buffer_summary", {
+            bvid,
+            task: "summary_segments_merged",
+            detail: {
+                stream_buffer_chars: streamBuffer.length,
+                response_text_chars: String(aiRes?.text || "").length,
+                full_text_chars: fullText.length
+            }
+        });
         const summarySection = extractProtocolSection(fullText, "<<<SUMMARY_START>>>", "<<<SUMMARY_END>>>");
         if (!results.summary.ok && summarySection.found) {
             const summaryText = summarySection.content.trim();
@@ -1513,29 +1791,13 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
         ]);
         let segmentsResolved = false;
         if (segmentsSection && segmentsSection.found) {
-            logger.error("[DEBUG] segmentsSection.content slice:", JSON.stringify(segmentsSection.content.slice(0, 200)));
             const parsed = robustJSONParse(segmentsSection.content);
-            logger.error("[DEBUG] parsed:", JSON.stringify(parsed)?.slice(0, 200));
             const normalized = normalizeSegments(parsed);
-            logger.error("[DEBUG] normalized length:", normalized.length);
             if (normalized.length) {
                 results.segments = { ok: true, data: normalized, error: null };
                 segmentsResolved = true;
                 const cache = await getCache(bvid);
-                const subtitleArray = Array.isArray(cache?.processedSubtitle) && cache.processedSubtitle.length
-                    ? cache.processedSubtitle
-                    : (Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : []);
-                normalized.forEach((seg) => {
-                    if (seg.type !== "ad") return;
-                    const lines = subtitleArray
-                        .filter((item) => {
-                            const t = Number(item.from ?? item.start ?? 0);
-                            return t >= seg.start && t <= seg.end;
-                        })
-                        .map((item) => `[${item.from ?? item.start}] ${item.content ?? item.text}`)
-                        .join(" ");
-                    logger.error(`[DEBUG AD ${seg.start}-${seg.end}] "${seg.label}" 对应字幕:`, lines || "⚠️ 无匹配字幕");
-                });
+                logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "efficiency" });
             }
         }
         if (!segmentsResolved) {
@@ -1547,35 +1809,53 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                     results.segments = { ok: true, data: normalized, error: null };
                     segmentsResolved = true;
                     const cache = await getCache(bvid);
-                    const subtitleArray = Array.isArray(cache?.processedSubtitle) && cache.processedSubtitle.length
-                        ? cache.processedSubtitle
-                        : (Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : []);
-                    normalized.forEach((seg) => {
-                        if (seg.type !== "ad") return;
-                        const lines = subtitleArray
-                            .filter((item) => {
-                                const t = Number(item.from ?? item.start ?? 0);
-                                return t >= seg.start && t <= seg.end;
-                            })
-                            .map((item) => `[${item.from ?? item.start}] ${item.content ?? item.text}`)
-                            .join(" ");
-                        logger.error(`[DEBUG AD ${seg.start}-${seg.end}] "${seg.label}" 对应字幕:`, lines || "⚠️ 无匹配字幕");
-                    });
+                    logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "efficiency", fallback: "loose_json_array" });
                 }
             }
         }
         if (!segmentsResolved) {
-            logger.error("[DEBUG] fullText length:", fullText.length);
-            logger.error("[DEBUG] fullText tail (last 2000):", JSON.stringify(fullText.slice(-2000)));
-            logger.error("[DEBUG] SEGMENTS_START index:", fullText.indexOf("<<<SEGMENTS_START>>>"));
-            logger.error("[DEBUG] SEGMENTS_END index:", fullText.indexOf("<<<SEGMENTS_END>>>"));
+            logAI.error("segments_parse_failed", {
+                bvid,
+                task: "segments",
+                code: "JSON_PARSE_ERROR",
+                detail: {
+                    mode: "efficiency",
+                    full_text_chars: fullText.length,
+                    segments_start_index: fullText.indexOf("<<<SEGMENTS_START>>>"),
+                    segments_end_index: fullText.indexOf("<<<SEGMENTS_END>>>")
+                }
+            });
             throw new Error("分段输出缺失");
+        }
+        if (results.summary.ok) {
+            logSummaryQualitySummary(bvid, String(results.summary.data || ""), {
+                subtitleChars: subtitleText.length,
+                promptChars: prompt.length,
+                promptMode: mode,
+                fromCache: false
+            });
         }
         await appendMetrics(bvid, null, "summary", aiRes.metrics);
         await appendMetrics(bvid, null, "segments", aiRes.metrics);
         await reportFeatureUsage("summary_segments_merged", bvid, settings, aiRes.metrics);
         await applySummarySegmentsResults(tabId, bvid, results);
-        logAI.info("ai_request_success", { bvid, task: "summary_segments_merged", provider: settings.provider, mode: "efficiency", latency_ms: aiRes.metrics?.latencyMs || 0, tokens: aiRes.metrics?.tokens || 0 });
+        logAI.info("ai_request_success", {
+            bvid,
+            task: "summary_segments_merged",
+            provider: settings.provider,
+            model: settings.model || "",
+            duration_ms: aiRes.metrics?.latencyMs || 0,
+            detail: {
+                mode: "efficiency",
+                first_chunk_ms: firstChunkMs,
+                tokens: aiRes.metrics?.tokens || 0,
+                input_tokens: aiRes.metrics?.inputTokens || 0,
+                output_tokens: aiRes.metrics?.outputTokens || 0,
+                subtitle_chars: subtitleText.length,
+                prompt_chars: prompt.length,
+                output_chars: String(aiRes.text || streamBuffer || "").length
+            }
+        });
     } catch (error) {
         await summaryApplyPromise.catch(() => {});
         if (!results.summary.ok) {
@@ -1583,7 +1863,20 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
         }
         results.segments = { ok: false, data: null, error };
         await applySummarySegmentsResults(tabId, bvid, results);
-        logBackground.error("ai_request_fail", { task: "summary_segments_merged", bvid, mode: "efficiency", error: error.message || "请求失败", stack: error.stack || "" });
+        logAI.error("ai_request_failed", buildFailureLog(error, {
+            task: "summary_segments_merged",
+            bvid,
+            provider: settings.provider,
+            model: settings.model || "",
+            duration_ms: Date.now() - requestStartedAt,
+            detail: {
+                mode: "efficiency",
+                first_chunk_ms: firstChunkMs,
+                subtitle_chars: subtitleText.length,
+                prompt_chars: prompt.length,
+                prompt_mode: mode
+            }
+        }));
     }
     return results;
 }
@@ -1632,6 +1925,129 @@ function normalizeRumors(value) {
     return normalizeRumorsResult(value);
 }
 
+function buildFailureLog(error, base = {}) {
+    const detail = {
+        ...(base.detail || {}),
+        error_name: String(error?.name || "Error"),
+        error_message: String(error?.message || error || "请求失败"),
+        stack_preview: String(error?.stack || "").split("\n").slice(0, 3).join("\n")
+    };
+    return {
+        ...base,
+        code: String(error?.code || base.code || ""),
+        status: Number(error?.status || base.status || 0) || 0,
+        detail
+    };
+}
+
+function getSubtitleLineCount(cache = {}) {
+    const processed = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+    if (processed.length) return processed.length;
+    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+    return raw.length;
+}
+
+function getSubtitleRowsForDiagnostics(cache = {}) {
+    const processed = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+    if (processed.length) return processed;
+    return Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+}
+
+function countSubtitleMatchesForRange(rows, start, end) {
+    return rows.filter((item) => {
+        const time = Number(item?.from ?? item?.start ?? 0);
+        return Number.isFinite(time) && time >= start && time <= end;
+    }).length;
+}
+
+function logSummaryQualitySummary(bvid, summaryText, context = {}) {
+    const outputChars = String(summaryText || "").length;
+    const subtitleChars = Number(context.subtitleChars || 0);
+    const isTooShort = subtitleChars > 3000 && outputChars < 120;
+    const event = isTooShort ? "summary_quality_warning" : "summary_quality_check";
+    logAI[isTooShort ? "warn" : "info"](event, {
+        bvid,
+        task: "summary",
+        code: isTooShort ? "SUMMARY_TOO_SHORT" : "",
+        detail: {
+            subtitle_chars: subtitleChars,
+            prompt_chars: Number(context.promptChars || 0),
+            output_chars: outputChars,
+            prompt_mode: context.promptMode || "",
+            from_cache: !!context.fromCache
+        }
+    });
+}
+
+function logSegmentQualitySummary(bvid, segments, cache = {}, context = {}) {
+    const list = Array.isArray(segments) ? segments : [];
+    const subtitleRows = getSubtitleRowsForDiagnostics(cache);
+    const adSegments = list.filter((seg) => seg?.type === "ad");
+    const adRanges = adSegments.slice(0, 10).map((seg) => {
+        const start = Number(seg.start || 0);
+        const end = Number(seg.end || 0);
+        const matchCount = countSubtitleMatchesForRange(subtitleRows, start, end);
+        return {
+            start,
+            end,
+            matched: matchCount > 0,
+            subtitle_line_count: matchCount
+        };
+    });
+    const matchedAdCount = adRanges.filter((item) => item.matched).length;
+    const unmatchedAdCount = Math.max(0, adSegments.length - matchedAdCount);
+    logAI.info("ad_detection_summary", {
+        bvid,
+        task: context.task || "segments",
+        detail: {
+            mode: context.mode || "",
+            fallback: context.fallback || "",
+            segment_count: list.length,
+            ad_segment_count: adSegments.length,
+            subtitle_line_count: getSubtitleLineCount(cache),
+            matched_ad_count: matchedAdCount,
+            unmatched_ad_count: unmatchedAdCount,
+            match_strategy: "time_range",
+            ad_ranges: adRanges
+        }
+    });
+    if (!list.length || unmatchedAdCount > 0) {
+        logAI.warn("segments_quality_warning", {
+            bvid,
+            task: context.task || "segments",
+            code: !list.length ? "SEGMENTS_EMPTY" : "AD_MATCH_WEAK",
+            detail: {
+                mode: context.mode || "",
+                segment_count: list.length,
+                ad_segment_count: adSegments.length,
+                unmatched_ad_count: unmatchedAdCount
+            }
+        });
+    }
+}
+
+function logRumorsQualitySummary(bvid, rumors, context = {}) {
+    const claims = Array.isArray(rumors?.claims) ? rumors.claims : [];
+    const missingEvidenceCount = claims.filter((claim) => {
+        const analysis = String(claim?.analysis || "").trim();
+        const claimText = String(claim?.claim || "").trim();
+        return !analysis || !claimText;
+    }).length;
+    logAI[missingEvidenceCount ? "warn" : "info"]("rumors_quality_check", {
+        bvid,
+        task: "rumors",
+        code: missingEvidenceCount ? "RUMORS_MISSING_EVIDENCE" : "",
+        detail: {
+            mode: context.mode || "",
+            claim_count: claims.length,
+            missing_evidence_count: missingEvidenceCount,
+            has_overview: !!String(rumors?.overview || "").trim(),
+            output_chars: Number(context.outputChars || 0),
+            parse_retry_count: Number(context.parseRetryCount || 0)
+        }
+    });
+}
+
 function createTaskTimeoutError() {
     return createAppError("TIMEOUT", "任务超时，请重试~");
 }
@@ -1646,13 +2062,27 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
         const latencyMs = Math.round(performance.now() - start);
         const tokenInfo = resolveTokenInfo(res.usage, res.text, messages);
         const modelScopeRemaining = res.headers?.get?.("modelscope-ratelimit-model-requests-remaining") ?? null;
-        logAI.debug("provider_response", { provider: settings.provider, latency_ms: latencyMs, ...tokenInfo, has_text: !!res.text });
+        logAI.debug("provider_response", {
+            provider: settings.provider,
+            model: settings.model || "",
+            duration_ms: latencyMs,
+            detail: { ...tokenInfo, has_text: !!res.text }
+        });
         return { text: res.text || "", metrics: { latencyMs, tokens: tokenInfo.total, inputTokens: tokenInfo.input, outputTokens: tokenInfo.output, modelScopeRemaining } };
     } catch (error) {
-        logAI.error("ai_request_fail", { provider: settings.provider, error: error.message || "请求失败", stack: error.stack || "" });
+        logAI.error("ai_request_failed", buildFailureLog(error, {
+            task: "ai",
+            provider: settings.provider,
+            model: settings.model || ""
+        }));
         if (controller.signal.aborted) {
             const timeoutError = createTaskTimeoutError();
-            logAI.error("ai_request_timeout", { provider: settings.provider, error: timeoutError.message, stack: timeoutError.stack || "" });
+            logAI.error("ai_request_timeout", buildFailureLog(timeoutError, {
+                task: "ai",
+                provider: settings.provider,
+                model: settings.model || "",
+                code: "TIMEOUT"
+            }));
             throw timeoutError;
         }
         throw error;
@@ -2467,17 +2897,34 @@ async function getResolvedSettings() {
     return withPromptSettings(normalizedSettings, normalizedPromptSettings);
 }
 
-function logAIPromptBuilt({ bvid, task, provider, mode, prompt }) {
+function logAIPromptBuilt({ bvid, task, provider, mode, prompt, promptSettings }) {
     const text = String(prompt || "");
+    const promptMeta = summarizePromptSettings(promptSettings);
     logAI.info("ai_prompt_built", {
         bvid,
         task,
         provider,
         mode,
-        prompt: text,
-        promptLength: text.length,
-        promptPreview: text.slice(0, 1000)
+        detail: {
+            prompt_chars: text.length,
+            ...promptMeta
+        }
     });
+}
+
+function summarizePromptSettings(promptSettings = {}) {
+    const normalized = normalizePromptSettings(promptSettings || {});
+    const mode = normalized.mode === "custom" ? "custom" : "guided";
+    const custom = normalized.custom || {};
+    return {
+        prompt_mode: mode,
+        tone: normalized.guided?.tone || "",
+        detail_level: normalized.guided?.detail || "",
+        custom_prompt_enabled: mode === "custom",
+        custom_summary_prompt_chars: String(custom.summary || "").length,
+        custom_segments_prompt_chars: String(custom.segments || "").length,
+        custom_rumors_prompt_chars: String(custom.rumors || "").length
+    };
 }
 
 function pushGlobalLog(entry) {

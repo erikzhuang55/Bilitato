@@ -29,7 +29,8 @@
     "https://open.bigmodel.cn/*",
     "https://api.moonshot.cn/*",
     "https://api.groq.com/*",
-    "https://qdksdauixnbgrgkilgac.supabase.co/*"
+    "https://qdksdauixnbgrgkilgac.supabase.co/*",
+    "https://*.sentry.io/*"
   ],
   "optional_host_permissions": [
     "https://*/*"
@@ -91,6 +92,8 @@
         "content/contentAi.js",
         "content/contentCloud.js",
         "content/contentPage.js",
+        "content/contentErrorMessages.js",
+        "content/contentErrorReporter.js",
         "content.js"
       ],
       "css": [

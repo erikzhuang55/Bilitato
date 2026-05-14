@@ -16,6 +16,8 @@ import {
     normalizePromptSettings
 } from "./utils/promptBuilder.js";
 import { normalizeRumors as normalizeRumorsResult, normalizeSegments as normalizeSegmentsResult } from "./utils/resultNormalize.js";
+import { reportToSentry } from "./utils/sentryReporter.js";
+import { createAppError, createHttpError, serializeAppError } from "./utils/appError.js";
 import "./logger.js";
 
 let IS_DEBUG_MODE = false;
@@ -31,6 +33,33 @@ function syncRuntimeDebugFlag(enabled) {
     globalThis.AIPluginLogger?.setDebugEnabled?.(!!enabled);
 }
 
+async function captureBackgroundError(errorInput, context = {}) {
+    try {
+        const settings = await getResolvedSettings();
+        const runtime = await getSentryRuntimeContext();
+        return await reportToSentry(settings, errorInput, context, runtime);
+    } catch (_) {
+        return { sent: false, reason: "report_failed" };
+    }
+}
+
+async function getSentryRuntimeContext() {
+    let platform = {};
+    try {
+        if (chrome?.runtime?.getPlatformInfo) {
+            platform = await chrome.runtime.getPlatformInfo();
+        }
+    } catch (_) {}
+    const manifest = chrome.runtime.getManifest();
+    return {
+        extensionVersion: manifest.version || "",
+        manifestVersion: manifest.manifest_version || 3,
+        language: navigator.language || "",
+        userAgent: navigator.userAgent || "",
+        platform
+    };
+}
+
 const MAX_GLOBAL_CONCURRENCY = 1;
 const TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
@@ -39,6 +68,7 @@ const GROQ_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
 const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
 const SUPABASE_DEFAULT_USAGE_RPC = "increment_feature_usage_with_token_log";
 const SUPABASE_DEFAULT_USAGE_STATS_TABLE = "usage_stats";
+const DEFAULT_SENTRY_DSN = "https://04879b2bd5fc72eba741a402e26c4790@o4511384082055168.ingest.de.sentry.io/4511384299634768";
 const TASK_KEYS = ["summary", "segments", "rumors"];
 const CLOUD_CACHE_KEYS = ["subtitle", ...TASK_KEYS];
 const CLOUD_TASK_FIELD_MAP = {
@@ -60,7 +90,9 @@ const DEFAULT_SETTINGS = {
     supabaseUsageRpcName: SUPABASE_DEFAULT_USAGE_RPC,
     supabaseUsageStatsTable: SUPABASE_DEFAULT_USAGE_STATS_TABLE,
     prefMode: "efficiency",
-    debugMode: false
+    debugMode: false,
+    sentryEnabled: true,
+    sentryDsn: DEFAULT_SENTRY_DSN
 };
 
 const queue = [];
@@ -144,7 +176,14 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleMessage(msg, sender)
         .then((result) => sendResponse({ ok: true, ...result }))
-        .catch((error) => sendResponse({ ok: false, error: error.message || "未知错误" }));
+        .catch((error) => {
+            captureBackgroundError(error, {
+                source: "runtime_message",
+                action: msg?.action || "",
+                tabId: sender?.tab?.id || 0
+            });
+            sendResponse({ ok: false, error: error.message || "未知错误", ...serializeAppError(error) });
+        });
     return true;
 });
 
@@ -157,12 +196,32 @@ chrome.runtime.onConnect.addListener((port) => {
         }
         if (msg?.action !== "RUN_CHAT_STREAM") return;
         runChatForPort(port, msg).catch((error) => {
+            captureBackgroundError(error, {
+                source: "chat_stream_port",
+                task: "chat",
+                messageId: msg?.messageId || ""
+            });
             safePortPost(port, {
                 type: "error",
                 messageId: String(msg?.messageId || ""),
-                error: error.message || "聊天失败"
+                error: error.message || "聊天失败",
+                ...serializeAppError(error)
             });
         });
+    });
+});
+
+globalThis.addEventListener?.("error", (event) => {
+    captureBackgroundError(event.error || event.message, {
+        source: "background_global_error",
+        task: "global_error"
+    });
+});
+
+globalThis.addEventListener?.("unhandledrejection", (event) => {
+    captureBackgroundError(event.reason || "Unhandled rejection", {
+        source: "background_unhandled_rejection",
+        task: "global_rejection"
     });
 });
 
@@ -183,6 +242,14 @@ chrome.downloads.onChanged.addListener((delta) => {
 });
 
 async function handleMessage(msg, sender) {
+    if (msg.action === "REPORT_ERROR") {
+        await captureBackgroundError(msg.error || "Content error", {
+            ...(msg.context || {}),
+            source: msg.context?.source || "content_report",
+            tabId: sender?.tab?.id || 0
+        });
+        return {};
+    }
     if (msg.action === "DOWNLOAD_STREAM") {
         const { url, filename } = msg.payload || {};
         const tabId = msg.tabId || sender.tab?.id;
@@ -625,12 +692,12 @@ class ContentProvider {
             }
         });
         if (!response.ok) {
-            if (response.status === 403) throw new Error("资源下载失败：CDN 返回 403，可能是付费/受限内容");
-            throw new Error(`资源下载失败：HTTP ${response.status}`);
+            if (response.status === 403) throw createAppError("DOWNLOAD_FAILED", "资源下载失败：CDN 返回 403，可能是付费/受限内容", { status: 403 });
+            throw createAppError("DOWNLOAD_FAILED", `资源下载失败：HTTP ${response.status}`, { status: response.status });
         }
         const total = Number(response.headers.get("content-length") || 0);
         if (!skipSizeCheck && Number.isFinite(total) && total >= GROQ_MAX_AUDIO_BYTES) {
-            throw new Error("该文件大小超出限制（>=24MB），目前暂不支持");
+            throw createAppError("ASR_FILE_TOO_LARGE", "该文件大小超出限制（>=24MB），目前暂不支持");
         }
         const reader = response.body?.getReader?.();
         if (!reader) {
@@ -658,7 +725,7 @@ class ContentProvider {
                 }
             }
             if (!skipSizeCheck && loaded >= GROQ_MAX_AUDIO_BYTES) {
-                throw new Error("该文件大小超出限制（>=24MB），目前暂不支持");
+                throw createAppError("ASR_FILE_TOO_LARGE", "该文件大小超出限制（>=24MB），目前暂不支持");
             }
         }
         const blob = new Blob(chunks, { type: response.headers.get("content-type") || "application/octet-stream" });
@@ -722,8 +789,9 @@ class ContentProvider {
                     quotaLine: buildGroqQuotaLine(quota),
                     bvid
                 });
+                throw createAppError("ASR_RATE_LIMIT", retryAfterSec > 0 ? `Groq 限流，请等待 ${retryAfterSec} 秒后重试` : "Groq 限流，请稍后重试", { status: response.status, retryAfterSec });
             }
-            throw new Error(`Groq 转录失败（${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
+            throw createHttpError(response.status, `Groq 转录失败（${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
         }
         await notifyTranscribeStatus(tabId, {
             stage: "upload",
@@ -1214,7 +1282,7 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
             logBackground.error("json_parse_error", { task: "segments", bvid, reason: "empty_result" });
         }
         const normalized = normalizeSegments(parsed);
-        if (!normalized.length) throw new Error("分段 JSON 解析失败");
+        if (!normalized.length) throw createAppError("JSON_PARSE_ERROR", "分段 JSON 解析失败");
         return normalized;
     }
     const parsed = robustJSONParse(aiRes.text);
@@ -1224,7 +1292,7 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
         logBackground.error("json_parse_error", { task: "rumors", bvid, reason: "empty_result" });
     }
     const normalized = normalizeRumors(parsed);
-    if (!normalized) throw new Error("验真 JSON 解析失败");
+    if (!normalized) throw createAppError("JSON_PARSE_ERROR", "验真 JSON 解析失败");
     return normalized;
 }
 
@@ -1359,7 +1427,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: segmentsPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true });
                 const parsed = robustJSONParse(aiRes.text);
                 const normalized = normalizeSegments(parsed);
-                if (!normalized.length) throw new Error("分段 JSON 解析失败");
+                if (!normalized.length) throw createAppError("JSON_PARSE_ERROR", "分段 JSON 解析失败");
                 await appendMetrics(bvid, null, "segments", aiRes.metrics);
                 await reportFeatureUsage("segments", bvid, settings, aiRes.metrics);
                 results.segments = { ok: true, data: normalized, error: null };
@@ -1565,9 +1633,7 @@ function normalizeRumors(value) {
 }
 
 function createTaskTimeoutError() {
-    const timeoutError = new Error("任务超时，请重试~");
-    timeoutError.code = "TIMEOUT";
-    return timeoutError;
+    return createAppError("TIMEOUT", "任务超时，请重试~");
 }
 
 async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
@@ -1848,10 +1914,16 @@ function normalizeSettings(settings) {
     const supabaseUsageStatsTable = String(base.supabaseUsageStatsTable || DEFAULT_SETTINGS.supabaseUsageStatsTable || SUPABASE_DEFAULT_USAGE_STATS_TABLE).trim() || SUPABASE_DEFAULT_USAGE_STATS_TABLE;
     const prefModeRaw = String(base.prefMode || DEFAULT_SETTINGS.prefMode || "quality").toLowerCase();
     const prefMode = prefModeRaw === "efficiency" ? "efficiency" : "quality";
+    const sentryDsn = String(base.sentryDsn || DEFAULT_SETTINGS.sentryDsn || "").trim();
+    const sentryEnabled = Object.prototype.hasOwnProperty.call(base, "sentryEnabled")
+        ? !!base.sentryEnabled
+        : !!DEFAULT_SETTINGS.sentryEnabled;
     return {
         ...DEFAULT_SETTINGS,
         ...base,
         debugMode: !!base.debugMode,
+        sentryEnabled,
+        sentryDsn,
         customProtocol,
         groqApiKey,
         groqModel,

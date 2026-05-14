@@ -1393,6 +1393,17 @@ input[type="range"]:active::-webkit-slider-thumb {
     transform: translateY(-1px);
 }
 
+.settings-action-row {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.settings-action-row .panel-btn {
+    width: 100%;
+    min-width: 0;
+    padding: 0 6px;
+}
 
 .settings-grid input[type="range"] {
     border: none;
@@ -1450,6 +1461,43 @@ input[type="range"]:active::-webkit-slider-thumb {
     max-height: 160px;
     resize: none;
     line-height: 1.5;
+}
+
+.error-demo-section {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px;
+    border: 1px solid #edf1f5;
+    border-radius: 8px;
+    background: #fafbfc;
+}
+
+.error-demo-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #5b6474;
+}
+
+.error-demo-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.error-demo-btn {
+    width: 100%;
+    min-width: 0;
+    font-size: 11px;
+    padding: 0 6px;
+}
+
+.error-demo-clear {
+    width: 100%;
+}
+
+.debug-page-body {
+    padding: 10px;
 }
 
 .settings-tip {

@@ -107,4 +107,18 @@ describe("providerAdapter", () => {
     expect(result.text).toBe("一次性返回");
     expect(onDelta).toHaveBeenCalledWith("一次性返回");
   });
+
+  it("throws coded http errors", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ error: "unauthorized" }, false, 401));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(callAI("openai", {
+      provider: "openai",
+      apiKey: "bad-key",
+      model: "gpt-test"
+    }, [{ role: "user", content: "hello" }])).rejects.toMatchObject({
+      code: "HTTP_401",
+      status: 401
+    });
+  });
 });

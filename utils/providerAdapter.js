@@ -1,3 +1,5 @@
+import { createHttpError } from "./appError.js";
+
 export const PROVIDERS = {
     modelscope: {
         name: "ModelScope (魔搭)",
@@ -205,7 +207,7 @@ export async function callAI(providerKey, config, messages, signal) {
     });
     if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`API Error ${res.status}: ${errText}`);
+        throw createHttpError(res.status, `API Error ${res.status}: ${errText}`, { provider: providerKey });
     }
     const data = await res.json();
     if (req.provider.type === "google") {
@@ -250,7 +252,7 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
     });
     if (!res.ok) {
         const errText = await res.text();
-        throw new Error(`API Error ${res.status}: ${errText}`);
+        throw createHttpError(res.status, `API Error ${res.status}: ${errText}`, { provider: providerKey });
     }
     const reader = res.body?.getReader?.();
     if (!reader) {

@@ -70,6 +70,13 @@ const {
     resolveCidFromState,
     resolveCurrentBvidFromState
 } = globalThis.BilitatoContentPage || {};
+const {
+    reportContentError
+} = globalThis.BilitatoContentErrorReporter || {};
+const {
+    mapErrorToView,
+    renderErrorPanel
+} = globalThis.BilitatoContentErrorMessages || {};
 
 const logger = {
     info: (...args) => { if (isDebugLoggingEnabled()) console.log("[Content]", ...args); },
@@ -174,8 +181,10 @@ const appState = {
     segmentsCollapsed: false,
     playInfo: null,
     playInfoUpdatedAt: 0,
-    isPlayInfoReady: false
+    isPlayInfoReady: false,
+    panelErrors: {}
 };
+globalThis.BilitatoAppState = appState;
 
 function getDefaultTranscriptionState() {
     return {
@@ -215,6 +224,62 @@ function isTranscriptionRunning() {
 
 function getTranscriptionBvid() {
     return normalizeBvidCase(getTranscriptionState().bvid || "");
+}
+function toErrorInput(error, fallbackMessage = "请求失败") {
+    return {
+        message: String(error?.message || error?.error || fallbackMessage),
+        code: String(error?.code || ""),
+        status: Number(error?.status || 0) || undefined,
+        retryAfterSec: Number(error?.retryAfterSec || 0) || undefined
+    };
+}
+
+function setPanelError(page, error, fallbackMessage = "请求失败") {
+    const view = mapErrorToView ? mapErrorToView(toErrorInput(error, fallbackMessage), fallbackMessage) : null;
+    if (!view) return null;
+    appState.panelErrors = {
+        ...(appState.panelErrors || {}),
+        [page]: view
+    };
+    return view;
+}
+
+function clearPanelError(page) {
+    if (!appState.panelErrors?.[page]) return;
+    appState.panelErrors = {
+        ...(appState.panelErrors || {}),
+        [page]: null
+    };
+}
+
+function notifyMappedError(error, fallbackMessage = "请求失败") {
+    const view = mapErrorToView ? mapErrorToView(toErrorInput(error, fallbackMessage), fallbackMessage) : null;
+    showToast(view?.message || fallbackMessage);
+    return view;
+}
+
+function runErrorDisplayDemo(code, target = "summary") {
+    const normalizedCode = String(code || "UNKNOWN").trim();
+    const page = String(target || "summary");
+    const error = {
+        code: normalizedCode,
+        status: normalizedCode.match(/^HTTP_(\d{3})$/)?.[1] ? Number(normalizedCode.match(/^HTTP_(\d{3})$/)?.[1]) : undefined,
+        message: normalizedCode
+    };
+    const view = mapErrorToView ? mapErrorToView(error, "测试错误") : null;
+    if (!view) return;
+    if (view.presentation === "toast") {
+        showToast(view.message);
+        return;
+    }
+    const targetPage = ["summary", "chat", "real"].includes(page) ? page : "summary";
+    appState.panelErrors = {
+        ...(appState.panelErrors || {}),
+        [targetPage]: view
+    };
+    appState.activePage = targetPage;
+    renderNav();
+    renderContent();
 }
 const logContent = globalThis.AIPluginLogger.create("content", {
     getDebugMode: () => !!appState.settings?.debugMode
@@ -919,6 +984,11 @@ function bindPanelDelegatedEvents() {
                 showToast(`Debug Mode ${IS_DEBUG_MODE ? "Enabled" : "Disabled"}`);
                 logoClickCount = 0;
                 refreshLogoDebugCaptureState();
+                if (!IS_DEBUG_MODE && appState.activePage === "debug") {
+                    appState.activePage = "settings";
+                }
+                renderNav();
+                renderContent();
                 // Sync to inject script if possible (optional)
             }
         }
@@ -1048,6 +1118,18 @@ function bindPanelDelegatedEvents() {
             saveSettingsFromPanel();
             return;
         }
+        if (action === "open-feedback") {
+            window.open("https://www.wenjuan.com/s/UZBZJvus3xI/", "_blank", "noopener,noreferrer");
+            return;
+        }
+        if (action === "open-help") {
+            window.open("https://ncnp7ti79hnh.feishu.cn/wiki/AMVswpIdZiufLukZ3x0cMTWJnge#share-JpZDddCK5oZWcyxlbJJcijLBnIe", "_blank", "noopener,noreferrer");
+            return;
+        }
+        if (action === "open-review") {
+            window.open("https://chromewebstore.google.com/detail/bilitato-ai%E9%99%AA%E4%BD%A0%E7%9C%8Bb%E7%AB%99/ggddcgdafeeoijoaohcffinbefcbpcga/reviews", "_blank", "noopener,noreferrer");
+            return;
+        }
         if (action === "settings-authorize-custom-origin") {
             authorizeCustomOriginFromPanel();
             return;
@@ -1085,6 +1167,16 @@ function bindPanelDelegatedEvents() {
                 if (detailSelect) detailSelect.value = "normal";
             }
             saveSettingsFromPanel(true);
+            return;
+        }
+        if (action === "debug-error-demo") {
+            runErrorDisplayDemo(actionNode.dataset.code || "", actionNode.dataset.target || "summary");
+            return;
+        }
+        if (action === "debug-clear-errors") {
+            appState.panelErrors = {};
+            renderContent();
+            showToast("已清空错误测试状态");
             return;
         }
         if (action === "follow-now") {
@@ -1171,6 +1263,7 @@ function renderNav() {
         { id: "summary", file: "summary.png", slot: "top" },
         { id: "chat", file: "chat.png", slot: "top" },
         { id: "real", file: "real.png", slot: "top" },
+        ...(IS_DEBUG_MODE ? [{ id: "debug", file: "settings.png", slot: "top", label: "测试" }] : []),
         { id: "copy", file: "copy.png", slot: "bottom", label: "复制" },
         { id: "export", file: "download.png", slot: "bottom", label: "导出" },
         { id: "settings", file: "settings.png", slot: "bottom", label: "设置" }
@@ -1183,7 +1276,7 @@ function renderNav() {
             if (appState.activePage === "summary") {
                 return item.id !== "copy" && item.id !== "export";
             }
-            if (appState.activePage === "chat" || appState.activePage === "real") {
+            if (appState.activePage === "chat" || appState.activePage === "real" || appState.activePage === "debug") {
                 return item.id !== "copy" && item.id !== "export";
             }
             if (appState.activePage === "settings") {
@@ -1256,7 +1349,7 @@ function renderContent() {
     renderTopRemaining();
     ensureCloudReadForActivePage();
 
-    const pages = ["CC", "summary", "chat", "real", "settings"];
+    const pages = ["CC", "summary", "chat", "real", "debug", "settings"];
     pages.forEach((id) => {
         let container = panelShadowRoot.getElementById(`page-${id}`);
         if (!container) {
@@ -1273,6 +1366,7 @@ function renderContent() {
             else if (id === "chat") renderChat(container);
             else if (id === "summary") renderSummary(container);
             else if (id === "real") renderReal(container);
+            else if (id === "debug") renderDebugPanel(container);
             else if (id === "settings") renderSettings(container);
         } else {
             container.style.display = "none";
@@ -1341,6 +1435,18 @@ async function takePanelScreenshot() {
 }
 
 function renderSummary(panel) {
+    const debugErrorView = appState.panelErrors?.summary;
+    if (debugErrorView && renderErrorPanel) {
+        panel.classList.remove("is-segments-expanded");
+        panel.dataset.lastSignature = "";
+        panel.innerHTML = `
+            <div class="page-header">
+                <h3>总结</h3>
+            </div>
+            ${renderErrorPanel(debugErrorView, "run-summary")}
+        `;
+        return;
+    }
     const apiKey = String(appState.settings?.apiKey || "").trim();
     if (!apiKey) {
         panel.classList.remove("is-segments-expanded");
@@ -1384,6 +1490,14 @@ function renderSummary(panel) {
 
     if (!isLoading && (!hasContent || isTranscriptionRunning())) {
         panel.classList.remove("is-segments-expanded");
+        const errorView = appState.panelErrors?.summary;
+        if (errorView && renderErrorPanel) {
+            panel.innerHTML = `
+                ${headerHtml}
+                ${renderErrorPanel(errorView, "run-summary")}
+            `;
+            return;
+        }
         const hasSubtitle = Array.isArray(appState.cache?.rawSubtitle) && appState.cache.rawSubtitle.length > 0;
         let btnDisabled = (!hasSubtitle && !isTranscriptionRunning()) ? "disabled" : "";
         let tipText = hasSubtitle ? "去除噪音，抓住重点。" : "当前视频未检测到字幕，无法总结";
@@ -1790,6 +1904,17 @@ function applyCCSearchFilter(panel, rawTerm) {
 }
 
 function renderChat(panel) {
+    const debugErrorView = appState.panelErrors?.chat;
+    if (debugErrorView && renderErrorPanel) {
+        panel.dataset.lastSignature = "";
+        panel.innerHTML = `
+            <div class="page-header">
+                <h3>聊天</h3>
+            </div>
+            ${renderErrorPanel(debugErrorView, "chat-send")}
+        `;
+        return;
+    }
     const apiKey = String(appState.settings?.apiKey || "").trim();
     if (!apiKey) {
         panel.dataset.lastSignature = "";
@@ -1947,6 +2072,17 @@ function renderChat(panel) {
 }
 
 function renderReal(panel) {
+    const debugErrorView = appState.panelErrors?.real;
+    if (debugErrorView && renderErrorPanel) {
+        panel.dataset.lastSignature = "";
+        panel.innerHTML = `
+            <div class="page-header">
+                <h3>验真助手 <div class="header-tags"><span class="beta-tag">Beta</span></div></h3>
+            </div>
+            ${renderErrorPanel(debugErrorView, "run-rumors")}
+        `;
+        return;
+    }
     const apiKey = String(appState.settings?.apiKey || "").trim();
     if (!apiKey) {
         panel.dataset.lastSignature = "";
@@ -2036,6 +2172,16 @@ function renderReal(panel) {
         : `<button class="panel-icon-btn" data-action="run-rumors" title="${hasRumorsCache ? "重新验真" : "开始验真"}"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>`;
 
     if (!hasRumorsCache && rumorsStatus !== "processing") {
+        const errorView = appState.panelErrors?.real;
+        if (errorView && renderErrorPanel) {
+            panel.innerHTML = `
+                <div class="page-header">
+                    <h3>验真助手 <div class="header-tags"><span class="beta-tag">Beta</span>${rumorsCacheTag}</div></h3>
+                </div>
+                ${renderErrorPanel(errorView, "run-rumors")}
+            `;
+            return;
+        }
         panel.innerHTML = `
             <div class="page-header">
                 <h3>验真助手 <div class="header-tags"><span class="beta-tag">Beta</span>${rumorsCacheTag}</div></h3>
@@ -2300,26 +2446,6 @@ function renderSettings(panel) {
                 <input id="settings-groq-api-key" type="password" value="${escapeHtml(settings.groqApiKey || "")}" placeholder="示例：gsk_xxxxx">
                 <label>Groq 模型</label>
                 <input id="settings-groq-model" type="text" value="${escapeHtml(groqModel)}" placeholder="示例：whisper-large-v3-turbo">
-                <div class="settings-group-title">调用与显示模式</div>
-                <label>调用模式</label>
-                <select id="settings-pref-mode">
-                    <option value="quality" ${settings.prefMode === "quality" ? "selected" : ""}>质量模式</option>
-                    <option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>节流模式</option>
-                </select>
-                <label>默认开屏页</label>
-                <select id="settings-default-open-page">
-                    <option value="CC" ${defaultOpenPage === "CC" ? "selected" : ""}>字幕</option>
-                    <option value="summary" ${defaultOpenPage === "summary" ? "selected" : ""}>总结</option>
-                    <option value="chat" ${defaultOpenPage === "chat" ? "selected" : ""}>聊天</option>
-                    <option value="real" ${defaultOpenPage === "real" ? "selected" : ""}>验真</option>
-                </select>
-                <!--
-                <label>Debug</label>
-                <select id="settings-debug-mode">
-                    <option value="false" ${settings.debugMode ? "" : "selected"}>false</option>
-                    <option value="true" ${settings.debugMode ? "selected" : ""}>true</option>
-                </select>
-                --> 
                 <div class="settings-group-title">个性化</div>
                 <label>修改模式</label>
                 <select id="settings-prompt-mode">
@@ -2367,6 +2493,38 @@ function renderSettings(panel) {
                     </div>
                 </div>
                 <button type="button" class="panel-btn ghost" data-action="settings-reset-prompts">恢复默认</button>
+                <div class="settings-group-title">调用与显示模式</div>
+                <label>调用模式</label>
+                <select id="settings-pref-mode">
+                    <option value="quality" ${settings.prefMode === "quality" ? "selected" : ""}>质量模式</option>
+                    <option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>节流模式</option>
+                </select>
+                <label>默认开屏页</label>
+                <select id="settings-default-open-page">
+                    <option value="CC" ${defaultOpenPage === "CC" ? "selected" : ""}>字幕</option>
+                    <option value="summary" ${defaultOpenPage === "summary" ? "selected" : ""}>总结</option>
+                    <option value="chat" ${defaultOpenPage === "chat" ? "selected" : ""}>聊天</option>
+                    <option value="real" ${defaultOpenPage === "real" ? "selected" : ""}>验真</option>
+                </select>
+                <div class="settings-group-title">异常诊断</div>
+                <label>允许上报异常</label>
+                <select id="settings-sentry-enabled">
+                    <option value="false" ${settings.sentryEnabled ? "" : "selected"}>关闭</option>
+                    <option value="true" ${settings.sentryEnabled ? "selected" : ""}>开启</option>
+                </select>
+                <!--
+                <label>Debug</label>
+                <select id="settings-debug-mode">
+                    <option value="false" ${settings.debugMode ? "" : "selected"}>false</option>
+                    <option value="true" ${settings.debugMode ? "selected" : ""}>true</option>
+                </select>
+                -->
+                <div class="settings-group-title">帮助与反馈</div>
+                <div class="settings-action-row">
+                    <button type="button" class="panel-btn ghost" data-action="open-help">帮助文档</button>
+                    <button type="button" class="panel-btn ghost" data-action="open-feedback">反馈建议</button>
+                    <button type="button" class="panel-btn ghost" data-action="open-review">去好评</button>
+                </div>
             </div>
         </div>
     `;
@@ -2556,6 +2714,52 @@ function renderSettings(panel) {
     }
 }
 
+function renderErrorDemoControls() {
+    const panelErrors = [
+        ["HTTP_401", "401 Key 无效", "summary"],
+        ["HTTP_403", "403 无权限", "summary"],
+        ["HTTP_404", "404 模型/接口", "summary"],
+        ["TIMEOUT", "超时", "summary"],
+        ["NETWORK_ERROR", "网络失败", "summary"],
+        ["JSON_PARSE_ERROR", "JSON 格式", "summary"],
+        ["ASR_FILE_TOO_LARGE", "音频过大", "summary"],
+        ["HTTP_401", "聊天 401", "chat"],
+        ["JSON_PARSE_ERROR", "验真 JSON", "real"]
+    ];
+    const toastErrors = [
+        ["HTTP_429", "429 限流"],
+        ["HTTP_5XX", "5XX 服务异常"],
+        ["ASR_RATE_LIMIT", "ASR 限流"],
+        ["CLOUD_FAILED", "云缓存失败"],
+        ["DOWNLOAD_FAILED", "下载失败"]
+    ];
+    const renderButton = ([code, label, target]) => (
+        `<button type="button" class="panel-btn ghost error-demo-btn" data-action="debug-error-demo" data-code="${escapeHtml(code)}" data-target="${escapeHtml(target || "summary")}">${escapeHtml(label)}</button>`
+    );
+    return `
+        <div class="settings-group-title">开发测试</div>
+        <div class="error-demo-section">
+            <div class="error-demo-label">面板提示</div>
+            <div class="error-demo-grid">${panelErrors.map(renderButton).join("")}</div>
+            <div class="error-demo-label">Toast 提示</div>
+            <div class="error-demo-grid">${toastErrors.map(renderButton).join("")}</div>
+            <button type="button" class="panel-btn ghost error-demo-clear" data-action="debug-clear-errors">清空测试状态</button>
+        </div>
+    `;
+}
+
+function renderDebugPanel(panel) {
+    panel.dataset.lastSignature = "debug";
+    panel.innerHTML = `
+        <div class="page-header">
+            <h3>测试</h3>
+        </div>
+        <div class="page-body debug-page-body">
+            ${renderErrorDemoControls()}
+        </div>
+    `;
+}
+
 async function runTasks(tasks) {
     // Check for subtitle existence before running summary or segments
     if (!canRunTasksWithCache(tasks, resolveCurrentBvid(), appState.cache)) {
@@ -2567,6 +2771,10 @@ async function runTasks(tasks) {
     const taskId = buildTasksProgressTaskId(tasks);
     try {
         tasks.forEach((t) => appState.sessionGeneratedTasks.add(t));
+        tasks.forEach((t) => {
+            if (t === "summary" || t === "segments") clearPanelError("summary");
+            if (t === "rumors") clearPanelError("real");
+        });
         startAsymptoticPseudoProgress(taskId, 12);
         const durationMeta = resolveVideoDurationMeta();
         const taskContext = durationMeta ? { videoDuration: durationMeta } : {};
@@ -2576,7 +2784,11 @@ async function runTasks(tasks) {
     } catch (error) {
         finishAsymptoticPseudoProgress(taskId, true);
         logContent.error("task_abort", { tasks, error: error.message || "任务失败", stack: error.stack || "" });
-        showToast(error.message || "任务失败");
+        reportContentError?.(error, { task: tasks.join(","), source: "run_tasks" });
+        const targetPage = tasks.includes("rumors") ? "real" : "summary";
+        const view = setPanelError(targetPage, error, error.message || "任务失败");
+        if (view?.presentation === "toast") showToast(view.message);
+        else renderContent();
     }
 }
 
@@ -2764,7 +2976,9 @@ function onChatStreamMessage(message) {
         return;
     }
     if (type === "error") {
-        const error = String(message?.error || "请求失败");
+        const errorInput = toErrorInput(message, "请求失败");
+        const view = mapErrorToView ? mapErrorToView(errorInput, "请求失败") : null;
+        const error = view?.message || String(message?.error || message?.message || "请求失败");
         appState.chatPending = (appState.chatPending || []).map((item) => {
             if (item.id !== assistantId) return item;
             return { ...item, status: "done", content: `请求失败：${error}`, metrics: null };
@@ -3078,7 +3292,8 @@ function startCloudReadForCurrentVideo(options = {}) {
             appState.cloudReadState = createCloudReadState(target, "failed", nextRequestId);
             if (!silent) renderContent();
             if (String(error?.message || "") && String(error.message) !== "CLOUD_TIMEOUT") {
-                showToast("访问云端数据库失败");
+                reportContentError?.(error, { task: "cloud_read", source: "cloud_read" });
+                notifyMappedError({ ...error, code: "CLOUD_FAILED" }, "访问云端数据库失败");
             }
         });
 }
@@ -3198,6 +3413,7 @@ async function authorizeCustomOriginFromPanel() {
             statusEl.textContent = "域名授权失败";
             statusEl.className = "show syncing";
         }
+        reportContentError?.(error, { task: "settings_authorize", source: "settings" });
         showToast(error?.message || "授权失败");
         return false;
     }
@@ -3261,6 +3477,8 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         groqModel: String(panel.querySelector("#settings-groq-model")?.value || "").trim(),
         prefMode: panel.querySelector("#settings-pref-mode")?.value || "quality",
         defaultOpenPage,
+        sentryEnabled: panel.querySelector("#settings-sentry-enabled")?.value === "true",
+        sentryDsn: String(appState.settings?.sentryDsn || "").trim(),
         debugMode: panel.querySelector("#settings-debug-mode")?.value === "true",
         promptSettings: {
             mode: promptMode,
@@ -3333,6 +3551,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         renderSettings(panel);
     }
     } catch (error) {
+        reportContentError?.(error, { task: "settings_save", source: "settings" });
         showToast(error.message || "保存失败");
     }
 }
@@ -3924,7 +4143,8 @@ async function startTranscriptionFromCapsule() {
         }
         resetTranscriptionState();
         updateProgress(0, progressTaskId, { force: true });
-        showToast(error.message || "Groq 转录失败");
+        reportContentError?.(error, { task: "asr", source: "start_transcription" });
+        notifyMappedError(error, error.message || "Groq 转录失败");
         renderContent();
         renderSubtitleTimelinePanel(document.getElementById("panel-body"));
     }
@@ -3977,7 +4197,8 @@ async function handleRegenerateGroqSubtitle() {
         }
         resetTranscriptionState();
         updateProgress(0, `transcribe:${injectBvid || "unknown"}`, { force: true });
-        showToast(error.message || "重新生成失败");
+        reportContentError?.(error, { task: "asr_regenerate", source: "regenerate_transcription" });
+        notifyMappedError(error, error.message || "重新生成失败");
         renderContent();
     }
 }
@@ -4389,6 +4610,7 @@ async function forwardSubtitlePayload(payload, source) {
     } catch (error) {
         pushSubtitleTimeline("subtitle_forward_error", { source, bvid, error: error.message || "转发字幕失败" });
         logContent.error("task_abort", { task: "subtitle_forward", bvid, error: error.message || "转发字幕失败", stack: error.stack || "" });
+        reportContentError?.(error, { task: "subtitle_forward", source });
     }
 }
 
@@ -5213,7 +5435,7 @@ function renderQualityList(menuContainer, type) {
             showToast("下载已触发，请查看浏览器下载");
         } catch (err) {
             logger.error("Download error:", err);
-            showToast("下载失败: " + err.message);
+            notifyMappedError({ ...err, code: err?.code || "DOWNLOAD_FAILED" }, "下载失败: " + (err.message || ""));
         } finally {
             btn.textContent = originalText;
             btn.disabled = false;
@@ -5274,7 +5496,7 @@ function renderQualityList(menuContainer, type) {
                     });
                     showToast("下载已触发，请查看浏览器下载");
                 } catch (err) {
-                    showToast("失败: " + err.message);
+                    notifyMappedError({ ...err, code: err?.code || "DOWNLOAD_FAILED" }, "失败: " + (err.message || ""));
                 } finally {
                     btn.textContent = originalText;
                     btn.disabled = false;

@@ -29,6 +29,7 @@ describe("contentDownload", () => {
         id: 30280,
         desc: "Audio 30280",
         url: "https://audio.example/a.m4s",
+        urls: ["https://audio.example/a.m4s"],
         bandwidth: 128000
       }
     ]);

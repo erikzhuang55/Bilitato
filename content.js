@@ -395,7 +395,9 @@ async function onInjectMessage(event) {
                     ready: appState.isPlayInfoReady
                 });
                 const exportMenu = panelShadowRoot ? panelShadowRoot.getElementById("export-option-menu") : null;
-                if (exportMenu && exportMenu.querySelector('[data-action="download-video"]')) {
+                if (exportMenu?.dataset?.streamLoading === "video" || exportMenu?.dataset?.streamLoading === "audio") {
+                    renderQualityList(exportMenu, exportMenu.dataset.streamLoading);
+                } else if (exportMenu && exportMenu.querySelector('[data-action="download-video"]')) {
                     renderExportMainMenu(exportMenu);
                 }
             }
@@ -5433,7 +5435,7 @@ function toggleExportMenu(buttonNode) {
 function renderExportLoadingState(menuContainer, type) {
     if (!menuContainer) return;
     const title = type === "audio" ? "正在获取音频流..." : "正在获取视频流...";
-    menuContainer.dataset.streamLoading = "1";
+    menuContainer.dataset.streamLoading = type === "audio" ? "audio" : "video";
     menuContainer.innerHTML = `
         <div class="quality-list-header" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #eee;margin-bottom:4px;">
             <button class="back-btn" style="border:none;background:none;cursor:pointer;font-size:16px;padding:0 4px;">←</button>
@@ -5453,9 +5455,11 @@ function renderExportLoadingState(menuContainer, type) {
 function renderExportMainMenu(menuContainer) {
     if (!menuContainer) return;
     menuContainer.dataset.streamLoading = "";
-    const downloadReady = !!appState.isPlayInfoReady;
-    const downloadVideoLabel = downloadReady ? "下载视频" : "正在获取视频流...";
-    const downloadAudioLabel = downloadReady ? "下载音频" : "正在获取视频流...";
+    const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+    const downloadReady = hasUsablePlayInfoForBvid(appState.playInfo, pageBvid);
+    appState.isPlayInfoReady = downloadReady;
+    const downloadVideoLabel = "下载视频";
+    const downloadAudioLabel = "下载音频";
     menuContainer.innerHTML = `
         <button type="button" class="copy-option-btn" data-action="download-video" style="opacity:${downloadReady ? "1" : "0.72"}">${downloadVideoLabel}</button>
         <button type="button" class="copy-option-btn" data-action="download-audio" style="opacity:${downloadReady ? "1" : "0.72"}">${downloadAudioLabel}</button>
@@ -5474,11 +5478,10 @@ function renderExportMainMenu(menuContainer) {
             renderExportLoadingState(menuContainer, "video");
             const info = await refreshPlayInfoNow(7000).catch(() => null);
             if (!hasUsablePlayInfoForBvid(info, getBvidFromUrl(location.href) || "")) {
-                showToast("正在获取视频流，请稍后重试");
+                showToast("暂未拿到可用视频流，请稍后重试");
                 renderExportMainMenu(menuContainer);
                 return;
             }
-            renderExportMainMenu(menuContainer);
         }
         renderQualityList(menuContainer, "video");
     });
@@ -5489,11 +5492,10 @@ function renderExportMainMenu(menuContainer) {
             renderExportLoadingState(menuContainer, "audio");
             const info = await refreshPlayInfoNow(7000).catch(() => null);
             if (!hasUsablePlayInfoForBvid(info, getBvidFromUrl(location.href) || "")) {
-                showToast("正在获取视频流，请稍后重试");
+                showToast("暂未拿到可用音频流，请稍后重试");
                 renderExportMainMenu(menuContainer);
                 return;
             }
-            renderExportMainMenu(menuContainer);
         }
         renderQualityList(menuContainer, "audio");
     });
@@ -5506,6 +5508,23 @@ async function probeUrlInPage(url) {
     } catch (_) {
         return "unknown";
     }
+}
+
+function getStreamCandidateUrls(stream) {
+    const urls = Array.isArray(stream?.urls) ? stream.urls : [];
+    return [...urls, stream?.url]
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+        .filter((item, index, list) => list.indexOf(item) === index);
+}
+
+async function pickVerifiedDownloadUrl(stream) {
+    const candidates = getStreamCandidateUrls(stream);
+    for (const url of candidates) {
+        const status = await probeUrlInPage(url);
+        if (status === "ok") return url;
+    }
+    return "";
 }
 
 function renderQualityList(menuContainer, type) {
@@ -5595,7 +5614,12 @@ function renderQualityList(menuContainer, type) {
             <button class="back-btn" style="border:none;background:none;cursor:pointer;font-size:16px;padding:0 4px;">←</button>
             <span style="font-size:13px;font-weight:600;">${title}</span>
         </div>
-        <div class="quality-list-body" style="max-height:300px;overflow-y:auto;">
+        <div class="quality-list-body" style="max-height:300px;overflow-y:auto;padding-top:4px;">
+            <div class="download-unavailable-notice" style="display:none;margin:0 10px 8px;padding:8px 10px;border:1px solid #ffd7e5;background:#fff5f8;color:#8a4158;border-radius:6px;font-size:12px;line-height:1.45;">
+                <div style="font-weight:600;margin-bottom:3px;">当前下载链接暂不可用</div>
+                <div style="color:#93586a;">可能是链接过期或站点拒绝，请重新获取后再试。</div>
+                <button type="button" data-action="download-retry-streams" style="margin-top:7px;border:1px solid #fb7299;background:#fb7299;color:#fff;border-radius:4px;padding:4px 8px;font-size:12px;cursor:pointer;">重新获取</button>
+            </div>
             ${listHtml}
         </div>
     `;
@@ -5603,6 +5627,19 @@ function renderQualityList(menuContainer, type) {
     menuContainer.querySelector(".back-btn").addEventListener("click", (e) => {
         e.stopPropagation();
         renderExportMainMenu(menuContainer);
+    });
+    menuContainer.querySelector('[data-action="download-retry-streams"]')?.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        menuContainer.dataset.expiredRefreshAttempted = "";
+        renderExportLoadingState(menuContainer, type);
+        const info = await refreshPlayInfoNow(7000).catch(() => null);
+        const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+        if (!hasUsablePlayInfoForBvid(info, pageBvid)) {
+            showToast("暂未拿到可用视频流，请稍后重试");
+            renderExportMainMenu(menuContainer);
+            return;
+        }
+        renderQualityList(menuContainer, type);
     });
 
     const isProbeTargetAlive = () => !!menuContainer && (panelShadowRoot ?? document).contains(menuContainer);
@@ -5638,20 +5675,31 @@ function renderQualityList(menuContainer, type) {
             btn.style.background = "#f5f5f5";
             return;
         }
-        btn.dataset.probeStatus = status === "ok" ? "ok" : "unknown";
-        btn.disabled = false;
-        btn.textContent = originalText;
-        btn.style.opacity = btn.dataset.probeOriginalOpacity || "1";
-        btn.style.cursor = "pointer";
-        btn.style.color = btn.dataset.probeOriginalColor || "";
-        btn.style.borderColor = btn.dataset.probeOriginalBorderColor || "";
-        btn.style.background = btn.dataset.probeOriginalBackground || "";
-        if (btn.classList.contains("download-default-btn") || btn.classList.contains("download-stream-btn")) {
-            btn.style.opacity = "1";
-            btn.style.color = "#fff";
-            btn.style.borderColor = "#fb7299";
-            btn.style.background = "#fb7299";
+        if (status === "ok") {
+            btn.dataset.probeStatus = "ok";
+            btn.disabled = false;
+            btn.textContent = originalText;
+            btn.style.opacity = btn.dataset.probeOriginalOpacity || "1";
+            btn.style.cursor = "pointer";
+            btn.style.color = btn.dataset.probeOriginalColor || "";
+            btn.style.borderColor = btn.dataset.probeOriginalBorderColor || "";
+            btn.style.background = btn.dataset.probeOriginalBackground || "";
+            if (btn.classList.contains("download-default-btn") || btn.classList.contains("download-stream-btn")) {
+                btn.style.opacity = "1";
+                btn.style.color = "#fff";
+                btn.style.borderColor = "#fb7299";
+                btn.style.background = "#fb7299";
+            }
+            return;
         }
+        btn.dataset.probeStatus = "unknown";
+        btn.disabled = true;
+        btn.textContent = "待刷新";
+        btn.style.opacity = "1";
+        btn.style.cursor = "not-allowed";
+        btn.style.color = "#999";
+        btn.style.borderColor = "#ccc";
+        btn.style.background = "#f5f5f5";
     };
 
     const addProbeTarget = (urlToButtons, url, btn) => {
@@ -5669,23 +5717,28 @@ function renderQualityList(menuContainer, type) {
             const info = await refreshPlayInfoNow(7000).catch(() => null);
             const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
             if (!hasUsablePlayInfoForBvid(info, pageBvid)) {
-                showToast("当前下载链接已失效，请刷新页面后重试");
+                updateUnavailableNotice();
                 return false;
             }
             renderQualityList(menuContainer, type);
             return true;
         } catch (_) {
-            showToast("当前下载链接已失效，请刷新页面后重试");
+            updateUnavailableNotice();
             return false;
         }
     };
 
     const hasAnyUsableButton = () => {
         const actionButtons = Array.from(menuContainer.querySelectorAll(".download-default-btn, .codec-btn, .download-stream-btn"));
-        return actionButtons.some((btn) => {
-            const status = String(btn?.dataset?.probeStatus || "");
-            return status === "ok" || status === "unknown";
-        });
+        return actionButtons.some((btn) => String(btn?.dataset?.probeStatus || "") === "ok");
+    };
+
+    const updateUnavailableNotice = () => {
+        const notice = menuContainer.querySelector(".download-unavailable-notice");
+        if (!notice) return;
+        const actionButtons = Array.from(menuContainer.querySelectorAll(".download-default-btn, .codec-btn, .download-stream-btn"));
+        const hasPending = actionButtons.some((btn) => String(btn?.dataset?.probeStatus || "") === "pending");
+        notice.style.display = actionButtons.length > 0 && !hasPending && !hasAnyUsableButton() ? "block" : "none";
     };
 
     const syncDefaultButtonState = (groupIndex) => {
@@ -5707,7 +5760,7 @@ function renderQualityList(menuContainer, type) {
             const status = String(codecBtn?.dataset?.probeStatus || "pending");
             if (status === "pending") hasPending = true;
             if (status === "ok" && firstOkIndex < 0) firstOkIndex = i;
-            if ((status === "ok" || status === "unknown") && firstFallbackIndex < 0) firstFallbackIndex = i;
+            if (status === "ok" && firstFallbackIndex < 0) firstFallbackIndex = i;
         }
         if (firstOkIndex >= 0) {
             defaultBtn.dataset.stream = String(firstOkIndex);
@@ -5740,20 +5793,20 @@ function renderQualityList(menuContainer, type) {
             groups.forEach((group, gIndex) => {
                 const streamList = Array.isArray(group?.streams) ? group.streams : [];
                 streamList.forEach((stream, sIndex) => {
-                    const url = String(stream?.url || "").trim();
-                    if (!url) return;
+                    const urls = getStreamCandidateUrls(stream);
+                    if (!urls.length) return;
                     const codecBtn = menuContainer.querySelector(`.codec-btn[data-group="${gIndex}"][data-stream="${sIndex}"]`);
-                    addProbeTarget(urlToButtons, url, codecBtn);
+                    urls.forEach((url) => addProbeTarget(urlToButtons, url, codecBtn));
                 });
             });
             return urlToButtons;
         }
         const audioStreams = appState.playInfo?.audio || [];
         audioStreams.forEach((stream, index) => {
-            const url = String(stream?.url || "").trim();
-            if (!url) return;
+            const urls = getStreamCandidateUrls(stream);
+            if (!urls.length) return;
             const btn = menuContainer.querySelector(`.download-stream-btn[data-index="${index}"]`);
-            addProbeTarget(urlToButtons, url, btn);
+            urls.forEach((url) => addProbeTarget(urlToButtons, url, btn));
         });
         return urlToButtons;
     };
@@ -5775,24 +5828,38 @@ function renderQualityList(menuContainer, type) {
             if (!isProbeTargetAlive() || menuContainer.dataset.probeSessionId !== probeSessionId) return;
             const freshUrlToButtons = collectProbeTargets();
 
+            const buttonStatuses = new Map();
+            const rememberStatus = (btn, status) => {
+                if (!btn) return;
+                const list = buttonStatuses.get(btn) || [];
+                list.push(status);
+                buttonStatuses.set(btn, list);
+            };
             await Promise.all(
                 Array.from(freshUrlToButtons.entries()).map(async ([url, btnList]) => {
                     const status = await probeUrlInPage(url);
                     if (!isProbeTargetAlive() || menuContainer.dataset.probeSessionId !== probeSessionId) return;
-                    btnList.forEach((btn) => applyProbeState(btn, status));
-                    const touchedGroups = new Set(
-                        btnList
-                            .map((btn) => Number(btn?.dataset?.group))
-                            .filter((n) => Number.isFinite(n))
-                    );
-                    touchedGroups.forEach((gIndex) => syncDefaultButtonState(gIndex));
+                    btnList.forEach((btn) => rememberStatus(btn, status));
                 })
             );
+            const touchedGroups = new Set();
+            buttonStatuses.forEach((statuses, btn) => {
+                const finalStatus = statuses.includes("ok")
+                    ? "ok"
+                    : statuses.every((status) => status === "expired")
+                        ? "expired"
+                        : "unknown";
+                applyProbeState(btn, finalStatus);
+                const groupIndex = Number(btn?.dataset?.group);
+                if (Number.isFinite(groupIndex)) touchedGroups.add(groupIndex);
+            });
+            touchedGroups.forEach((gIndex) => syncDefaultButtonState(gIndex));
 
             pendingButtons.forEach((btn) => {
                 if (btn.dataset.probeStatus === "pending") applyProbeState(btn, "unknown");
             });
             syncAllDefaultButtons();
+            updateUnavailableNotice();
             if (!hasAnyUsableButton()) {
                 await refreshMenuWhenAllExpired();
             }
@@ -5800,6 +5867,7 @@ function renderQualityList(menuContainer, type) {
             if (!isProbeTargetAlive() || menuContainer.dataset.probeSessionId !== probeSessionId) return;
             pendingButtons.forEach((btn) => applyProbeState(btn, "unknown"));
             syncAllDefaultButtons();
+            updateUnavailableNotice();
         }
     };
 
@@ -5810,6 +5878,11 @@ function renderQualityList(menuContainer, type) {
         const group = streams[groupIndex];
         const stream = group?.streams?.[streamIndex];
         if (!stream) return;
+        if (String(btn?.dataset?.probeStatus || "") !== "ok") {
+            showToast("下载链接未确认有效，请刷新后重试");
+            refreshMenuWhenAllExpired().catch(() => {});
+            return;
+        }
 
         logDownload.info("download_option_selected", {
             task: "download",
@@ -5850,7 +5923,8 @@ function renderQualityList(menuContainer, type) {
 
             if (!freshStream) throw new Error("无法获取最新下载地址");
             
-            const urlToDownload = freshStream.url;
+            const urlToDownload = await pickVerifiedDownloadUrl(freshStream);
+            if (!urlToDownload) throw new Error("下载链接不可用，请刷新后重试");
             // Generate safe filename
             const currentTitle = cleanBilibiliTitle(document.title);
             const safeTitle = sanitizeDownloadFileName(currentTitle);
@@ -5908,12 +5982,22 @@ function renderQualityList(menuContainer, type) {
                     refreshMenuWhenAllExpired().catch(() => {});
                     return;
                 }
+                if (String(btn.dataset.probeStatus || "") !== "ok") {
+                    showToast("下载链接未确认有效，请刷新后重试");
+                    refreshMenuWhenAllExpired().catch(() => {});
+                    return;
+                }
                 triggerVideoDownload(btn, groupIndex, streamIndex);
             });
         });
         menuContainer.querySelectorAll(".codec-btn").forEach(btn => {
             btn.addEventListener("click", (e) => {
                 e.stopPropagation();
+                if (String(btn.dataset.probeStatus || "") !== "ok") {
+                    showToast("下载链接未确认有效，请刷新后重试");
+                    refreshMenuWhenAllExpired().catch(() => {});
+                    return;
+                }
                 triggerVideoDownload(btn, parseInt(btn.dataset.group), parseInt(btn.dataset.stream));
             });
         });
@@ -5922,6 +6006,11 @@ function renderQualityList(menuContainer, type) {
         menuContainer.querySelectorAll(".download-stream-btn").forEach(btn => {
             btn.addEventListener("click", async (e) => {
                 e.stopPropagation();
+                if (String(btn.dataset.probeStatus || "") !== "ok") {
+                    showToast("下载链接未确认有效，请刷新后重试");
+                    refreshMenuWhenAllExpired().catch(() => {});
+                    return;
+                }
                 const index = parseInt(btn.dataset.index, 10);
                 const stream = streams[index];
                 if (!stream) return;
@@ -5967,9 +6056,11 @@ function renderQualityList(menuContainer, type) {
                         }
                     });
                     
+                    const urlToDownload = await pickVerifiedDownloadUrl(freshStream);
+                    if (!urlToDownload) throw new Error("音频下载链接不可用，请刷新后重试");
                     await chrome.runtime.sendMessage({
                         action: "DOWNLOAD_STREAM",
-                        payload: { url: freshStream.url, filename }
+                        payload: { url: urlToDownload, filename }
                     });
                     showToast("下载已触发，请查看浏览器下载");
                 } catch (err) {

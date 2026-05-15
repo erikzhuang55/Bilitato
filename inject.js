@@ -423,11 +423,14 @@
             // 1. DASH
             if (data.dash && data.dash.video) {
                 data.dash.video.forEach(v => {
+                    const primaryUrl = v.baseUrl || v.base_url || "";
+                    const backupUrls = Array.isArray(v.backupUrl) ? v.backupUrl : (Array.isArray(v.backup_url) ? v.backup_url : []);
                     candidates.push({
                         quality: v.id,
                         codecid: v.codecid,
                         desc: getQualityDesc(v.id, data.accept_quality, data.accept_description),
-                        url: v.baseUrl || v.base_url,
+                        url: primaryUrl,
+                        urls: [primaryUrl, ...backupUrls].filter(Boolean),
                         codecs: v.codecs,
                         type: 'DASH'
                     });
@@ -437,11 +440,14 @@
             // 2. DURL (Legacy/MP4)
             if (data.durl) {
                  data.durl.forEach(v => {
+                    const primaryUrl = v.url || "";
+                    const backupUrls = Array.isArray(v.backupUrl) ? v.backupUrl : (Array.isArray(v.backup_url) ? v.backup_url : []);
                     candidates.push({
                         quality: data.quality || 0, // durl usually has top-level quality
                         codecid: 0, // unknown
                         desc: getQualityDesc(data.quality, data.accept_quality, data.accept_description),
-                        url: v.url,
+                        url: primaryUrl,
+                        urls: [primaryUrl, ...backupUrls].filter(Boolean),
                         type: 'MP4'
                     });
                 });
@@ -511,10 +517,13 @@
                         finalDesc = `Audio ${a.id}`;
                     }
                     
+                    const primaryUrl = a.baseUrl || a.base_url || "";
+                    const backupUrls = Array.isArray(a.backupUrl) ? a.backupUrl : (Array.isArray(a.backup_url) ? a.backup_url : []);
                     audio.push({
                         id: a.id,
                         desc: finalDesc, 
-                        url: a.baseUrl || a.base_url,
+                        url: primaryUrl,
+                        urls: [primaryUrl, ...backupUrls].filter(Boolean),
                         bandwidth: bandwidthNum
                     });
                 });

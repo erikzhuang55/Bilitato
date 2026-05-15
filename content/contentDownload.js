@@ -16,6 +16,7 @@
                     id: item?.id || 0,
                     desc: item?.id ? `Audio ${item.id}` : "Audio",
                     url: item?.url || item?.baseUrl || item?.base_url || "",
+                    urls: Array.isArray(item?.urls) ? item.urls : [item?.url || item?.baseUrl || item?.base_url || ""].filter(Boolean),
                     bandwidth: Number(item?.bandwidth || 0)
                 }))
                 .filter((item) => item.url);

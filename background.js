@@ -60,6 +60,7 @@ const TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
 const GROQ_AUDIO_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 const GROQ_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
+const DOWNLOAD_HEADER_RULE_ID = 910001;
 const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
 const SUPABASE_DEFAULT_USAGE_DAILY_RPC = "increment_feature_usage_daily";
 const DEFAULT_SENTRY_DSN = "https://04879b2bd5fc72eba741a402e26c4790@o4511384082055168.ingest.de.sentry.io/4511384299634768";
@@ -298,6 +299,16 @@ async function handleMessage(msg, sender) {
         });
 
         try {
+            const status = await probeUrlStatus(url);
+            if (status !== "ok") {
+                const error = createAppError(
+                    "DOWNLOAD_URL_UNVERIFIED",
+                    status === "expired" ? "下载链接已失效，请刷新后重试" : "下载链接无法确认有效，请刷新后重试"
+                );
+                error.status = status;
+                throw error;
+            }
+            await ensureDownloadHeaderRule(url);
             const downloadId = await chrome.downloads.download({
                 url: url,
                 filename: filename || "download.mp4",
@@ -518,6 +529,48 @@ function getUrlMeta(url) {
 function getFileExtension(filename) {
     const match = String(filename || "").toLowerCase().match(/\.([a-z0-9]{1,8})(?:$|\?)/);
     return match ? match[1] : "";
+}
+
+async function ensureDownloadHeaderRule(url) {
+    if (!chrome.declarativeNetRequest?.updateSessionRules) return false;
+    const meta = getUrlMeta(url);
+    const host = String(meta.host || "").toLowerCase();
+    if (!host || !/(bilivideo|hdslb|bilibili)\.(com|cn)$/.test(host)) return false;
+    try {
+        await chrome.declarativeNetRequest.updateSessionRules({
+            removeRuleIds: [DOWNLOAD_HEADER_RULE_ID],
+            addRules: [{
+                id: DOWNLOAD_HEADER_RULE_ID,
+                priority: 1,
+                action: {
+                    type: "modifyHeaders",
+                    requestHeaders: [
+                        { header: "Referer", operation: "set", value: "https://www.bilibili.com/" },
+                        { header: "Origin", operation: "set", value: "https://www.bilibili.com" }
+                    ]
+                },
+                condition: {
+                    urlFilter: `||${host}/`,
+                    resourceTypes: ["main_frame", "sub_frame", "xmlhttprequest", "media", "other"]
+                }
+            }]
+        });
+        logDownload.info("download_header_rule_enabled", {
+            task: "download",
+            detail: { url_host: host }
+        });
+        return true;
+    } catch (error) {
+        logDownload.warn("download_header_rule_failed", {
+            task: "download",
+            code: "DOWNLOAD_HEADER_RULE_FAILED",
+            detail: {
+                url_host: host,
+                error: error.message || "failed to enable download headers"
+            }
+        });
+        return false;
+    }
 }
 
 async function probeDownloadContentType(url) {

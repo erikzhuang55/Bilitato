@@ -59,7 +59,9 @@ const MAX_GLOBAL_CONCURRENCY = 1;
 const TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
 const GROQ_AUDIO_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
+const SILICONFLOW_AUDIO_TRANSCRIBE_URL = "https://api.siliconflow.cn/v1/audio/transcriptions";
 const GROQ_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
+const SILICONFLOW_MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 const DOWNLOAD_HEADER_RULE_ID = 910001;
 const BILI_PLAYURL_API = "https://api.bilibili.com/x/player/playurl";
 const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
@@ -332,10 +334,14 @@ async function handleMessage(msg, sender) {
             return { success: true, downloadId };
 
         } catch (error) {
+            const tabState = tabId ? await getTabState(tabId) : null;
+            const usageContext = await getUsageVideoContext(tabState?.activeBvid || "", {
+                title: tabState?.title || ""
+            });
             await reportDailyFeatureUsage("download", settings, {
                 durationMs: Date.now() - startedAt,
                 tokens: 0
-            }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "DOWNLOAD_CHROME_API_FAILED"));
+            }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "DOWNLOAD_CHROME_API_FAILED"), usageContext);
             logDownload.error("download_chrome_api_failed", {
                 task: "download",
                 source: "background",
@@ -630,6 +636,56 @@ function assertAsrAudioNotReused(bvid, audioDigest, context = {}) {
         const entries = [...recentAsrAudioFingerprints.entries()].sort((a, b) => Number(a[1]?.at || 0) - Number(b[1]?.at || 0));
         entries.slice(0, recentAsrAudioFingerprints.size - 30).forEach(([key]) => recentAsrAudioFingerprints.delete(key));
     }
+}
+
+function isAsrSubtitleSource(source) {
+    const value = String(source || "").toLowerCase();
+    return value === "groq" || value === "whisper" || value === "siliconflow" || value === "funasr";
+}
+
+function isNoTimestampSubtitleSource(source) {
+    const value = String(source || "").toLowerCase();
+    return value === "siliconflow" || value === "funasr";
+}
+
+function splitTranscriptionTextByPunctuation(text) {
+    const normalized = stripEmojiFromText(text)
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!normalized) return [];
+    const pieces = normalized.match(/[^。！？!?；;，,、\n]+[。！？!?；;，,、]?/g) || [normalized];
+    const rows = [];
+    let buffer = "";
+    const flush = () => {
+        const value = buffer.trim();
+        if (value) rows.push(value);
+        buffer = "";
+    };
+    pieces.forEach((piece) => {
+        const value = String(piece || "").trim();
+        if (!value) return;
+        if (!buffer) {
+            buffer = value;
+            if (/[。！？!?；;]$/.test(value) || value.length >= 80) flush();
+            return;
+        }
+        if ((buffer + value).length <= 80 && !/[。！？!?；;]$/.test(buffer)) {
+            buffer += value;
+        } else {
+            flush();
+            buffer = value;
+        }
+        if (/[。！？!?；;]$/.test(buffer) || buffer.length >= 80) flush();
+    });
+    flush();
+    return rows.length ? rows : [normalized];
+}
+
+function stripEmojiFromText(text) {
+    return String(text || "")
+        .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, "")
+        .replace(/[\uFE0E\uFE0F\u200D]/g, "")
+        .trim();
 }
 
 function getFileExtension(filename) {
@@ -1000,18 +1056,26 @@ class ContentProvider {
         const title = String(payload?.title || "").trim();
         const { settings } = await chrome.storage.local.get(["settings"]);
         const normalizedSettings = normalizeSettings(settings);
-        const groqApiKey = String(normalizedSettings.groqApiKey || "").trim();
-        const groqModel = String(normalizedSettings.groqModel || "").trim() || "whisper-large-v3-turbo";
+        const asrProvider = String(normalizedSettings.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
+        const asrApiKey = asrProvider === "siliconflow"
+            ? String(normalizedSettings.siliconFlowApiKey || "").trim()
+            : String(normalizedSettings.groqApiKey || "").trim();
+        const asrModel = asrProvider === "siliconflow"
+            ? (String(normalizedSettings.siliconFlowAsrModel || "").trim() || "FunAudioLLM/SenseVoiceSmall")
+            : (String(normalizedSettings.groqModel || "").trim() || "whisper-large-v3-turbo");
+        const asrMaxAudioBytes = asrProvider === "siliconflow" ? SILICONFLOW_MAX_AUDIO_BYTES : GROQ_MAX_AUDIO_BYTES;
+        const asrDisplayName = asrProvider === "siliconflow" ? "硅基流动" : "Groq";
+        const subtitleSource = asrProvider === "siliconflow" ? "siliconflow" : "groq";
         const startedAt = Date.now();
-        if (!groqApiKey) throw new Error("请先在设置中填写 Groq API Key");
+        if (!asrApiKey) throw new Error(asrProvider === "siliconflow" ? "请先在设置中填写硅基流动 API Key" : "请先在设置中填写 Groq API Key");
         const asrRunId = String(payload?.asrRunId || `asr_${bvid}_${startedAt.toString(36)}`).trim();
         const payloadAudioSummary = await summarizeMediaLocator(payload?.audioUrl || "");
         try {
             logASR.info("asr_start", {
                 bvid,
                 task: "asr",
-                provider: "groq",
-                model: groqModel,
+                provider: asrProvider,
+                model: asrModel,
                 detail: {
                     run_id: asrRunId,
                     tab_id: tabId,
@@ -1021,20 +1085,20 @@ class ContentProvider {
                 }
             });
             await updateTabState(tabId, {
-                subtitleSource: "groq",
+                subtitleSource,
                 transcriptionProgress: 5,
                 updatedAt: Date.now()
             });
             await notifyTranscribeStatus(tabId, { stage: "start", level: "info", text: "检测到无字幕，正在转录音轨...", progress: 5, bvid });
-            const media = await this.extractAudioSourceFromTab(tabId, payload);
+            const media = await this.extractAudioSourceFromTab(tabId, { ...payload, asrProvider });
             if (!media?.url) throw new Error("未提取到音轨地址，可能是付费视频、CDN 限制或页面未完成加载");
             const mediaSummary = await summarizeMediaLocator(media.url);
             const mediaPageBvid = normalizeBvid(media?.pageBvid || "");
             logASR.info("asr_audio_source_selected", {
                 bvid,
                 task: "asr",
-                provider: "groq",
-                model: groqModel,
+                provider: asrProvider,
+                model: asrModel,
                 detail: {
                     run_id: asrRunId,
                     tab_id: tabId,
@@ -1049,8 +1113,8 @@ class ContentProvider {
                 logASR.warn("asr_audio_source_bvid_mismatch", {
                     bvid,
                     task: "asr",
-                    provider: "groq",
-                    model: groqModel,
+                    provider: asrProvider,
+                    model: asrModel,
                     code: "ASR_AUDIO_SOURCE_BVID_MISMATCH",
                     detail: {
                         run_id: asrRunId,
@@ -1063,20 +1127,20 @@ class ContentProvider {
             await updateTabState(tabId, { transcriptionProgress: 20, updatedAt: Date.now() });
             await notifyTranscribeStatus(tabId, { stage: "download", level: "info", text: "正在下载音轨...", progress: 20, bvid });
             const audioFetchStartedAt = Date.now();
-            const audioBlob = await this.fetchResourceToBlob(media.url, tabId, bvid);
+            const audioBlob = await this.fetchResourceToBlob(media.url, tabId, bvid, false, asrMaxAudioBytes);
             const audioFetchMs = Date.now() - audioFetchStartedAt;
             const audioDigest = await summarizeAudioBlob(audioBlob);
             assertAsrAudioNotReused(bvid, audioDigest, {
                 runId: asrRunId,
-                provider: "groq",
-                model: groqModel,
+                provider: asrProvider,
+                model: asrModel,
                 audioHost: getUrlMeta(media.url).host
             });
             logASR.info("asr_audio_fetch_success", {
                 bvid,
                 task: "asr",
-                provider: "groq",
-                model: groqModel,
+                provider: asrProvider,
+                model: asrModel,
                 duration_ms: audioFetchMs,
                 detail: {
                     run_id: asrRunId,
@@ -1085,22 +1149,24 @@ class ContentProvider {
                     audio_host: getUrlMeta(media.url).host
                 }
             });
-            if (audioBlob.size >= GROQ_MAX_AUDIO_BYTES) {
-                throw createAppError("ASR_FILE_TOO_LARGE", "该视频音轨文件大小超出限制（>=24MB），目前暂不支持");
+            if (audioBlob.size >= asrMaxAudioBytes) {
+                const limitMb = Math.floor(asrMaxAudioBytes / 1024 / 1024);
+                throw createAppError("ASR_FILE_TOO_LARGE", `该视频音轨文件大小超出限制（>=${limitMb}MB），目前暂不支持`);
             }
             const audioFile = new File([audioBlob], "audio.m4a", { type: audioBlob.type || "audio/mp4" });
             await updateTabState(tabId, { transcriptionProgress: 55, updatedAt: Date.now() });
             
             let fakeProgress = 55;
-            await notifyTranscribeStatus(tabId, { stage: "upload", level: "info", text: "正在上传音轨到 Groq...", progress: fakeProgress, bvid });
+            await notifyTranscribeStatus(tabId, { stage: "upload", level: "info", text: `正在上传音轨到 ${asrDisplayName}...`, progress: fakeProgress, bvid });
             
             const progressTimer = setInterval(() => {
                 const inc = 2 + Math.floor(Math.random() * 2); // 2-3%
                 fakeProgress = Math.min(88, fakeProgress + inc);
+                updateTabState(tabId, { transcriptionProgress: fakeProgress, updatedAt: Date.now() }).catch(() => {});
                 notifyTranscribeStatus(tabId, { 
                     stage: "upload", 
                     level: "info", 
-                    text: "正在上传音轨到 Groq...", 
+                    text: `正在上传音轨到 ${asrDisplayName}...`, 
                     progress: fakeProgress,
                     bvid
                 }).catch(() => {});
@@ -1109,19 +1175,14 @@ class ContentProvider {
             let transcription;
             const asrRequestStartedAt = Date.now();
             try {
-                transcription = await this.requestGroqTranscription(
-                    audioFile,
-                    groqApiKey,
-                    groqModel,
-                    tabId,
-                    bvid,
-                    title || media.title || ""
-                );
+                transcription = asrProvider === "siliconflow"
+                    ? await this.requestSiliconFlowTranscription(audioFile, asrApiKey, asrModel, tabId, bvid)
+                    : await this.requestGroqTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, title || media.title || "");
                 logASR.info("asr_request_success", {
                     bvid,
                     task: "asr",
-                    provider: "groq",
-                    model: groqModel,
+                    provider: asrProvider,
+                    model: asrModel,
                     duration_ms: Date.now() - asrRequestStartedAt,
                     detail: {
                         run_id: asrRunId,
@@ -1134,9 +1195,9 @@ class ContentProvider {
                 clearInterval(progressTimer);
             }
 
-            await notifyTranscribeStatus(tabId, { stage: "parse", level: "info", text: "Groq 正在解析中文字幕...", progress: 90, bvid });
+            await notifyTranscribeStatus(tabId, { stage: "parse", level: "info", text: `${asrDisplayName} 正在解析中文字幕...`, progress: 90, bvid });
             await updateTabState(tabId, { transcriptionProgress: 90, updatedAt: Date.now() });
-            const rows = this.mapTranscriptionToRows(transcription.data);
+            const rows = this.mapTranscriptionToRows(transcription.data, { noTimestamp: asrProvider === "siliconflow" });
             if (!rows.length) throw new Error("转录返回为空，未生成可用字幕");
             await handleSubtitleCaptured(tabId, {
                 bvid,
@@ -1144,9 +1205,9 @@ class ContentProvider {
                 tid,
                 title: title || media.title || "",
                 subtitle: rows,
-                source: "groq"
+                source: subtitleSource
             });
-            await updateTabState(tabId, { subtitleSource: "groq", transcriptionProgress: 100, updatedAt: Date.now() });
+            await updateTabState(tabId, { subtitleSource, transcriptionProgress: 100, updatedAt: Date.now() });
             await notifyTranscribeStatus(tabId, {
                 stage: "done",
                 level: "success",
@@ -1158,8 +1219,8 @@ class ContentProvider {
             logASR.info("asr_success", {
                 bvid,
                 task: "asr",
-                provider: "groq",
-                model: groqModel,
+                provider: asrProvider,
+                model: asrModel,
                 duration_ms: Date.now() - startedAt,
                 detail: {
                     run_id: asrRunId,
@@ -1171,8 +1232,9 @@ class ContentProvider {
             await reportFeatureUsage("transcribe", bvid, normalizedSettings, {
                 tokens: 0,
                 latencyMs: Math.max(0, Date.now() - startedAt),
-                provider: "groq",
-                model: groqModel
+                provider: asrProvider,
+                model: asrModel,
+                title: title || media.title || ""
             });
             return { rows: rows.length, quota: transcription.quota };
         } catch (error) {
@@ -1180,12 +1242,15 @@ class ContentProvider {
             await reportDailyFeatureUsage("transcribe", normalizedSettings, {
                 durationMs: Date.now() - startedAt,
                 tokens: 0
-            }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "ASR_FAILED"));
+            }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "ASR_FAILED"), {
+                bvid,
+                title: title || media.title || ""
+            });
             logASR.error("asr_failed", buildFailureLog(error, {
                 bvid,
                 task: "asr",
-                provider: "groq",
-                model: groqModel,
+                provider: asrProvider,
+                model: asrModel,
                 duration_ms: Date.now() - startedAt,
                 detail: {
                     run_id: asrRunId,
@@ -1198,6 +1263,7 @@ class ContentProvider {
     }
 
     static async extractAudioSourceFromTab(tabId, payload) {
+        const provider = String(payload?.asrProvider || "").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
         // 优先按当前 tab 的 aid/cid 主动请求 B 站 playurl，避免 SPA 页面缓存音频串线。
         try {
             const result = await getCompatPlayUrlForTab(tabId, {
@@ -1220,7 +1286,7 @@ class ContentProvider {
                 logASR.warn("asr_playurl_identity_mismatch", {
                     bvid: expectedBvid,
                     task: "asr",
-                    provider: "groq",
+                    provider,
                     code: "ASR_PLAYURL_IDENTITY_MISMATCH",
                     detail: {
                         playurl_bvid: identityBvid,
@@ -1232,7 +1298,7 @@ class ContentProvider {
             logASR.warn("asr_playurl_audio_fetch_failed", {
                 bvid: normalizeBvid(payload?.bvid || ""),
                 task: "asr",
-                provider: "groq",
+                provider,
                 code: error?.code || "ASR_PLAYURL_AUDIO_FETCH_FAILED",
                 detail: {
                     reason: error?.message || "playurl audio fetch failed"
@@ -1273,7 +1339,7 @@ class ContentProvider {
         return results?.[0]?.result || null;
     }
 
-    static async fetchResourceToBlob(url, tabId, bvid = "", skipSizeCheck = false) {
+    static async fetchResourceToBlob(url, tabId, bvid = "", skipSizeCheck = false, maxBytes = GROQ_MAX_AUDIO_BYTES) {
         const response = await fetch(url, {
             method: "GET",
             credentials: "omit",
@@ -1302,8 +1368,9 @@ class ContentProvider {
                 final_audio_path_sha256: responseLocator.audio_path_sha256
             }
         });
-        if (!skipSizeCheck && Number.isFinite(total) && total >= GROQ_MAX_AUDIO_BYTES) {
-            throw createAppError("ASR_FILE_TOO_LARGE", "该文件大小超出限制（>=24MB），目前暂不支持");
+        if (!skipSizeCheck && Number.isFinite(total) && total >= maxBytes) {
+            const limitMb = Math.floor(maxBytes / 1024 / 1024);
+            throw createAppError("ASR_FILE_TOO_LARGE", `该文件大小超出限制（>=${limitMb}MB），目前暂不支持`);
         }
         const reader = response.body?.getReader?.();
         if (!reader) {
@@ -1330,8 +1397,9 @@ class ContentProvider {
                     nextMark += 10;
                 }
             }
-            if (!skipSizeCheck && loaded >= GROQ_MAX_AUDIO_BYTES) {
-                throw createAppError("ASR_FILE_TOO_LARGE", "该文件大小超出限制（>=24MB），目前暂不支持");
+            if (!skipSizeCheck && loaded >= maxBytes) {
+                const limitMb = Math.floor(maxBytes / 1024 / 1024);
+                throw createAppError("ASR_FILE_TOO_LARGE", `该文件大小超出限制（>=${limitMb}MB），目前暂不支持`);
             }
         }
         const blob = new Blob(chunks, { type: response.headers.get("content-type") || "application/octet-stream" });
@@ -1411,7 +1479,60 @@ class ContentProvider {
         return { data, quota };
     }
 
-    static mapTranscriptionToRows(data) {
+    static async requestSiliconFlowTranscription(audioFile, apiKey, model, tabId, bvid = "") {
+        const formData = new FormData();
+        formData.append("file", audioFile);
+        formData.append("model", model || "FunAudioLLM/SenseVoiceSmall");
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort("timeout"), TASK_TIMEOUT_MS);
+        let response;
+        try {
+            response = await fetch(SILICONFLOW_AUDIO_TRANSCRIBE_URL, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${apiKey}` },
+                body: formData,
+                signal: controller.signal
+            });
+        } catch (error) {
+            if (controller.signal.aborted) {
+                throw createTaskTimeoutError();
+            }
+            throw error;
+        } finally {
+            clearTimeout(timeoutId);
+        }
+        if (!response.ok) {
+            const detail = await response.text().catch(() => "");
+            if (response.status === 429) {
+                throw createAppError("ASR_RATE_LIMIT", "硅基流动限流，请稍后重试", { status: response.status });
+            }
+            const error = createHttpError(response.status, `硅基流动转录失败（${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
+            error.code = "ASR_SILICONFLOW_FAILED";
+            throw error;
+        }
+        await notifyTranscribeStatus(tabId, {
+            stage: "upload",
+            level: "info",
+            text: "上传进度：100%",
+            progress: 70,
+            bvid
+        });
+        const data = await response.json().catch(() => null);
+        return { data, quota: null };
+    }
+
+    static mapTranscriptionToRows(data, options = {}) {
+        if (options?.noTimestamp) {
+            const plain = String(data?.text || data?.result || data?.data?.text || "").trim();
+            if (!plain) return [];
+            return splitTranscriptionTextByPunctuation(plain).map((text, index) => ({
+                start: null,
+                end: null,
+                text,
+                index,
+                noTimestamp: true
+            }));
+        }
         const segments = Array.isArray(data?.segments) ? data.segments : [];
         if (segments.length) {
             return segments
@@ -1513,18 +1634,36 @@ async function handleSubtitleCaptured(tabId, payload) {
     const rawHash = makeSubtitleHash(rawSubtitle);
     if (existing?.rawHash && existing.rawHash === rawHash) {
         logBackground.debug("subtitle_duplicate_ignore", { bvid, tab_id: tabId, raw_hash: rawHash });
+        const existingSource = String(existing?.subtitleSource || "");
+        let nextCache = existing;
+        if (subtitleSource && existingSource !== subtitleSource) {
+            await mergeCacheByBvid(bvid, {
+                subtitleSource,
+                updatedAt: Date.now()
+            });
+            nextCache = await getCache(bvid);
+        }
         await updateTabState(tabId, {
             activeBvid: bvid,
             activeCid: Number.isFinite(cid) ? cid : 0,
             activeTid: tid,
             subtitleSource,
-            transcriptionProgress: subtitleSource === "groq" ? 100 : 0,
+            transcriptionProgress: isAsrSubtitleSource(subtitleSource) ? 100 : 0,
             updatedAt: Date.now()
         });
-        await pushSubtitleSyncToTab(tabId, bvid, existing, "duplicate");
+        if (isAsrSubtitleSource(subtitleSource)) {
+            const settings = await getResolvedSettings();
+            await persistCloudSubtitlePatch(bvid, settings, nextCache, {
+                title: payload.title || "",
+                subtitleSource
+            });
+        }
+        await pushSubtitleSyncToTab(tabId, bvid, nextCache, "duplicate");
         return;
     }
-    const processedSubtitle = SubtitleProcessor.process(rawSubtitle);
+    const processedSubtitle = isNoTimestampSubtitleSource(subtitleSource)
+        ? rawSubtitle
+        : SubtitleProcessor.process(rawSubtitle);
     const processedHash = makeSubtitleHash(processedSubtitle);
     if (rawSubtitle.length > 0 && processedSubtitle.length === 0) {
         const first = rawSubtitle[0] || {};
@@ -1555,7 +1694,7 @@ async function handleSubtitleCaptured(tabId, payload) {
         activeCid: Number.isFinite(cid) ? cid : 0,
         activeTid: tid,
         subtitleSource,
-        transcriptionProgress: subtitleSource === "groq" ? 100 : 0,
+        transcriptionProgress: isAsrSubtitleSource(subtitleSource) ? 100 : 0,
         lastError: "",
         taskStatus: {
             summary: "idle",
@@ -1566,7 +1705,7 @@ async function handleSubtitleCaptured(tabId, payload) {
         updatedAt: Date.now()
     });
     const latestCache = await getCache(bvid);
-    if (subtitleSource === "groq") {
+    if (isAsrSubtitleSource(subtitleSource)) {
         const settings = await getResolvedSettings();
         await persistCloudSubtitlePatch(bvid, settings, latestCache, {
             title: payload.title || "",
@@ -1620,7 +1759,7 @@ function normalizeRawSubtitle(list) {
             const start = Number(item.from ?? item.start ?? 0);
             const endRaw = Number(item.to ?? item.end ?? NaN);
             const end = Number.isFinite(endRaw) ? endRaw : null;
-            const text = String(item.content ?? item.text ?? "").trim();
+        const text = stripEmojiFromText(item.content ?? item.text ?? "");
             return { start, end, text };
         })
         .filter((item) => item.text);
@@ -1703,7 +1842,10 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
         await reportDailyFeatureUsage(task, settings, {
             durationMs: Date.now() - startedAt,
             tokens: 0
-        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error));
+        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error), {
+            bvid,
+            title: cache?.title || ""
+        });
         if (status === "timeout") {
             logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task, code: "TIMEOUT" }));
         } else {
@@ -1754,7 +1896,10 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
         await reportDailyFeatureUsage("summary_segments_merged", settings, {
             durationMs: Date.now() - startedAt,
             tokens: 0
-        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "SUMMARY_SEGMENTS_FAILED"));
+        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "SUMMARY_SEGMENTS_FAILED"), {
+            bvid,
+            title: cache?.title || ""
+        });
         throw error;
     }
     return results;
@@ -1800,7 +1945,10 @@ async function runChatForTab(tabId, text, messageId) {
         await reportDailyFeatureUsage("chat", resolvedSettings, {
             durationMs: Date.now() - startedAt,
             tokens: 0
-        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "CHAT_FAILED"));
+        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "CHAT_FAILED"), {
+            bvid,
+            title: cache?.title || ""
+        });
         if (status === "timeout") {
             logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat", code: "TIMEOUT" }));
         } else {
@@ -1862,7 +2010,10 @@ async function runChatForPort(port, msg) {
             await reportDailyFeatureUsage("chat", resolvedSettings, {
                 durationMs: Date.now() - startedAt,
                 tokens: 0
-            }, "cancelled", "ABORTED");
+            }, "cancelled", "ABORTED", {
+                bvid,
+                title: cache?.title || ""
+            });
             await setTaskStatus(tabId, ["chat"], "done");
             safePortPost(port, { type: "aborted", messageId });
             return;
@@ -1871,7 +2022,10 @@ async function runChatForPort(port, msg) {
         await reportDailyFeatureUsage("chat", resolvedSettings, {
             durationMs: Date.now() - startedAt,
             tokens: 0
-        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "CHAT_STREAM_FAILED"));
+        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "CHAT_STREAM_FAILED"), {
+            bvid,
+            title: cache?.title || ""
+        });
         if (status === "timeout") {
             logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat_stream", code: "TIMEOUT" }));
         } else {
@@ -2203,10 +2357,16 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
     if (tasks.length) {
         await Promise.allSettled(tasks);
         if (results.summary?.error) {
-            await reportDailyFeatureUsage("summary", settings, { tokens: 0 }, resolveUsageStatusByError(results.summary.error), resolveUsageErrorCode(results.summary.error, "SUMMARY_FAILED"));
+            await reportDailyFeatureUsage("summary", settings, { tokens: 0 }, resolveUsageStatusByError(results.summary.error), resolveUsageErrorCode(results.summary.error, "SUMMARY_FAILED"), {
+                bvid,
+                title: cache?.title || ""
+            });
         }
         if (results.segments?.error) {
-            await reportDailyFeatureUsage("segments", settings, { tokens: 0 }, resolveUsageStatusByError(results.segments.error), resolveUsageErrorCode(results.segments.error, "SEGMENTS_FAILED"));
+            await reportDailyFeatureUsage("segments", settings, { tokens: 0 }, resolveUsageStatusByError(results.segments.error), resolveUsageErrorCode(results.segments.error, "SEGMENTS_FAILED"), {
+                bvid,
+                title: cache?.title || ""
+            });
         }
     } else {
         await applySummarySegmentsResults(tabId, bvid, results);
@@ -2385,7 +2545,10 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
         await reportDailyFeatureUsage("summary_segments_merged", settings, {
             durationMs: Date.now() - requestStartedAt,
             tokens: 0
-        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "SUMMARY_SEGMENTS_FAILED"));
+        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "SUMMARY_SEGMENTS_FAILED"), {
+            bvid,
+            title: cache?.title || ""
+        });
         logAI.error("ai_request_failed", buildFailureLog(error, {
             task: "summary_segments_merged",
             bvid,
@@ -3148,12 +3311,16 @@ async function persistCloudSubtitlePatch(bvid, settings, cache, extra = {}) {
     if (!normalizedBvid) return false;
     const rawSubtitle = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
     const processedSubtitle = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
-    if (!hasEnoughSubtitleRows(rawSubtitle) || !hasEnoughSubtitleRows(processedSubtitle)) {
+    const subtitleSource = String(extra.subtitleSource || cache?.subtitleSource || "");
+    const minRows = isAsrSubtitleSource(subtitleSource) ? 1 : 10;
+    if (!hasEnoughSubtitleRows(rawSubtitle, minRows) || !hasEnoughSubtitleRows(processedSubtitle, minRows)) {
         logCache.info("cloud_subtitle_skip", {
             bvid: normalizedBvid,
             raw_count: rawSubtitle.length,
             processed_count: processedSubtitle.length,
-            reason: "subtitle_too_short"
+            reason: "subtitle_too_short",
+            subtitle_source: subtitleSource,
+            min_rows: minRows
         });
         return false;
     }
@@ -3163,7 +3330,7 @@ async function persistCloudSubtitlePatch(bvid, settings, cache, extra = {}) {
             title: String(extra.title || cache?.title || ""),
             rawSubtitle,
             processedSubtitle,
-            subtitleSource: String(settings?.groqModel || extra.subtitleSource || ""),
+            subtitleSource,
             subtitleUploadCount: Math.max(0, Number(current?.subtitle_upload_count || 0)) + 1,
             subtitleUploadedAt: new Date().toISOString()
         });
@@ -3258,13 +3425,39 @@ async function getOrCreateAnonymousUserId() {
     return created;
 }
 
+function normalizeUsageTitle(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
+async function getUsageVideoContext(bvid, metrics = {}) {
+    const normalizedBvid = normalizeBvid(bvid || metrics?.bvid || "");
+    let title = normalizeUsageTitle(metrics?.title || "");
+    if (normalizedBvid && !title) {
+        try {
+            const cache = await getCache(normalizedBvid);
+            title = normalizeUsageTitle(cache?.title || "");
+        } catch (_) {}
+    }
+    return {
+        bvid: normalizedBvid,
+        title
+    };
+}
+
+function shouldRetryUsageDailyLegacy(error) {
+    const text = `${error?.message || ""}\n${error?.responseText || ""}`;
+    if (!text) return false;
+    return /Could not find the function|schema cache|PGRST202|parameter|v_bvid|v_title/i.test(text);
+}
+
 async function reportFeatureUsage(featureName, bvid, settings, metrics) {
     if (!isSupabaseEnabled(settings)) return false;
     const tokenCount = Math.max(0, Number(metrics?.tokens || 0));
     const normalizedFeature = String(featureName || "").trim();
     if (!normalizedFeature) return false;
     try {
-        await reportDailyFeatureUsage(normalizedFeature, settings, metrics, "success", "");
+        const usageContext = await getUsageVideoContext(bvid, metrics);
+        await reportDailyFeatureUsage(normalizedFeature, settings, metrics, "success", "", usageContext);
         logAI.info("usage_reported", {
             feature: normalizedFeature,
             bvid: normalizeBvid(bvid),
@@ -3281,32 +3474,59 @@ async function reportFeatureUsage(featureName, bvid, settings, metrics) {
     }
 }
 
-async function reportDailyFeatureUsage(featureName, settings, metrics = {}, status = "success", errorCode = "") {
+async function reportDailyFeatureUsage(featureName, settings, metrics = {}, status = "success", errorCode = "", usageContext = {}) {
     if (!isSupabaseEnabled(settings)) return false;
     const normalizedFeature = String(featureName || "").trim();
     if (!normalizedFeature) return false;
     try {
         const manifest = chrome.runtime.getManifest();
         const userId = await getOrCreateAnonymousUserId();
-        await supabaseRpc(settings, settings.supabaseUsageDailyRpcName || SUPABASE_DEFAULT_USAGE_DAILY_RPC, {
+        const normalizedContext = await getUsageVideoContext(usageContext?.bvid || metrics?.bvid || "", {
+            title: usageContext?.title || metrics?.title || ""
+        });
+        const rpcName = settings.supabaseUsageDailyRpcName || SUPABASE_DEFAULT_USAGE_DAILY_RPC;
+        const legacyPayload = {
             f_name: normalizedFeature,
             f_status: String(status || "success"),
             e_code: String(errorCode || ""),
-            p_provider: String(settings.provider || ""),
-            p_model: String(getTaskModelName(settings) || settings.model || ""),
+            p_provider: String(metrics?.provider || settings.provider || ""),
+            p_model: String(metrics?.model || getTaskModelName(settings) || settings.model || ""),
             ext_version: String(manifest.version || ""),
             t_count: Math.max(0, Number(metrics?.tokens || 0)),
             d_ms: Math.max(0, Number(metrics?.latencyMs || metrics?.durationMs || 0)),
             u_id: userId
-        }, {
-            requestName: "usage_daily_report",
-            errorMessage: "Supabase daily usage RPC 失败"
-        });
+        };
+        const nextPayload = {
+            ...legacyPayload,
+            v_bvid: normalizedContext.bvid,
+            v_title: normalizedContext.title
+        };
+        try {
+            await supabaseRpc(settings, rpcName, nextPayload, {
+                requestName: "usage_daily_report",
+                errorMessage: "Supabase daily usage RPC 失败"
+            });
+        } catch (error) {
+            if (!shouldRetryUsageDailyLegacy(error)) throw error;
+            await supabaseRpc(settings, rpcName, legacyPayload, {
+                requestName: "usage_daily_report_legacy",
+                errorMessage: "Supabase daily usage legacy RPC 失败"
+            });
+            logBackground.warn("usage_daily_legacy_payload", {
+                task: "usage",
+                detail: {
+                    feature: normalizedFeature,
+                    reason: "rpc_schema_not_upgraded"
+                }
+            });
+        }
         logAI.info("usage_daily_reported", {
             task: "usage",
+            bvid: normalizedContext.bvid,
             detail: {
                 feature: normalizedFeature,
                 status: String(status || "success"),
+                title: normalizedContext.title,
                 tokens: Math.max(0, Number(metrics?.tokens || 0))
             }
         });

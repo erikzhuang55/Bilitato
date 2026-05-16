@@ -198,9 +198,20 @@ function getTranscriptionState() {
 }
 
 function patchTranscriptionState(patch = {}) {
+    const current = getTranscriptionState();
+    const nextPatch = { ...(patch || {}) };
+    if (Object.prototype.hasOwnProperty.call(nextPatch, "progress")) {
+        const currentProgress = Number(current.progress || 0);
+        const incomingProgress = Math.max(0, Math.min(100, Number(nextPatch.progress) || 0));
+        const sameTask = !nextPatch.bvid || !current.bvid || normalizeBvidCase(nextPatch.bvid) === normalizeBvidCase(current.bvid);
+        const stillRunning = current.phase === "running" || nextPatch.phase === "running";
+        nextPatch.progress = sameTask && stillRunning && incomingProgress < currentProgress
+            ? currentProgress
+            : incomingProgress;
+    }
     appState.transcription = {
-        ...getTranscriptionState(),
-        ...(patch || {})
+        ...current,
+        ...nextPatch
     };
     return appState.transcription;
 }
@@ -310,11 +321,11 @@ async function bootstrap() {
     await waitPanelMount();
     await loadBootstrapData();
     globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
-    appState.injectBvid = normalizeBvidCase(appState.tabState?.activeBvid || getBvidFromUrl(location.href) || "");
+    appState.injectBvid = normalizeBvidCase(getBvidFromUrl(location.href) || appState.tabState?.activeBvid || "");
     appState.injectBvidChangedAt = Date.now();
     beginSubtitleObservation(appState.injectBvid);
     startSubtitleCheckTimer();
-    await syncCacheFromBackground(appState.tabState?.activeBvid || getBvidFromUrl(location.href));
+    await syncCacheFromBackground(getBvidFromUrl(location.href) || appState.tabState?.activeBvid);
     triggerDefaultSubtitleCapture();
     setInterval(triggerDefaultSubtitleCapture, 3500);
     renderApp();
@@ -943,7 +954,14 @@ async function loadBootstrapData() {
     }
     appState.tabId = res?.tabId || null;
     appState.tabState = res?.tabState || null;
-    const bootstrapBvid = normalizeBvidCase(appState.tabState?.activeBvid || getBvidFromUrl(location.href) || "");
+    const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+    const bootstrapBvid = normalizeBvidCase(routeBvid || appState.tabState?.activeBvid || "");
+    if (routeBvid) {
+        appState.tabState = {
+            ...(appState.tabState || {}),
+            activeBvid: routeBvid
+        };
+    }
     const bootstrapCache = res?.cache || null;
     appState.cache = bootstrapCache && normalizeBvidCase(bootstrapCache?.bvid || "") === bootstrapBvid ? bootstrapCache : null;
     appState.settings = res?.settings || null;
@@ -1777,12 +1795,15 @@ function renderCC(panel, rowsOverride) {
     }
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
     const transcription = getTranscriptionState();
-    const progress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? transcription.progress ?? 0)));
-    const isGroqSubtitle = subtitleSource === "groq" || subtitleSource === "whisper";
+    const stateProgress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? 0)));
+    const localProgress = Math.max(0, Math.min(100, Number(transcription.progress ?? 0)));
+    const progress = isTranscriptionRunning() ? Math.max(stateProgress, localProgress) : Math.max(stateProgress, localProgress);
+    const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
+    const isNoTimestampSubtitle = subtitleSource === "siliconflow" || subtitleSource === "funasr";
     const running = isTranscriptionRunning();
-    const shouldShowRegenerate = isGroqSubtitle && !running;
+    const shouldShowRegenerate = rows.length > 0 && isAsrSubtitle && !running;
 
-    const sourceText = rows.length ? (isGroqSubtitle ? "ASR转录生成" : "官方AI字幕") : "未检测到字幕";
+    const sourceText = rows.length ? (isAsrSubtitle ? "ASR转录生成" : "官方AI字幕") : "未检测到字幕";
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
     const regenBtnHtml = shouldShowRegenerate ? `<button class="panel-icon-btn" data-action="cc-regenerate-transcribe" title="重新生成"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>` : "";
     const searchBoxHtml = `<div class="cc-search-container"><input type="text" id="cc-search-input" class="cc-search-input" placeholder="搜索字幕..." /><button type="button" class="cc-search-clear" aria-label="清空">×</button></div>`;
@@ -1795,7 +1816,11 @@ function renderCC(panel, rowsOverride) {
             const start = Number(row?.start ?? row?.from ?? 0);
             const end = row?.end ?? row?.to ?? "";
             const text = String(row?.text ?? row?.content ?? "解析失败");
-            return `<div class="cc-row" data-index="${index}" data-start="${start}" data-end="${end}"><button class="cc-time cc-time-btn" data-action="cc-jump" data-sec="${start}">${formatTime(start)}</button><span class="cc-text">${escapeHtml(text)}</span><button class="cc-copy-btn" data-action="cc-copy">复制</button></div>`;
+            const hasTimestamp = !isNoTimestampSubtitle && Number.isFinite(start) && start >= 0;
+            const timeHtml = hasTimestamp
+                ? `<button class="cc-time cc-time-btn" data-action="cc-jump" data-sec="${start}">${formatTime(start)}</button>`
+                : `<span class="cc-time" aria-hidden="true" style="cursor:default;color:transparent;">--</span>`;
+            return `<div class="cc-row" data-index="${index}" data-start="${hasTimestamp ? start : ""}" data-end="${hasTimestamp ? end : ""}">${timeHtml}<span class="cc-text">${escapeHtml(text)}</span><button class="cc-copy-btn" data-action="cc-copy">复制</button></div>`;
         }).join("");
 
         panel.innerHTML = `
@@ -4492,7 +4517,7 @@ async function handleRegenerateGroqSubtitle() {
         return;
     }
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
-    if (subtitleSource !== "groq") return;
+    if (!(subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr")) return;
     appState.subtitleTimeline = [];
     appState.cache = {
         ...(appState.cache || {}),
@@ -5161,7 +5186,7 @@ async function syncActiveCacheByBvid(expectedBvid) {
             appState.tabState = {
                 ...(appState.tabState || {}),
                 subtitleSource: cachedSubtitleSource,
-                transcriptionProgress: cachedSubtitleSource === "groq" ? 100 : Number(appState.tabState?.transcriptionProgress || 0)
+                transcriptionProgress: (cachedSubtitleSource === "groq" || cachedSubtitleSource === "whisper" || cachedSubtitleSource === "siliconflow" || cachedSubtitleSource === "funasr") ? 100 : Number(appState.tabState?.transcriptionProgress || 0)
             };
         }
         if (Array.isArray(appState.cache?.rawSubtitle) && appState.cache.rawSubtitle.length) {
@@ -5187,7 +5212,9 @@ function reconcileTranscriptionState(targetBvid) {
     const requestBvid = getTranscriptionBvid();
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
     const localState = getTranscriptionState();
-    const progress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? localState.progress ?? 0)));
+    const stateProgress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? 0)));
+    const localProgress = Math.max(0, Math.min(100, Number(localState.progress ?? 0)));
+    const progress = localState.phase === "running" ? Math.max(stateProgress, localProgress) : Math.max(stateProgress, localProgress);
     const hasSubtitle = hasSubtitleCacheForBvid(target);
     const sameTask = !!(target && requestBvid && target === requestBvid);
 
@@ -5198,7 +5225,8 @@ function reconcileTranscriptionState(targetBvid) {
         return;
     }
 
-    const shouldKeepRunning = localState.phase === "running" || (sameTask && subtitleSource === "groq" && progress > 0 && progress < 100);
+    const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
+    const shouldKeepRunning = localState.phase === "running" || (sameTask && isAsrSubtitle && progress > 0 && progress < 100);
     patchTranscriptionState({
         phase: shouldKeepRunning ? "running" : localState.phase,
         bvid: shouldKeepRunning && target ? target : localState.bvid,
@@ -5243,7 +5271,7 @@ async function syncCacheFromBackground(bvid, options = {}) {
             appState.tabState = {
                 ...(appState.tabState || {}),
                 subtitleSource: cachedSubtitleSource,
-                transcriptionProgress: cachedSubtitleSource === "groq" ? 100 : Number(appState.tabState?.transcriptionProgress || 0)
+                transcriptionProgress: (cachedSubtitleSource === "groq" || cachedSubtitleSource === "whisper" || cachedSubtitleSource === "siliconflow" || cachedSubtitleSource === "funasr") ? 100 : Number(appState.tabState?.transcriptionProgress || 0)
             };
         }
         appState.subtitleCapturedBvid = target;
@@ -5315,8 +5343,9 @@ function onBackgroundMessage(message) {
         }
 
         if (Number.isFinite(Number(message?.progress))) {
-            const progress = Math.max(0, Math.min(100, Number(message.progress)));
-            patchTranscriptionState({ progress });
+            const incomingProgress = Math.max(0, Math.min(100, Number(message.progress)));
+            const nextState = patchTranscriptionState({ progress: incomingProgress });
+            const progress = Math.max(incomingProgress, Number(nextState.progress || 0));
             updateProgress(Math.max(10, progress), progressTaskId);
         } else if (isTranscriptionRunning()) {
             updateProgress(20, progressTaskId);

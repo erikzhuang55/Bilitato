@@ -3402,7 +3402,7 @@ async function persistCloudFeaturePatch(bvid, settings, patch) {
         return false;
     }
     try {
-        const current = await fetchVideoCacheMetaRow(row.bvid, settings, []);
+        const current = await fetchVideoCacheMetaRow(row.bvid, settings, ["updated_at"]);
         await saveVideoCacheRow(row.bvid, settings, row, current);
         logCache.info("cloud_cache_write", { bvid: row.bvid, fields: meaningfulKeys });
         return true;

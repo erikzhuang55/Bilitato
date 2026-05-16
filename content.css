@@ -2746,3 +2746,210 @@ input[type="range"]:active::-webkit-slider-thumb {
     overflow: visible;
     max-height: none;
 }
+
+/* ── 版本更新弹窗 ─────────────────────────────── */
+.release-notice-overlay {
+    position: absolute;
+    inset: 0;
+    z-index: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+    background: rgba(0, 0, 0, 0.42);
+    border-radius: 12px;
+    pointer-events: auto;
+    animation: release-overlay-fade 0.18s ease;
+}
+
+.release-notice-card {
+    width: 100%;
+    max-width: 360px;
+    background: rgba(255, 255, 255, 0.98);
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 12px;
+    box-shadow: 0 10px 26px rgba(47, 53, 66, 0.18);
+    padding: 14px;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    animation: release-card-pop 0.2s ease forwards;
+}
+
+.release-notice-close {
+    position: absolute;
+    top: 8px;
+    right: 10px;
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: #9499a0;
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.release-notice-close:hover {
+    background: #eef2f6;
+    color: #61666d;
+}
+
+.release-notice-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-right: 28px;
+}
+
+.release-notice-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: rgba(251, 114, 153, 0.12);
+    color: #fb7299;
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.release-notice-version {
+    color: #9499a0;
+    font-size: 11px;
+}
+
+.release-notice-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #18191c;
+    line-height: 1.4;
+}
+
+.release-notice-subtitle {
+    font-size: 12px;
+    color: #61666d;
+    line-height: 1.6;
+}
+
+.release-notice-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.release-notice-item {
+    display: flex;
+    gap: 8px;
+    padding: 9px;
+    border: 1px solid #edf1f5;
+    border-radius: 10px;
+    background: #fafbfc;
+}
+
+.release-notice-item-tag {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: #fb7299;
+    color: #fff;
+    font-size: 10px;
+    line-height: 1;
+}
+
+.release-notice-item-main {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.release-notice-item-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: #2f3542;
+    line-height: 1.35;
+}
+
+.release-notice-item-desc {
+    font-size: 11px;
+    color: #6b7382;
+    line-height: 1.55;
+}
+
+.release-notice-privacy {
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(255, 102, 153, 0.08);
+    color: #7d1c46;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.release-notice-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 2px;
+}
+
+.release-notice-secondary {
+    border: 1px solid #e3e8ec;
+    border-radius: 7px;
+    background: #eef2f6;
+    color: #4c5566;
+    font-size: 11px;
+    height: 28px;
+    padding: 0 10px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.release-notice-secondary:hover {
+    background: #dde3eb;
+}
+
+.release-notice-primary {
+    border: 0;
+    border-radius: 7px;
+    background: #fb7299;
+    color: #fff;
+    font-size: 11px;
+    height: 28px;
+    padding: 0 12px;
+    cursor: pointer;
+    transition: background 0.2s, transform 0.15s;
+}
+
+.release-notice-primary:hover {
+    background: #e7688f;
+    transform: translateY(-1px);
+}
+
+@keyframes release-overlay-fade {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes release-card-pop {
+    from {
+        opacity: 0;
+        transform: translateY(8px) scale(0.98);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+    }
+}

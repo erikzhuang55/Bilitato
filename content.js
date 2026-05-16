@@ -976,6 +976,9 @@ function renderApp() {
     renderContent();
     renderTopRemaining();
     maybeAutoShowSetupGuideOnFirstRun();
+    globalThis.BilitatoReleaseNotice?.maybeShowReleaseNotice({
+        root: panelShadowRoot,
+    });
 }
 
 // Backdoor mechanism

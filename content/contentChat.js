@@ -40,7 +40,7 @@
         const output = Number.isFinite(Number(metrics.outputTokens)) ? Number(metrics.outputTokens) : 0;
         const remaining = metrics.modelScopeRemaining === null || metrics.modelScopeRemaining === undefined || metrics.modelScopeRemaining === "" ? "-" : String(metrics.modelScopeRemaining);
         const tokenStr = input || output ? `${total} (In ${input} / Out ${output})` : `${total}`;
-        return `用时 ${latency} · Tokens ${tokenStr} · 剩余次数 ${remaining}`;
+        return `用时 ${latency} · Tokens ${tokenStr} · 该模型当天剩余次数 ${remaining}`;
     }
 
     globalThis.BilitatoContentChat = {

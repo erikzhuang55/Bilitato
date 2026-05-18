@@ -13,7 +13,7 @@ describe("contentChat", () => {
       inputTokens: 10,
       outputTokens: 20,
       modelScopeRemaining: 5
-    })).toBe("用时 1.2s · Tokens 30 (In 10 / Out 20) · 剩余次数 5");
+    })).toBe("用时 1.2s · Tokens 30 (In 10 / Out 20) · 该模型当天剩余次数 5");
   });
 
   it("renders user chat items with escaped content", () => {

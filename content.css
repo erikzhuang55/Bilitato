@@ -2696,6 +2696,7 @@ input[type="range"]:active::-webkit-slider-thumb {
     font-size: 12px;
     color: #61666d;
     line-height: 1.6;
+    max-width: 100%;
 }
 /* 文档链接 */
 .guide-doc-link {
@@ -2759,6 +2760,16 @@ input[type="range"]:active::-webkit-slider-thumb {
     transition: background 0.2s;
 }
 .guide-btn-primary:hover { background: #e7688f; }
+
+.guide-preview-row {
+    display: flex;
+    justify-content: center;
+}
+
+.guide-preview-btn {
+    height: 30px;
+    padding: 0 14px;
+}
 
 /* 总结页专属布局 */
 #page-summary .page-body {

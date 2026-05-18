@@ -78,6 +78,11 @@ const {
     renderErrorPanel
 } = globalThis.BilitatoContentErrorMessages || {};
 
+const SETUP_PREVIEW_VIDEO_URL = "https://www.bilibili.com/video/BV1ojfDBSEPv/?spm_id_from=333.337.search-card.all.click&vd_source=3f5a30216e0108cea18aa63a3bff11b8";
+const SETUP_PREVIEW_BVID = normalizeBvidCase(getBvidFromUrl?.(SETUP_PREVIEW_VIDEO_URL) || "BV1ojfDBSEPv");
+const SETUP_PREVIEW_STORAGE_KEY = "setupGuidePreviewTarget";
+const SETUP_PREVIEW_MAX_AGE_MS = 10 * 60 * 1000;
+
 function isDebugLoggingEnabled() {
     return !!(IS_DEBUG_MODE || appState?.settings?.debugMode);
 }
@@ -1018,8 +1023,22 @@ async function loadBootstrapData() {
     appState.cache = bootstrapCache && normalizeBvidCase(bootstrapCache?.bvid || "") === bootstrapBvid ? bootstrapCache : null;
     appState.settings = res?.settings || null;
     appState.providers = res?.providers || null;
-    // 首次加载固定展示 CC，让用户先看到字幕检测状态
-    appState.activePage = "CC";
+    let previewTarget = null;
+    try {
+        const previewRes = await chrome.storage.local.get([SETUP_PREVIEW_STORAGE_KEY]);
+        previewTarget = previewRes?.[SETUP_PREVIEW_STORAGE_KEY] || null;
+    } catch (_) {}
+    const previewBvid = normalizeBvidCase(previewTarget?.bvid || "");
+    const previewFresh = Date.now() - Number(previewTarget?.createdAt || 0) < SETUP_PREVIEW_MAX_AGE_MS;
+    if (previewFresh && previewBvid && previewBvid === bootstrapBvid) {
+        appState.activePage = "summary";
+        try {
+            await chrome.storage.local.remove([SETUP_PREVIEW_STORAGE_KEY]);
+        } catch (_) {}
+    } else {
+        // 首次加载固定展示 CC，让用户先看到字幕检测状态
+        appState.activePage = "CC";
+    }
 }
 
 function renderApp() {
@@ -1572,10 +1591,20 @@ function renderSummary(panel) {
         `;
         return;
     }
+    const summary = appState.cache?.summary || "";
+    const segments = Array.isArray(appState.cache?.segments) ? appState.cache.segments : [];
+    const summaryStatus = getCurrentVideoTaskStatus("summary");
+    const segmentsStatus = getCurrentVideoTaskStatus("segments");
+    const isLoading = summaryStatus === "processing" || segmentsStatus === "processing";
+    const hasContent = !!String(summary || "").trim() || segments.length > 0;
     const apiKey = String(appState.settings?.apiKey || "").trim();
-    if (!apiKey) {
+    if (!apiKey && !hasContent) {
         panel.classList.remove("is-segments-expanded");
         panel.dataset.lastSignature = "";
+        if (isCloudReadLoading()) {
+            panel.innerHTML = renderCloudLoadingState("总结", "正在读取云端演示内容...");
+            return;
+        }
         panel.innerHTML = `
             <div class="no-apikey-notice">
                 <div class="no-apikey-icon">🔑</div>
@@ -1585,12 +1614,6 @@ function renderSummary(panel) {
         `;
         return;
     }
-    const summary = appState.cache?.summary || "";
-    const segments = Array.isArray(appState.cache?.segments) ? appState.cache.segments : [];
-    const summaryStatus = getCurrentVideoTaskStatus("summary");
-    const segmentsStatus = getCurrentVideoTaskStatus("segments");
-    const isLoading = summaryStatus === "processing" || segmentsStatus === "processing";
-    const hasContent = !!String(summary || "").trim() || segments.length > 0;
 
     const signature = JSON.stringify({
         summary,
@@ -2476,6 +2499,7 @@ function renderGuideStep(step) {
         overlay.appendChild(ring);
     };
 
+    const totalSteps = 3;
     const dots = (current, total) => Array.from({ length: total }, (_, i) => `<span class="guide-dot ${i + 1 === current ? "active" : ""}"></span>`).join("");
 
     const actions = (hasPrev) => `
@@ -2484,7 +2508,7 @@ function renderGuideStep(step) {
             <div class="guide-btn-group">
                 ${hasPrev ? `<button class="guide-btn-secondary" data-guide="prev">← 上一步</button>` : ""}
                 <button class="guide-btn-primary" data-guide="next">
-                    ${step === 2 ? "完成 ✓" : "下一步 →"}
+                    ${step === totalSteps ? "完成 ✓" : "下一步 →"}
                 </button>
             </div>
         </div>
@@ -2494,7 +2518,7 @@ function renderGuideStep(step) {
         highlight('[data-action="settings-open-reg"]');
         overlay.insertAdjacentHTML("beforeend", `
             <div class="guide-card">
-                <div class="guide-steps-dots">${dots(1, 2)}</div>
+                <div class="guide-steps-dots">${dots(1, totalSteps)}</div>
                 <div class="guide-card-title">🔗 第一步：注册并获取 API Key</div>
                 <div class="guide-card-desc">
                     点击高亮的「注册」按钮跳转到平台申请免费 Key。<br>
@@ -2520,12 +2544,29 @@ function renderGuideStep(step) {
         highlight("#settings-model");
         overlay.insertAdjacentHTML("beforeend", `
             <div class="guide-card">
-                <div class="guide-steps-dots">${dots(2, 2)}</div>
+                <div class="guide-steps-dots">${dots(2, totalSteps)}</div>
                 <div class="guide-card-title">✏️ 第二步：填写 Key 和模型名</div>
                 <div class="guide-card-desc">
                     将获取到的 API Key 填入高亮的输入框。<br>
                     模型名称可留空，将自动使用默认模型。<br>
                     填写后点「保存设置」，AI 功能即刻解锁 🎉
+                </div>
+                ${actions(true)}
+            </div>
+        `);
+    }
+
+    if (step === 3) {
+        overlay.insertAdjacentHTML("beforeend", `
+            <div class="guide-card">
+                <div class="guide-steps-dots">${dots(3, totalSteps)}</div>
+                <div class="guide-card-title">👀 第三步：先看看效果</div>
+                <div class="guide-card-desc">
+                    还没配置也没关系。这里有一个已生成云端缓存的视频。
+                    点击后会跳到 B 站视频，并自动打开总结页展示效果。
+                </div>
+                <div class="guide-preview-row">
+                    <button class="guide-btn-primary guide-preview-btn" data-guide="preview">预览总结效果</button>
                 </div>
                 ${actions(true)}
             </div>
@@ -2540,11 +2581,24 @@ function renderGuideStep(step) {
         renderGuideStep(step - 1);
     });
     card?.querySelector("[data-guide='next']")?.addEventListener("click", () => {
-        if (step < 2) {
+        if (step < totalSteps) {
             renderGuideStep(step + 1);
         } else {
             closeSetupGuide();
         }
+    });
+    card?.querySelector("[data-guide='preview']")?.addEventListener("click", async () => {
+        try {
+            await chrome.storage.local.set({
+                [SETUP_PREVIEW_STORAGE_KEY]: {
+                    bvid: SETUP_PREVIEW_BVID,
+                    page: "summary",
+                    createdAt: Date.now()
+                }
+            });
+        } catch (_) {}
+        closeSetupGuide();
+        window.location.href = SETUP_PREVIEW_VIDEO_URL;
     });
 }
 
@@ -3239,7 +3293,7 @@ function renderTopRemaining() {
     const output = Number(latest.outputTokens || 0);
     const tokenStr = input || output ? `${total} (In ${input} / Out ${output})` : `${total}`;
     const latency = Number.isFinite(Number(latest.latencyMs)) ? `${(Number(latest.latencyMs) / 1000).toFixed(3)}s` : "-";
-    const metricLine = `用时: ${latency} · Tokens: ${tokenStr} · 剩余次数 ${remaining}`;
+    const metricLine = `用时: ${latency} · Tokens: ${tokenStr} · 该模型当天剩余次数 ${remaining}`;
     holder.textContent = metricLine;
     holder.title = metricLine;
 }

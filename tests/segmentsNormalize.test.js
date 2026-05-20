@@ -57,6 +57,18 @@ describe("normalizeSegments", () => {
       { start: 5, end: 20, label: "正文段落", type: "content", start_line: 2, end_line: 8 }
     ]);
   });
+
+  it("accepts line-only segments when subtitle has no timestamps", () => {
+    const result = normalizeSegments([
+      { label: "无时间轴正文", type: "content", start_line: 2, end_line: 8 },
+      { label: "广告口播", type: "ad", start_line: 9, end_line: 12, ad_start_line: 9, ad_end_line: 12 }
+    ], { allowLineOnly: true });
+
+    expect(result).toEqual([
+      { start: 2, end: 9, label: "无时间轴正文", type: "content", no_timestamp: true, virtual_time: true, start_line: 2, end_line: 8 },
+      { start: 9, end: 13, label: "广告口播", type: "ad", no_timestamp: true, virtual_time: true, start_line: 9, end_line: 12, ad_start_line: 9, ad_end_line: 12 }
+    ]);
+  });
 });
 
 describe("parseTimeToSeconds", () => {

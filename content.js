@@ -31,6 +31,14 @@ const {
     renderSkeletonLines,
     showToast
 } = globalThis.BilitatoContentUi || {};
+
+function isNoTimestampSubtitleCache(cache = {}) {
+    const source = String(cache?.subtitleSource || "").toLowerCase();
+    if (source === "siliconflow" || source === "funasr") return true;
+    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+    if (!raw.length) return false;
+    return raw.some((item) => item?.noTimestamp === true);
+}
 const {
     buildCacheTagHtml,
     getTaskCacheSource
@@ -1931,6 +1939,7 @@ function renderSummary(panel) {
         rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
         processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
         cloudReadStatus: String(appState.cloudReadState?.status || ""),
+        subtitleSource: String(appState.cache?.subtitleSource || ""),
         summarySource: getTaskCacheSource(appState.cache, "summary"),
         segmentsSource: getTaskCacheSource(appState.cache, "segments"),
         sessionFresh: appState.sessionGeneratedTasks.has("summary") || appState.sessionGeneratedTasks.has("segments")
@@ -1940,6 +1949,7 @@ function renderSummary(panel) {
     panel.dataset.lastSignature = signature;
 
     const isFresh = appState.sessionGeneratedTasks.has("summary") || appState.sessionGeneratedTasks.has("segments");
+    const segmentsNoTimestamp = isNoTimestampSubtitleCache(appState.cache) || segments.some((item) => item?.no_timestamp || item?.virtual_time);
     const cacheTag = buildCacheTagHtml(appState.cache, ["summary", "segments"], hasContent, isLoading, isFresh);
     const showModeNotice = !appState.settings?.summaryModeNoticeSeen && !isFresh;
     const isFastMode = (appState.settings?.prefMode || "quality") === "quality";
@@ -2039,13 +2049,24 @@ function renderSummary(panel) {
     ` : "";
 
     const segmentListHtml = segments.length
-        ? `<div class="segment-list">${segments.map((item) => `
-                <button class="segment-card ${item.type === "ad" ? "ad" : ""}"
-                        data-action="segment-jump" data-start="${item.start}">
-                    <span class="seg-time">${formatTime(item.start)}-${formatTime(item.end)}</span>
+        ? `<div class="segment-list">${segments.map((item) => {
+                const itemNoTimestamp = segmentsNoTimestamp || item?.no_timestamp || item?.virtual_time;
+                const lineStart = Number(item.start_line ?? item.ad_start_line);
+                const lineEnd = Number(item.end_line ?? item.ad_end_line);
+                const timeText = itemNoTimestamp
+                    ? (Number.isInteger(lineStart) && Number.isInteger(lineEnd) ? `行 ${lineStart}-${lineEnd}` : "无时间轴")
+                    : `${formatTime(item.start)}-${formatTime(item.end)}`;
+                const actionAttrs = itemNoTimestamp
+                    ? `disabled title="该字幕没有真实时间轴，无法跳转到具体时间"`
+                    : `data-action="segment-jump" data-start="${item.start}"`;
+                return `
+                <button class="segment-card ${item.type === "ad" ? "ad" : ""} ${itemNoTimestamp ? "no-timestamp" : ""}"
+                        ${actionAttrs}>
+                    <span class="seg-time">${escapeHtml(timeText)}</span>
                     <span class="seg-label">${escapeHtml(item.label)}</span>
                     ${item.type === "ad" ? '<span class="ad-tag">广告片段</span>' : ""}
-                </button>`).join("")}
+                </button>`;
+            }).join("")}
               </div>`
         : (segmentsIsLoading
         ? segmentsSkeleton
@@ -2694,6 +2715,7 @@ function renderReal(panel) {
     const claims = Array.isArray(rumors?.claims) ? rumors.claims : [];
     const rumorsStatus = getCurrentVideoTaskStatus("rumors");
     const hasRumorsCache = !!String(rumors?.overview || "").trim() || claims.length > 0;
+    const rumorsNoTimestamp = isNoTimestampSubtitleCache(appState.cache) || rumors?.no_timestamp || claims.some((item) => item?.no_timestamp);
     
     // Sort claims by timestamp
     const sortedClaims = [...claims].sort((a, b) => {
@@ -2707,6 +2729,7 @@ function renderReal(panel) {
         cacheBvid: normalizeBvidCase(appState.cache?.bvid || ""),
         rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
         processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
+        subtitleSource: String(appState.cache?.subtitleSource || ""),
         cloudReadStatus: String(appState.cloudReadState?.status || ""),
         rumorsSource: getTaskCacheSource(appState.cache, "rumors"),
         sessionFresh: appState.sessionGeneratedTasks.has("rumors")
@@ -2781,12 +2804,16 @@ function renderReal(panel) {
              tooltipText = "AI 暂时无法获取外部资料进行验证，或视频内容属于主观观点（无法验证对错）。";
         }
 
-        const timeLabel = formatTime(item.timestamp_sec || 0);
+        const itemNoTimestamp = rumorsNoTimestamp || item?.no_timestamp;
+        const timeLabel = itemNoTimestamp ? "无时间轴" : formatTime(item.timestamp_sec || 0);
+        const timeControl = itemNoTimestamp
+            ? `<span class="claim-time-btn claim-time-static" title="该字幕没有真实时间轴">${timeLabel}</span>`
+            : `<button class="claim-time-btn" data-action="seek-video" data-time="${item.timestamp_sec}">${timeLabel}</button>`;
         
         return `
             <div class="claim-card ${statusClass}">
                 <div class="claim-header">
-                    <button class="claim-time-btn" data-action="seek-video" data-time="${item.timestamp_sec}">${timeLabel}</button>
+                    ${timeControl}
                     <div class="claim-status-tag ${statusClass}" data-tooltip="${tooltipText}">
                         ${verdictLabel}
                     </div>

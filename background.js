@@ -718,6 +718,18 @@ function isNoTimestampSubtitleSource(source) {
     return value === "siliconflow" || value === "funasr";
 }
 
+function isNoTimestampSubtitleCache(cache = {}) {
+    if (isNoTimestampSubtitleSource(cache?.subtitleSource)) return true;
+    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+    if (!raw.length) return false;
+    return raw.some((item) => item?.noTimestamp === true)
+        || raw.every((item) => {
+            const start = Number(item?.from ?? item?.start);
+            const end = Number(item?.to ?? item?.end);
+            return !Number.isFinite(start) && !Number.isFinite(end);
+        });
+}
+
 function splitTranscriptionTextByPunctuation(text) {
     const normalized = stripEmojiFromText(text)
         .replace(/\s+/g, " ")
@@ -2169,16 +2181,17 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
         : { purpose: "general" };
     const subtitleText = getSubtitlePayload(cache, subtitlePayloadOptions);
     if (!subtitleText) throw new Error("无字幕可供分析");
+    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
     logSubtitlePayloadSelection(bvid, task, cache, subtitleText, subtitlePayloadOptions);
     const prompt = task === "segments" && isSegmentPromptTestEnabled(settings)
-        ? buildSegmentsAdTestPrompt({ subtitle: subtitleText, taskContext })
+        ? buildSegmentsAdTestPrompt({ subtitle: subtitleText, taskContext: promptTaskContext })
         : buildPrompt({
             type: task,
             subtitle: subtitleText,
             mode: settings.promptSettings?.mode || "guided",
             guided: settings.promptSettings?.guided || {},
             customPrompts: settings.promptSettings?.custom || {},
-            taskContext
+            taskContext: promptTaskContext
         });
     logAIPromptBuilt({
         bvid,
@@ -2239,7 +2252,7 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
     } else {
         logAI.error("json_parse_error", { task: "rumors", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
     }
-    const normalized = normalizeRumors(parsed);
+    const normalized = normalizeRumors(parsed, cache);
     if (!normalized) throw createAppError("JSON_PARSE_ERROR", "验真 JSON 解析失败");
     logRumorsQualitySummary(bvid, normalized, { mode: "single", outputChars: String(aiRes.text || "").length });
     return normalized;
@@ -2326,6 +2339,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
     const summarySubtitleText = getSubtitlePayload(cache, summarySubtitleOptions);
     const segmentsSubtitleText = getSubtitlePayload(cache, segmentsSubtitleOptions);
     if (!summarySubtitleText && !segmentsSubtitleText) throw new Error("无字幕可供分析");
+    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
     logSubtitlePayloadSelection(bvid, "summary", cache, summarySubtitleText, summarySubtitleOptions);
     logSubtitlePayloadSelection(bvid, "segments", cache, segmentsSubtitleText, segmentsSubtitleOptions);
     const mode = settings.promptSettings?.mode || "guided";
@@ -2371,7 +2385,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
     if (summaryExists) {
         results.summary = { ok: true, data: String(cache.summary || ""), error: null };
     } else {
-        const summaryPrompt = buildPrompt({ type: "summary", subtitle: summarySubtitleText, mode, guided, customPrompts, taskContext });
+        const summaryPrompt = buildPrompt({ type: "summary", subtitle: summarySubtitleText, mode, guided, customPrompts, taskContext: promptTaskContext });
         logAIPromptBuilt({ bvid, task: "summary", provider: settings.provider, mode: "quality", prompt: summaryPrompt, promptSettings: settings.promptSettings });
         tasks.push((async () => {
             try {
@@ -2452,8 +2466,8 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
         results.segments = { ok: true, data: cache.segments, error: null };
     } else {
         const segmentsPrompt = isSegmentPromptTestEnabled(settings)
-            ? buildSegmentsAdTestPrompt({ subtitle: segmentsSubtitleText || summarySubtitleText, taskContext })
-            : buildPrompt({ type: "segments", subtitle: segmentsSubtitleText || summarySubtitleText, mode, guided, customPrompts, taskContext });
+            ? buildSegmentsAdTestPrompt({ subtitle: segmentsSubtitleText || summarySubtitleText, taskContext: promptTaskContext })
+            : buildPrompt({ type: "segments", subtitle: segmentsSubtitleText || summarySubtitleText, mode, guided, customPrompts, taskContext: promptTaskContext });
         logAIPromptBuilt({ bvid, task: "segments", provider: settings.provider, mode: "quality", prompt: segmentsPrompt, promptSettings: settings.promptSettings });
         tasks.push((async () => {
             try {
@@ -2543,6 +2557,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
     const subtitlePayloadOptions = { purpose: "segments", mode: "efficiency" };
     const subtitleText = getSubtitlePayload(cache, subtitlePayloadOptions);
     if (!subtitleText) throw new Error("无字幕可供分析");
+    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
     logSubtitlePayloadSelection(bvid, "summary_segments_merged", cache, subtitleText, subtitlePayloadOptions);
     if (!force && String(cache?.summary || "").trim() && Array.isArray(cache?.segments) && cache.segments.length) {
         const cached = {
@@ -2561,7 +2576,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
         mode,
         guided,
         customPrompts,
-        taskContext,
+        taskContext: promptTaskContext,
         segmentsPromptOverride: isSegmentPromptTestEnabled(settings) ? SEGMENTS_AD_TEST_PROMPT : ""
     });
     logAIPromptBuilt({
@@ -2752,12 +2767,15 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
 function buildRawSubtitlePayload(cache, maxChars = MAX_SUBTITLE_CHARS) {
     const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
     if (!raw.length) return "";
+    const noTimestamp = isNoTimestampSubtitleCache(cache);
     const text = raw.map((item) => {
+        const content = String(item.content ?? item.text ?? "").trim();
+        if (!content) return null;
+        if (noTimestamp) return content;
         const sec = Number(item.from ?? item.start ?? 0);
         const min = Math.floor(sec / 60);
         const s = Math.floor(sec % 60);
-        const content = String(item.content ?? item.text ?? "").trim();
-        return content ? `[${String(min).padStart(2, "0")}:${String(s).padStart(2, "0")}] ${content}` : null;
+        return `[${String(min).padStart(2, "0")}:${String(s).padStart(2, "0")}] ${content}`;
     }).filter(Boolean).join("\n");
     return text ? text.slice(0, maxChars) : "";
 }
@@ -2774,18 +2792,22 @@ function formatSubtitleClock(totalSeconds) {
 function buildIndexedRawSubtitlePayload(cache, maxChars = MAX_SUBTITLE_CHARS) {
     const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
     if (!raw.length) return "";
+    const noTimestamp = isNoTimestampSubtitleCache(cache);
     const lines = [];
     let usedChars = 0;
     for (let index = 0; index < raw.length; index += 1) {
         const item = raw[index] || {};
-        const start = Number(item.from ?? item.start ?? 0);
-        const end = Number(item.to ?? item.end ?? NaN);
         const content = String(item.content ?? item.text ?? "").replace(/\s+/g, " ").trim();
         if (!content) continue;
-        const time = Number.isFinite(end) && end > start
-            ? `[${formatSubtitleClock(start)}-${formatSubtitleClock(end)}]`
-            : `[${formatSubtitleClock(start)}]`;
-        const line = `#${index} ${time} ${content}`;
+        let line = `#${index} ${content}`;
+        if (!noTimestamp) {
+            const start = Number(item.from ?? item.start ?? 0);
+            const end = Number(item.to ?? item.end ?? NaN);
+            const time = Number.isFinite(end) && end > start
+                ? `[${formatSubtitleClock(start)}-${formatSubtitleClock(end)}]`
+                : `[${formatSubtitleClock(start)}]`;
+            line = `#${index} ${time} ${content}`;
+        }
         if (usedChars + line.length + 1 > maxChars) break;
         lines.push(line);
         usedChars += line.length + 1;
@@ -2806,6 +2828,7 @@ function buildProcessedSubtitlePayload(cache, maxChars = MAX_SUBTITLE_CHARS) {
 function buildRawAdEvidencePayload(cache, maxChars = 8000) {
     const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
     if (!raw.length) return "";
+    const noTimestamp = isNoTimestampSubtitleCache(cache);
     const selected = new Set();
     raw.forEach((item, index) => {
         const text = String(item.content ?? item.text ?? "").trim();
@@ -2822,13 +2845,15 @@ function buildRawAdEvidencePayload(cache, maxChars = 8000) {
         .slice(0, 140)
         .map((index) => {
             const item = raw[index] || {};
+            const content = String(item.content ?? item.text ?? "").trim();
+            if (!content) return "";
+            if (noTimestamp) return `#${index} ${content}`;
             const start = Number(item.from ?? item.start ?? 0);
             const end = Number(item.to ?? item.end ?? NaN);
-            const content = String(item.content ?? item.text ?? "").trim();
             const time = Number.isFinite(end) && end > start
                 ? `[${formatSubtitleClock(start)}-${formatSubtitleClock(end)}]`
                 : `[${formatSubtitleClock(start)}]`;
-            return content ? `#${index} ${time} ${content}` : "";
+            return `#${index} ${time} ${content}`;
         })
         .filter(Boolean);
     return lines.join("\n").slice(0, maxChars);
@@ -2838,6 +2863,14 @@ function getSegmentsSubtitlePayload(cache, options = {}) {
     const mode = String(options?.mode || "efficiency");
     const indexedRawText = buildIndexedRawSubtitlePayload(cache, MAX_SEGMENTS_SUBTITLE_CHARS);
     if (indexedRawText) {
+        if (isNoTimestampSubtitleCache(cache)) {
+            return [
+                "【分段与广告逐句字幕（无真实时间轴）】",
+                "说明：每行开头的 #数字 是 line_id。本字幕没有真实 start/end 秒数，禁止把所有行当作 00:00；普通分段和广告识别都必须基于 line_id。",
+                "输出时 start_line/end_line/ad_start_line/ad_end_line 必须来自这些 #编号；start/end 可填写对应行号作为兼容字段，系统会按 line_id 生成无时间轴分段。",
+                indexedRawText
+            ].join("\n").slice(0, MAX_SEGMENTS_SUBTITLE_CHARS);
+        }
         return [
             "【分段与广告逐句字幕】",
             "说明：每行开头的 #数字 是 line_id。普通分段和广告识别都必须基于这些逐句字幕；广告段必须输出 ad_start_line/ad_end_line，值必须来自这些 #编号。",
@@ -2858,6 +2891,7 @@ function getSubtitlePayloadMeta(cache, text, options = {}) {
     const rawCount = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0;
     const processedCount = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle.length : 0;
     const mode = String(options?.mode || "");
+    const noTimestamp = isNoTimestampSubtitleCache(cache);
     const adEvidenceText = options?.purpose === "segments" ? buildRawAdEvidencePayload(cache, 8000) : "";
     const maxChars = options?.purpose === "segments" ? MAX_SEGMENTS_SUBTITLE_CHARS : MAX_SUBTITLE_CHARS;
     const payloadLines = String(text || "").split("\n");
@@ -2872,6 +2906,7 @@ function getSubtitlePayloadMeta(cache, text, options = {}) {
         source,
         purpose: String(options?.purpose || "general"),
         mode,
+        no_timestamp: noTimestamp,
         raw_count: rawCount,
         processed_count: processedCount,
         ad_evidence_chars: adEvidenceText.length,
@@ -2894,7 +2929,9 @@ function logSubtitlePayloadSelection(bvid, task, cache, subtitleText, options = 
 }
 
 function normalizeSegments(value, cache = {}, context = {}) {
+    const noTimestamp = isNoTimestampSubtitleCache(cache);
     const normalized = normalizeSegmentsResult(value, {
+        allowLineOnly: noTimestamp,
         onFuzzyHit(fuzzyHits, totalCount) {
             logBackground.debug("segments_normalize_fuzzy_hit", {
                 hit_count: fuzzyHits.length,
@@ -2933,6 +2970,7 @@ function getSubtitleEndTime(row, fallbackStart = 0) {
 function applyLineRangesToSegments(segments, cache = {}, context = {}) {
     const list = Array.isArray(segments) ? segments : [];
     const rawRows = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+    const noTimestamp = isNoTimestampSubtitleCache(cache);
     if (!list.length || !rawRows.length) return removeAdOverlapFromContentSegments(list, context);
     const mapped = list.map((seg) => {
         const startLineId = Number(seg?.type === "ad" ? (seg.ad_start_line ?? seg.start_line) : seg.start_line);
@@ -2957,6 +2995,44 @@ function applyLineRangesToSegments(segments, cache = {}, context = {}) {
                 }
             });
             return seg;
+        }
+        if (noTimestamp) {
+            const virtualStart = Math.max(0, startLine.index);
+            const virtualEnd = Math.max(virtualStart + 1, endLine.index + 1);
+            const next = {
+                ...seg,
+                start: virtualStart,
+                end: virtualEnd,
+                start_line: startLine.index,
+                end_line: endLine.index,
+                ad_start_line: startLine.index,
+                ad_end_line: endLine.index,
+                line_mapped: true,
+                no_timestamp: true,
+                virtual_time: true
+            };
+            if (seg?.type !== "ad") {
+                delete next.ad_start_line;
+                delete next.ad_end_line;
+            } else {
+                next.ad_line_mapped = true;
+            }
+            logAI.info(seg?.type === "ad" ? "ad_line_range_mapped" : "segment_line_range_mapped", {
+                bvid: context.bvid || "",
+                task: context.task || "segments",
+                detail: {
+                    mode: context.mode || "",
+                    type: String(seg.type || "content"),
+                    label: String(seg.label || "").slice(0, 60),
+                    no_timestamp: true,
+                    mapped_start_line: startLine.index,
+                    mapped_end_line: endLine.index,
+                    adjusted_line_id: !!(startLine.adjusted || endLine.adjusted),
+                    start_text: getSubtitleSnippet(startLine.row),
+                    end_text: getSubtitleSnippet(endLine.row)
+                }
+            });
+            return next;
         }
         const start = Number(startLine.row?.from ?? startLine.row?.start ?? 0);
         const endBase = Number(endLine.row?.from ?? endLine.row?.start ?? start);
@@ -3129,8 +3205,18 @@ function smoothSegmentContinuity(segments, context = {}) {
     return list;
 }
 
-function normalizeRumors(value) {
-    return normalizeRumorsResult(value);
+function normalizeRumors(value, cache = {}) {
+    const normalized = normalizeRumorsResult(value);
+    if (!normalized || !isNoTimestampSubtitleCache(cache)) return normalized;
+    return {
+        ...normalized,
+        no_timestamp: true,
+        claims: (normalized.claims || []).map((claim) => ({
+            ...claim,
+            timestamp_sec: 0,
+            no_timestamp: true
+        }))
+    };
 }
 
 function buildFailureLog(error, base = {}) {

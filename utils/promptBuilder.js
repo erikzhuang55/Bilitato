@@ -378,6 +378,9 @@ export function buildVideoMetaBlock(taskContext) {
 }
 
 export function buildDurationHardRule(taskContext) {
+    if (taskContext?.noSubtitleTimestamps) {
+        return "核心强制：当前字幕没有真实时间轴。请按字幕 line_id 完整覆盖视频内容，start_line/end_line/ad_start_line/ad_end_line 必须来自 #编号；start/end 仅作为兼容字段，可填写对应行号，不要编造秒级时间。";
+    }
     const info = resolveDurationPromptContext(taskContext);
     if (!info) return "";
     const lastSegmentStart = Math.floor(info.totalSeconds * 0.75);
@@ -400,6 +403,17 @@ export function buildDurationHardRule(taskContext) {
     return `核心强制：视频总时长 ${info.totalSeconds} 秒（${info.formattedTime}），最后一个章节的 start 必须大于 ${lastSegmentStart} 秒，确保视频后半段内容（包括结局）不被遗漏。章节时间戳必须直接来自字幕，禁止估算。请根据总时长将章节控制为 ${target} 个，普通 content 章节尽量不要超过 ${maxContentMinutes} 分钟；如果出现案件阶段、人物视角、证据、观点或结论切换，必须拆成新章节，不要为了少分段把多个主题合并。`;
 }
 
+export function buildNoTimestampTaskRule(type, taskContext) {
+    if (!taskContext?.noSubtitleTimestamps) return "";
+    if (type === "segments") {
+        return "【无时间轴处理规则】本次字幕没有真实开始/结束秒数。分段和广告识别以 line_id 为准，必须输出 start_line/end_line；广告还必须输出 ad_start_line/ad_end_line。start/end 可填写对应行号作为兼容字段，系统会按 line_id 生成无时间轴分段。";
+    }
+    if (type === "rumors") {
+        return "【无时间轴处理规则】本次字幕没有真实时间轴。验真仍需正常输出 claims；每条 claim 的 timestamp 可填 0，系统会隐藏跳转时间。不要因为没有时间戳拒绝验真。";
+    }
+    return "";
+}
+
 export function buildPrompt({
     type,
     subtitle,
@@ -408,7 +422,13 @@ export function buildPrompt({
     customPrompts = {},
     taskContext = {}
 }) {
-    const formatRule = TASK_PROMPT_FORMAT_RULES[type] || "";
+    const noTimestampRule = buildNoTimestampTaskRule(type, taskContext);
+    const formatRule = [
+        TASK_PROMPT_FORMAT_RULES[type] || "",
+        type === "segments" && taskContext?.noSubtitleTimestamps
+            ? "补充：无时间轴字幕中 start/end 可使用 line_id 兼容值；start_line/end_line 才是最终依据。"
+            : ""
+    ].filter(Boolean).join("\n");
     const videoMetaBlock = buildVideoMetaBlock(taskContext);
     const durationHardRule = type === "segments" ? buildDurationHardRule(taskContext) : "";
     const subtitleBlock = `【字幕内容】\n${subtitle}`.trim();
@@ -417,6 +437,7 @@ export function buildPrompt({
         return [
             BASE_PROMPT,
             userPrompt,
+            noTimestampRule,
             durationHardRule,
             videoMetaBlock,
             subtitleBlock,
@@ -431,6 +452,7 @@ export function buildPrompt({
         "【输出风格要求】",
         toneRule,
         detailRule,
+        noTimestampRule,
         durationHardRule,
         videoMetaBlock,
         subtitleBlock,
@@ -444,9 +466,11 @@ export function buildSegmentsAdTestPrompt({
 }) {
     const videoMetaBlock = buildVideoMetaBlock(taskContext);
     const durationHardRule = buildDurationHardRule(taskContext);
+    const noTimestampRule = buildNoTimestampTaskRule("segments", taskContext);
     const subtitleBlock = `【字幕内容】\n${subtitle}`.trim();
     return [
         SEGMENTS_AD_TEST_PROMPT,
+        noTimestampRule,
         durationHardRule,
         videoMetaBlock,
         subtitleBlock
@@ -463,6 +487,7 @@ export function buildMergedSummarySegmentsPrompt({
 }) {
     const videoMetaBlock = buildVideoMetaBlock(taskContext);
     const durationHardRule = buildDurationHardRule(taskContext);
+    const noTimestampRule = buildNoTimestampTaskRule("segments", taskContext);
     const subtitleBlock = `【字幕内容】\n${subtitle}`.trim();
     const summaryPrompt = mode === "custom"
         ? (customPrompts.summary || TASK_PROMPTS.summary || "")
@@ -477,7 +502,7 @@ export function buildMergedSummarySegmentsPrompt({
         parts.push("【输出风格要求】", toneRule, detailRule);
     }
     parts.push("【任务1：视频总结】", summaryPrompt);
-    parts.push("【任务2：视频分段】", segmentsPromptOverride || segmentsPrompt, durationHardRule);
+    parts.push("【任务2：视频分段】", segmentsPromptOverride || segmentsPrompt, noTimestampRule, durationHardRule);
     parts.push(MERGED_SEGMENTS_FORMAT_RULE);
     parts.push(videoMetaBlock);
     parts.push(subtitleBlock);

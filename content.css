@@ -718,6 +718,14 @@ body::-webkit-scrollbar {
     background: #fff5f5;
 }
 
+.segment-card.no-timestamp {
+    cursor: default;
+}
+
+.segment-card.no-timestamp:disabled {
+    opacity: 1;
+}
+
 .seg-time {
     color: #6d7684;
     font-size: 12px;
@@ -2162,6 +2170,13 @@ input[type="range"]:active::-webkit-slider-thumb {
     background: rgba(0,0,0,0.1);
     color: #000;
     transform: scale(1.02);
+}
+
+.claim-time-static,
+.claim-time-static:hover {
+    cursor: default;
+    transform: none;
+    color: #6d7684;
 }
 
 .claim-status-tag {

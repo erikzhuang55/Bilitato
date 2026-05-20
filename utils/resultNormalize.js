@@ -45,8 +45,13 @@ function resolveSegmentField(item, aliases, fuzzyMatchers) {
     return { value: undefined, key: "" };
 }
 
+function isLineIdField(key) {
+    return /line/i.test(String(key || ""));
+}
+
 export function normalizeSegments(value, hooks = {}) {
     if (!Array.isArray(value)) return [];
+    const allowLineOnly = hooks?.allowLineOnly === true;
     const startFuzzyMatchers = [/start/, /^from$/, /begin/, /tsstart/, /timestart/];
     const endFuzzyMatchers = [/end/, /^to$/, /finish/, /tsend/, /timeend/];
     const labelPrimaryFuzzyMatchers = [/label/, /title/, /name/, /chapter/, /heading/, /topic/];
@@ -65,7 +70,18 @@ export function normalizeSegments(value, hooks = {}) {
             const end = parseTimeToSeconds(endField.value);
             const label = String(labelField.value || "").trim();
             const type = item?.type === "ad" ? "ad" : "content";
-            const valid = Number.isFinite(start) && Number.isFinite(end) && start < end && !!label;
+            const startLine = Number(item?.start_line ?? item?.startLine ?? item?.line_start ?? item?.lineStart);
+            const endLine = Number(item?.end_line ?? item?.endLine ?? item?.line_end ?? item?.lineEnd);
+            const adStartLine = Number(item?.ad_start_line ?? item?.adStartLine ?? item?.start_line ?? item?.startLine);
+            const adEndLine = Number(item?.ad_end_line ?? item?.adEndLine ?? item?.end_line ?? item?.endLine);
+            const primaryStartLine = type === "ad" && Number.isInteger(adStartLine) ? adStartLine : startLine;
+            const primaryEndLine = type === "ad" && Number.isInteger(adEndLine) ? adEndLine : endLine;
+            const hasLineRange = Number.isInteger(primaryStartLine) && primaryStartLine >= 0
+                && Number.isInteger(primaryEndLine) && primaryEndLine >= primaryStartLine;
+            const validTime = !isLineIdField(startField.key) && !isLineIdField(endField.key)
+                && Number.isFinite(start) && Number.isFinite(end) && start < end;
+            const validLineOnly = allowLineOnly && hasLineRange;
+            const valid = (validTime || validLineOnly) && !!label;
             const exactStart = ["start", "start_time", "time_start"].includes(String(startField.key || ""));
             const exactEnd = ["end", "end_time", "time_end"].includes(String(endField.key || ""));
             const exactLabel = ["label", "title", "name", "summary", "content"].includes(String(labelField.key || ""));
@@ -83,6 +99,8 @@ export function normalizeSegments(value, hooks = {}) {
                     start,
                     end,
                     labelLength: label.length,
+                    hasLineRange,
+                    allowLineOnly,
                     startKey: startField.key,
                     endKey: endField.key,
                     labelKey: labelField.key,
@@ -90,15 +108,20 @@ export function normalizeSegments(value, hooks = {}) {
                 });
                 return null;
             }
-            const result = { start, end, label, type };
+            const result = {
+                start: validTime ? start : primaryStartLine,
+                end: validTime ? end : primaryEndLine + 1,
+                label,
+                type
+            };
+            if (!validTime && validLineOnly) {
+                result.no_timestamp = true;
+                result.virtual_time = true;
+            }
             if (item && typeof item === "object") {
-                const startLine = Number(item.start_line ?? item.startLine ?? item.line_start ?? item.lineStart);
-                const endLine = Number(item.end_line ?? item.endLine ?? item.line_end ?? item.lineEnd);
                 if (Number.isInteger(startLine) && startLine >= 0) result.start_line = startLine;
                 if (Number.isInteger(endLine) && endLine >= 0) result.end_line = endLine;
                 if (type === "ad") {
-                    const adStartLine = Number(item.ad_start_line ?? item.adStartLine ?? item.start_line ?? item.startLine);
-                    const adEndLine = Number(item.ad_end_line ?? item.adEndLine ?? item.end_line ?? item.endLine);
                     if (Number.isInteger(adStartLine) && adStartLine >= 0) result.ad_start_line = adStartLine;
                     if (Number.isInteger(adEndLine) && adEndLine >= 0) result.ad_end_line = adEndLine;
                     if (!Number.isInteger(startLine) && Number.isInteger(adStartLine) && adStartLine >= 0) result.start_line = adStartLine;

@@ -60,7 +60,7 @@ async function getSentryRuntimeContext() {
 }
 
 const MAX_GLOBAL_CONCURRENCY = 1;
-const TASK_TIMEOUT_MS = 120000;
+const TASK_TIMEOUT_MS = 60000;
 const MAX_SUBTITLE_CHARS = 36000;
 const MAX_SEGMENTS_SUBTITLE_CHARS = 120000;
 const GROQ_AUDIO_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -108,6 +108,7 @@ const globalLogs = [];
 const MAX_LOGS = 2000;
 const lastSubtitleSync = new Map();
 const chatAbortControllers = new Map();
+const tabOperationAbortControllers = new Map();
 const tabStateCache = new Map();
 const tabStateWriteTimers = new Map();
 const cacheMemory = new Map();
@@ -165,6 +166,45 @@ function isSegmentPromptTestEnabled(settings = {}) {
     return String(settings?.segmentPromptVariant || DEFAULT_SETTINGS.segmentPromptVariant || "test").toLowerCase() !== "original";
 }
 
+function registerTabAbortController(tabId, controller) {
+    const id = Number(tabId || 0);
+    if (!id || !controller) return () => {};
+    const set = tabOperationAbortControllers.get(id) || new Set();
+    set.add(controller);
+    tabOperationAbortControllers.set(id, set);
+    return () => {
+        const current = tabOperationAbortControllers.get(id);
+        if (!current) return;
+        current.delete(controller);
+        if (!current.size) tabOperationAbortControllers.delete(id);
+    };
+}
+
+function abortTabOperations(tabId, reason = "aborted") {
+    const id = Number(tabId || 0);
+    if (!id) return 0;
+    let count = 0;
+    const set = tabOperationAbortControllers.get(id);
+    if (set) {
+        [...set].forEach((controller) => {
+            try {
+                controller.abort(reason);
+                count += 1;
+            } catch (_) {}
+        });
+        tabOperationAbortControllers.delete(id);
+    }
+    [...chatAbortControllers.entries()].forEach(([key, controller]) => {
+        if (!String(key).startsWith(`${id}:`)) return;
+        try {
+            controller.abort(reason);
+            count += 1;
+        } catch (_) {}
+        chatAbortControllers.delete(key);
+    });
+    return count;
+}
+
 syncDebugModeFromStorage();
 
 chrome.runtime.onInstalled.addListener(async () => {
@@ -176,6 +216,16 @@ chrome.runtime.onInstalled.addListener(async () => {
     currentDebugMode = !!normalized.debugMode;
     syncRuntimeDebugFlag(currentDebugMode);
     logBackground.info("storage_update", { source: "on_installed", debug_mode: currentDebugMode });
+});
+
+chrome.tabs.onRemoved?.addListener((tabId) => {
+    abortTabOperations(tabId, "aborted");
+});
+
+chrome.tabs.onUpdated?.addListener((tabId, changeInfo) => {
+    if (changeInfo?.status === "loading") {
+        abortTabOperations(tabId, "aborted");
+    }
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -411,6 +461,15 @@ async function handleMessage(msg, sender) {
         const result = await ContentProvider.transcribeFallback(tabId, msg.payload || {});
         return result;
     }
+    if (msg.action === "ABORT_TAB_OPERATIONS") {
+        const count = abortTabOperations(tabId, "aborted");
+        if (tabId) {
+            await setTaskStatus(tabId, TASK_KEYS, "idle").catch(() => {});
+            await updateTabState(tabId, { transcriptionProgress: 0, updatedAt: Date.now() }).catch(() => {});
+        }
+        logBackground.info("tab_operations_aborted", { tab_id: tabId || 0, detail: { controller_count: count } });
+        return { aborted: count };
+    }
     if (msg.action === "CLEAR_SUBTITLE_CACHE") {
         const bvid = normalizeBvid(msg.bvid);
         if (!bvid) return {};
@@ -479,11 +538,10 @@ async function handleMessage(msg, sender) {
         return { answer: result.answer, metrics: result.metrics };
     }
     if (msg.action === "ABORT_TRANSCRIPTION") {
-        // Need to find and abort the transcription fetch request if possible.
-        // Currently, Groq/Whisper API calls might not be easily abortable from here if they don't use AbortController.
-        // But we can at least log it or add abort logic to callAI if needed.
-        logBackground.info("transcription_aborted", { tabId: tabId });
-        return {};
+        const count = abortTabOperations(tabId, "aborted");
+        if (tabId) await updateTabState(tabId, { transcriptionProgress: 0, updatedAt: Date.now() }).catch(() => {});
+        logBackground.info("transcription_aborted", { tab_id: tabId || 0, detail: { controller_count: count } });
+        return { aborted: count };
     }
     if (msg.action === "SAVE_SETTINGS") {
         const incoming = msg.settings || {};
@@ -1081,6 +1139,8 @@ class ContentProvider {
         if (!asrApiKey) throw new Error(asrProvider === "siliconflow" ? "请先在设置中填写硅基流动 API Key" : "请先在设置中填写 Groq API Key");
         const asrRunId = String(payload?.asrRunId || `asr_${bvid}_${startedAt.toString(36)}`).trim();
         const payloadAudioSummary = await summarizeMediaLocator(payload?.audioUrl || "");
+        const operationController = new AbortController();
+        const unregisterAbort = registerTabAbortController(tabId, operationController);
         try {
             logASR.info("asr_start", {
                 bvid,
@@ -1096,6 +1156,9 @@ class ContentProvider {
                 }
             });
             await updateTabState(tabId, {
+                activeBvid: bvid,
+                activeCid: Number.isFinite(cid) ? cid : 0,
+                activeTid: tid || null,
                 subtitleSource,
                 transcriptionProgress: 5,
                 updatedAt: Date.now()
@@ -1135,10 +1198,12 @@ class ContentProvider {
                     }
                 });
             }
-            await updateTabState(tabId, { transcriptionProgress: 20, updatedAt: Date.now() });
+            await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 20, updatedAt: Date.now() });
             await notifyTranscribeStatus(tabId, { stage: "download", level: "info", text: "正在下载音轨...", progress: 20, bvid });
             const audioFetchStartedAt = Date.now();
-            const audioBlob = await this.fetchResourceToBlob(media.url, tabId, bvid, false, asrMaxAudioBytes);
+            const audioBlob = await this.fetchResourceToBlob(media.url, tabId, bvid, false, asrMaxAudioBytes, operationController.signal);
+            await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 56, updatedAt: Date.now() });
+            await notifyTranscribeStatus(tabId, { stage: "prepare_upload", level: "info", text: `下载完成，正在准备上传到 ${asrDisplayName}...`, progress: 56, bvid });
             const audioFetchMs = Date.now() - audioFetchStartedAt;
             const audioDigest = await summarizeAudioBlob(audioBlob);
             assertAsrAudioNotReused(bvid, audioDigest, {
@@ -1165,15 +1230,17 @@ class ContentProvider {
                 throw createAppError("ASR_FILE_TOO_LARGE", `该视频音轨文件大小超出限制（>=${limitMb}MB），目前暂不支持`);
             }
             const audioFile = new File([audioBlob], "audio.m4a", { type: audioBlob.type || "audio/mp4" });
-            await updateTabState(tabId, { transcriptionProgress: 55, updatedAt: Date.now() });
+            await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 55, updatedAt: Date.now() });
             
             let fakeProgress = 55;
             await notifyTranscribeStatus(tabId, { stage: "upload", level: "info", text: `正在上传音轨到 ${asrDisplayName}...`, progress: fakeProgress, bvid });
             
+            let uploadStageActive = true;
             const progressTimer = setInterval(() => {
+                if (!uploadStageActive || operationController.signal.aborted) return;
                 const inc = 2 + Math.floor(Math.random() * 2); // 2-3%
                 fakeProgress = Math.min(88, fakeProgress + inc);
-                updateTabState(tabId, { transcriptionProgress: fakeProgress, updatedAt: Date.now() }).catch(() => {});
+                updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: fakeProgress, updatedAt: Date.now() }).catch(() => {});
                 notifyTranscribeStatus(tabId, { 
                     stage: "upload", 
                     level: "info", 
@@ -1187,8 +1254,8 @@ class ContentProvider {
             const asrRequestStartedAt = Date.now();
             try {
                 transcription = asrProvider === "siliconflow"
-                    ? await this.requestSiliconFlowTranscription(audioFile, asrApiKey, asrModel, tabId, bvid)
-                    : await this.requestGroqTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, title || media.title || "");
+                    ? await this.requestSiliconFlowTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, operationController.signal)
+                    : await this.requestGroqTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, title || media.title || "", operationController.signal);
                 logASR.info("asr_request_success", {
                     bvid,
                     task: "asr",
@@ -1203,11 +1270,12 @@ class ContentProvider {
                     }
                 });
             } finally {
+                uploadStageActive = false;
                 clearInterval(progressTimer);
             }
 
             await notifyTranscribeStatus(tabId, { stage: "parse", level: "info", text: `${asrDisplayName} 正在解析中文字幕...`, progress: 90, bvid });
-            await updateTabState(tabId, { transcriptionProgress: 90, updatedAt: Date.now() });
+            await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 90, updatedAt: Date.now() });
             const rows = this.mapTranscriptionToRows(transcription.data, { noTimestamp: asrProvider === "siliconflow" });
             if (!rows.length) throw new Error("转录返回为空，未生成可用字幕");
             await handleSubtitleCaptured(tabId, {
@@ -1218,7 +1286,7 @@ class ContentProvider {
                 subtitle: rows,
                 source: subtitleSource
             });
-            await updateTabState(tabId, { subtitleSource, transcriptionProgress: 100, updatedAt: Date.now() });
+            await updateTabState(tabId, { activeBvid: bvid, subtitleSource, transcriptionProgress: 100, updatedAt: Date.now() });
             await notifyTranscribeStatus(tabId, {
                 stage: "done",
                 level: "success",
@@ -1249,7 +1317,14 @@ class ContentProvider {
             });
             return { rows: rows.length, quota: transcription.quota };
         } catch (error) {
-            await updateTabState(tabId, { transcriptionProgress: 0, updatedAt: Date.now() });
+            await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 0, updatedAt: Date.now() });
+            await notifyTranscribeStatus(tabId, {
+                stage: "error",
+                level: "error",
+                text: error?.message || "转录失败，请重试",
+                progress: 0,
+                bvid
+            });
             await reportDailyFeatureUsage("transcribe", normalizedSettings, {
                 durationMs: Date.now() - startedAt,
                 tokens: 0
@@ -1270,6 +1345,8 @@ class ContentProvider {
                 }
             }));
             throw error;
+        } finally {
+            unregisterAbort();
         }
     }
 
@@ -1350,7 +1427,7 @@ class ContentProvider {
         return results?.[0]?.result || null;
     }
 
-    static async fetchResourceToBlob(url, tabId, bvid = "", skipSizeCheck = false, maxBytes = GROQ_MAX_AUDIO_BYTES) {
+    static async fetchResourceToBlob(url, tabId, bvid = "", skipSizeCheck = false, maxBytes = GROQ_MAX_AUDIO_BYTES, signal = null) {
         const response = await fetch(url, {
             method: "GET",
             credentials: "omit",
@@ -1358,7 +1435,8 @@ class ContentProvider {
             headers: {
                 "Referer": "https://www.bilibili.com/",
                 "User-Agent": navigator.userAgent
-            }
+            },
+            signal
         });
         if (!response.ok) {
             if (response.status === 403) throw createAppError("DOWNLOAD_FAILED", "资源下载失败：CDN 返回 403，可能是付费/受限内容", { status: 403 });
@@ -1418,7 +1496,7 @@ class ContentProvider {
         return blob;
     }
 
-    static async requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid = "", videoTitle = "") {
+    static async requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid = "", videoTitle = "", externalSignal = null) {
         const formData = new FormData();
         formData.append("file", audioFile);
         formData.append("model", groqModel);
@@ -1426,6 +1504,11 @@ class ContentProvider {
         formData.append("prompt", buildGroqTranscriptionPrompt(videoTitle));
         formData.append("timestamp_granularities[]", "segment");
         const controller = new AbortController();
+        const forwardAbort = () => controller.abort(externalSignal?.reason || "aborted");
+        if (externalSignal) {
+            if (externalSignal.aborted) forwardAbort();
+            else externalSignal.addEventListener("abort", forwardAbort, { once: true });
+        }
         const timeoutId = setTimeout(() => controller.abort("timeout"), TASK_TIMEOUT_MS);
         let response;
         try {
@@ -1437,10 +1520,12 @@ class ContentProvider {
             });
         } catch (error) {
             if (controller.signal.aborted) {
-                throw createTaskTimeoutError();
+                if (controller.signal.reason === "timeout") throw createTaskTimeoutError();
+                throw createUserAbortedError();
             }
             throw error;
         } finally {
+            if (externalSignal) externalSignal.removeEventListener("abort", forwardAbort);
             clearTimeout(timeoutId);
         }
         const quota = parseGroqQuotaHeaders(response.headers);
@@ -1490,11 +1575,16 @@ class ContentProvider {
         return { data, quota };
     }
 
-    static async requestSiliconFlowTranscription(audioFile, apiKey, model, tabId, bvid = "") {
+    static async requestSiliconFlowTranscription(audioFile, apiKey, model, tabId, bvid = "", externalSignal = null) {
         const formData = new FormData();
         formData.append("file", audioFile);
         formData.append("model", model || "FunAudioLLM/SenseVoiceSmall");
         const controller = new AbortController();
+        const forwardAbort = () => controller.abort(externalSignal?.reason || "aborted");
+        if (externalSignal) {
+            if (externalSignal.aborted) forwardAbort();
+            else externalSignal.addEventListener("abort", forwardAbort, { once: true });
+        }
         const timeoutId = setTimeout(() => controller.abort("timeout"), TASK_TIMEOUT_MS);
         let response;
         try {
@@ -1506,10 +1596,12 @@ class ContentProvider {
             });
         } catch (error) {
             if (controller.signal.aborted) {
-                throw createTaskTimeoutError();
+                if (controller.signal.reason === "timeout") throw createTaskTimeoutError();
+                throw createUserAbortedError();
             }
             throw error;
         } finally {
+            if (externalSignal) externalSignal.removeEventListener("abort", forwardAbort);
             clearTimeout(timeoutId);
         }
         if (!response.ok) {
@@ -1840,7 +1932,7 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
     const startedAt = Date.now();
     logBackground.info("task_start", { tab_id: tabId, bvid, task });
     try {
-        const result = await runWithDedup(key, () => requestTaskResult(bvid, task, settings, taskContext));
+        const result = await runWithDedup(key, () => requestTaskResult(bvid, task, settings, { ...taskContext, tabId }));
         await mergeCacheByBvid(bvid, {
             [task]: result,
             ...buildTaskSourcePatch([task], "local"),
@@ -1940,7 +2032,7 @@ async function runChatForTab(tabId, text, messageId) {
             const conversation = recent.map((item) => `${item.role === "assistant" ? "助手" : "用户"}：${item.content}`).join("\n");
             const prompt = `你是 B 站视频助手。基于字幕回答用户的问题，回答要准确、简洁。\n字幕：\n${subtitleText}\n历史：\n${conversation}\n用户问题：${text}`;
             logAIPromptBuilt({ bvid, task: "chat", provider: resolvedSettings.provider, mode: "chat", prompt, promptSettings: resolvedSettings.promptSettings });
-            const aiRes = await callAIWithTimeout(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS);
+            const aiRes = await callAIWithTimeout(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, { tabId });
             lastMetrics = aiRes.metrics || null;
             await appendMetrics(bvid, tabId, "chat", aiRes.metrics);
             await reportFeatureUsage("chat", bvid, resolvedSettings, aiRes.metrics);
@@ -2006,7 +2098,7 @@ async function runChatForPort(port, msg) {
             const aiRes = await callAIWithTimeoutStream(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, (delta) => {
                 safePortPost(port, { type: "delta", messageId, delta });
 
-            }, abortController);
+            }, abortController, { tabId });
             lastMetrics = aiRes.metrics || null;
             await appendMetrics(bvid, tabId, "chat", aiRes.metrics);
             await reportFeatureUsage("chat", bvid, resolvedSettings, aiRes.metrics);
@@ -2093,7 +2185,7 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
             pref_mode: settings.prefMode || ""
         }
     });
-    const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS);
+    const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, { tabId: context.tabId });
     logAI.info("ai_request_success", {
         bvid,
         task,
@@ -2291,7 +2383,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                     partialWritePromise = partialWritePromise
                         .catch(() => {})
                         .then(() => writeStreamingSummaryPartial(streamedSummaryText, partialState, false));
-                });
+                }, null, { tabId });
                 await partialWritePromise.catch(() => {});
                 const summaryText = String(aiRes.text || "").trim();
                 if (!summaryText) throw new Error("总结生成为空");
@@ -2363,7 +2455,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                         pref_mode: settings.prefMode || ""
                     }
                 });
-                const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: segmentsPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true });
+                const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: segmentsPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
                 const parsed = robustJSONParse(aiRes.text);
                 const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "quality" });
                 if (!normalized.length) throw createAppError("JSON_PARSE_ERROR", "分段 JSON 解析失败");
@@ -2509,7 +2601,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             summaryApplied = true;
             results.summary = { ok: true, data: summaryText, error: null };
             summaryApplyPromise = applySummarySegmentsResults(tabId, bvid, { summary: results.summary }, { keepProcessingTasks: ["segments"] });
-        });
+        }, null, { tabId });
         await summaryApplyPromise;
         const fullText = String(streamBuffer || aiRes.text || "");
         logAI.debug("ai_stream_buffer_summary", {
@@ -3239,8 +3331,15 @@ function createTaskTimeoutError() {
     return createAppError("TIMEOUT", "任务超时，请重试~");
 }
 
+function createUserAbortedError() {
+    const error = new Error("已停止生成");
+    error.code = "ABORTED";
+    return error;
+}
+
 async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
     const controller = new AbortController();
+    const unregister = registerTabAbortController(options?.tabId, controller);
     const timeoutId = setTimeout(() => controller.abort("timeout"), timeoutMs);
     const start = performance.now();
     try {
@@ -3269,6 +3368,9 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
             model: settings.model || ""
         }));
         if (controller.signal.aborted) {
+            if (controller.signal.reason === "aborted") {
+                throw createUserAbortedError();
+            }
             const timeoutError = createTaskTimeoutError();
             logAI.error("ai_request_timeout", buildFailureLog(timeoutError, {
                 task: "ai",
@@ -3280,16 +3382,28 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
         }
         throw error;
     } finally {
+        unregister();
         clearTimeout(timeoutId);
     }
 }
 
-async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, externalController) {
+async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, externalController, options = {}) {
     const controller = externalController || new AbortController();
-    const timeoutId = setTimeout(() => controller.abort("timeout"), timeoutMs);
+    const unregister = externalController ? () => {} : registerTabAbortController(options?.tabId, controller);
+    let firstResponseReceived = false;
+    const timeoutId = setTimeout(() => {
+        if (!firstResponseReceived) controller.abort("timeout");
+    }, timeoutMs);
     const start = performance.now();
     try {
-        const res = await runQueued(() => callAIStream(settings.provider, settings, messages, controller.signal, onDelta));
+        const wrappedOnDelta = (delta) => {
+            if (!firstResponseReceived) {
+                firstResponseReceived = true;
+                clearTimeout(timeoutId);
+            }
+            if (typeof onDelta === "function") onDelta(delta);
+        };
+        const res = await runQueued(() => callAIStream(settings.provider, settings, messages, controller.signal, wrappedOnDelta));
         const latencyMs = Math.round(performance.now() - start);
         const tokenInfo = resolveTokenInfo(res.usage, res.text, messages);
         const modelScopeRemaining = res.headers?.get?.("modelscope-ratelimit-model-requests-remaining") ?? null;
@@ -3303,15 +3417,14 @@ async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, e
     } catch (error) {
         if (controller.signal.aborted) {
             if (controller.signal.reason === "aborted") {
-                const aborted = new Error("已停止生成");
-                aborted.code = "ABORTED";
-                throw aborted;
+                throw createUserAbortedError();
             }
             const timeoutError = createTaskTimeoutError();
             throw timeoutError;
         }
         throw error;
     } finally {
+        unregister();
         clearTimeout(timeoutId);
     }
 }

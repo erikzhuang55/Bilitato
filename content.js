@@ -90,6 +90,15 @@ function isDebugLoggingEnabled() {
     return !!(IS_DEBUG_MODE || appState?.settings?.debugMode);
 }
 
+function abortBackgroundOperations(reason = "page_unload") {
+    try {
+        chrome.runtime.sendMessage({ action: "ABORT_TAB_OPERATIONS", reason }).catch?.(() => {});
+    } catch (_) {}
+}
+
+window.addEventListener("pagehide", () => abortBackgroundOperations("pagehide"));
+window.addEventListener("beforeunload", () => abortBackgroundOperations("beforeunload"));
+
 const UI_ICON_BASE_DIR = "assets/ui";
 const FOLLOW_RESUME_MS = 5000;
 const SUBTITLE_CHECK_DELAY_MS = 1000;
@@ -123,6 +132,7 @@ const appState = {
     chatPort: null,
     chatActiveMessageId: "",
     debugLogPollTimer: null,
+    asrUiTraceLogs: [],
     chatAutoScrollPausedUntil: 0,
     pendingSubtitle: null,
     timelineSearchTerm: "",
@@ -145,6 +155,15 @@ const appState = {
         bvid: "",
         progress: 0,
         statusText: ""
+    },
+    asrSession: {
+        active: false,
+        bvid: "",
+        runId: "",
+        stage: "",
+        progress: 0,
+        statusText: "",
+        startedAt: 0
     },
     transcriptionDeclinedBvid: "",
     transcriptionSuppressUntil: 0,
@@ -184,6 +203,10 @@ const appState = {
     expandedSummaryHeight: 0,
     isCollapsed: false,
     segmentsCollapsed: false,
+    localPending: {
+        tasks: {},
+        transcription: false
+    },
     playInfo: null,
     playInfoUpdatedAt: 0,
     isPlayInfoReady: false,
@@ -205,6 +228,124 @@ function getTranscriptionState() {
         ...getDefaultTranscriptionState(),
         ...(appState.transcription || {})
     };
+}
+
+function getStableCurrentBvid() {
+    return normalizeBvidCase(
+        resolveCurrentBvid() ||
+        getBvidFromUrl(location.href) ||
+        appState.injectBvid ||
+        appState.tabState?.activeBvid ||
+        appState.cache?.bvid ||
+        ""
+    );
+}
+
+function isAsrSessionActiveForCurrent(targetBvid = "") {
+    const session = appState.asrSession || {};
+    if (!session.active) return false;
+    const currentBvid = normalizeBvidCase(targetBvid || getStableCurrentBvid() || "");
+    const sessionBvid = normalizeBvidCase(session.bvid || "");
+    return !currentBvid || !sessionBvid || currentBvid === sessionBvid;
+}
+
+function beginAsrSession({ bvid = "", runId = "", statusText = "正在请求转录...", progress = 0, stage = "start" } = {}) {
+    const normalizedBvid = normalizeBvidCase(bvid || getStableCurrentBvid() || "");
+    appState.asrSession = {
+        active: true,
+        bvid: normalizedBvid,
+        runId: String(runId || ""),
+        stage: String(stage || "start"),
+        progress: Math.max(0, Math.min(100, Number(progress) || 0)),
+        statusText: String(statusText || "正在请求转录..."),
+        startedAt: Date.now()
+    };
+    setLocalPendingTranscription(true, normalizedBvid);
+    logAsrUiTrace("session_begin", {
+        bvid: normalizedBvid,
+        run_id: appState.asrSession.runId,
+        stage: appState.asrSession.stage,
+        progress: appState.asrSession.progress,
+        status_text: appState.asrSession.statusText
+    });
+    return appState.asrSession;
+}
+
+function updateAsrSession(patch = {}) {
+    const current = appState.asrSession || {};
+    const patchBvid = normalizeBvidCase(patch.bvid || "");
+    const currentBvid = normalizeBvidCase(current.bvid || "");
+    if (!current.active && !patchBvid && !currentBvid) return current;
+    if (current.active && patchBvid && currentBvid && patchBvid !== currentBvid) return current;
+    const incomingProgress = Number(patch.progress);
+    const nextProgress = Number.isFinite(incomingProgress)
+        ? Math.max(Number(current.progress || 0), Math.max(0, Math.min(100, incomingProgress)))
+        : Number(current.progress || 0);
+    appState.asrSession = {
+        active: patch.active ?? current.active ?? true,
+        bvid: patchBvid || currentBvid || getStableCurrentBvid(),
+        runId: String(patch.runId ?? current.runId ?? ""),
+        stage: String(patch.stage ?? current.stage ?? ""),
+        progress: nextProgress,
+        statusText: String(patch.statusText ?? current.statusText ?? ""),
+        startedAt: Number(current.startedAt || Date.now())
+    };
+    if (appState.asrSession.active) setLocalPendingTranscription(true, appState.asrSession.bvid);
+    logAsrUiTrace("session_update", {
+        patch,
+        before: {
+            active: !!current.active,
+            bvid: current.bvid || "",
+            stage: current.stage || "",
+            progress: Number(current.progress || 0),
+            status_text: current.statusText || ""
+        },
+        after: {
+            active: !!appState.asrSession.active,
+            bvid: appState.asrSession.bvid || "",
+            stage: appState.asrSession.stage || "",
+            progress: Number(appState.asrSession.progress || 0),
+            status_text: appState.asrSession.statusText || ""
+        }
+    });
+    return appState.asrSession;
+}
+
+function clearAsrSession() {
+    const before = { ...(appState.asrSession || {}) };
+    appState.asrSession = {
+        active: false,
+        bvid: "",
+        runId: "",
+        stage: "",
+        progress: 0,
+        statusText: "",
+        startedAt: 0
+    };
+    setLocalPendingTranscription(false);
+    logAsrUiTrace("session_clear", {
+        before: {
+            active: !!before.active,
+            bvid: before.bvid || "",
+            stage: before.stage || "",
+            progress: Number(before.progress || 0),
+            status_text: before.statusText || ""
+        }
+    });
+}
+
+function logAsrUiTrace(event, detail = {}) {
+    const entry = {
+        time: new Date().toISOString(),
+        event: String(event || "asr_ui_trace"),
+        detail: detail && typeof detail === "object" ? detail : { value: detail }
+    };
+    const nextLogs = Array.isArray(appState.asrUiTraceLogs) ? [...appState.asrUiTraceLogs, entry] : [entry];
+    appState.asrUiTraceLogs = nextLogs.slice(-300);
+    const box = panelShadowRoot ? panelShadowRoot.getElementById("debug-asr-ui-log-body") : null;
+    if (box && appState.activePage === "debug") {
+        renderAsrUiTraceData();
+    }
 }
 
 function patchTranscriptionState(patch = {}) {
@@ -235,12 +376,86 @@ function resetTranscriptionState(patch = {}) {
     return appState.transcription;
 }
 
-function isTranscriptionRunning() {
-    return getTranscriptionState().phase === "running";
-}
-
 function getTranscriptionBvid() {
     return normalizeBvidCase(getTranscriptionState().bvid || "");
+}
+
+function isLocalPendingTranscriptionForCurrent(targetBvid = "") {
+    const value = appState.localPending?.transcription;
+    if (!value) return false;
+    if (value === true) return true;
+    const currentBvid = normalizeBvidCase(targetBvid || getStableCurrentBvid() || "");
+    const pendingBvid = normalizeBvidCase(value || "");
+    return !currentBvid || !pendingBvid || currentBvid === pendingBvid;
+}
+
+function isTranscriptionRunning() {
+    const state = getTranscriptionState();
+    return isAsrSessionActiveForCurrent() || isLocalPendingTranscriptionForCurrent() || state.phase === "running";
+}
+
+function hasLocalPendingTask(task) {
+    const value = appState.localPending?.tasks?.[task];
+    if (!value) return false;
+    if (value === true) return true;
+    const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    const pendingBvid = normalizeBvidCase(value || "");
+    return !currentBvid || !pendingBvid || currentBvid === pendingBvid;
+}
+
+function hasLocalPendingTasks(tasks) {
+    return (Array.isArray(tasks) ? tasks : []).some((task) => hasLocalPendingTask(task));
+}
+
+function setLocalPendingTasks(tasks, value) {
+    const nextTasks = { ...(appState.localPending?.tasks || {}) };
+    const pendingBvid = normalizeBvidCase(resolveCurrentBvid() || "") || true;
+    (Array.isArray(tasks) ? tasks : []).forEach((task) => {
+        if (!task) return;
+        if (value) nextTasks[task] = pendingBvid;
+        else delete nextTasks[task];
+    });
+    appState.localPending = {
+        ...(appState.localPending || {}),
+        tasks: nextTasks
+    };
+}
+
+function setLocalPendingTranscription(value, bvid = "") {
+    appState.localPending = {
+        ...(appState.localPending || {}),
+        transcription: value ? (normalizeBvidCase(bvid || resolveCurrentBvid() || "") || true) : false
+    };
+}
+
+function mergeIncomingTabState(incomingTabState) {
+    if (!incomingTabState || typeof incomingTabState !== "object") return;
+    const incomingBvid = normalizeBvidCase(incomingTabState?.activeBvid || "");
+    const runningBvid = normalizeBvidCase(appState.asrSession?.bvid || getTranscriptionBvid() || appState.injectBvid || "");
+    const keepRunningTranscriptionState = isTranscriptionRunning()
+        && runningBvid
+        && (!incomingBvid || incomingBvid === runningBvid);
+    if (!keepRunningTranscriptionState) {
+        appState.tabState = incomingTabState;
+        return;
+    }
+    const currentProgress = Math.max(
+        Number(appState.tabState?.transcriptionProgress || 0),
+        Number(getTranscriptionState().progress || 0),
+        Number(appState.asrSession?.progress || 0)
+    );
+    const incomingProgress = Number(incomingTabState?.transcriptionProgress || 0);
+    appState.tabState = {
+        ...incomingTabState,
+        activeBvid: incomingBvid || runningBvid,
+        transcriptionProgress: Math.max(currentProgress, incomingProgress)
+    };
+    logAsrUiTrace("tab_state_preserved_during_asr", {
+        incoming_bvid: incomingBvid,
+        preserved_bvid: appState.tabState.activeBvid,
+        incoming_progress: incomingProgress,
+        preserved_progress: appState.tabState.transcriptionProgress
+    });
 }
 function toErrorInput(error, fallbackMessage = "请求失败") {
     return {
@@ -483,6 +698,18 @@ async function onInjectMessage(event) {
 function onStorageChanged(changes, areaName) {
     if (areaName !== "local") return;
     logContent.debug("storage_listener_trigger", { keys: Object.keys(changes || {}) });
+    logAsrUiTrace("storage_changed", {
+        keys: Object.keys(changes || {}),
+        tab_state_key: getTabStateKey(),
+        active_bvid_before: normalizeBvidCase(appState.tabState?.activeBvid || ""),
+        tab_progress_before: Number(appState.tabState?.transcriptionProgress || 0),
+        session: {
+            active: !!appState.asrSession?.active,
+            bvid: appState.asrSession?.bvid || "",
+            stage: appState.asrSession?.stage || "",
+            progress: Number(appState.asrSession?.progress || 0)
+        }
+    });
     const beforeBvid = normalizeBvidCase(appState.tabState?.activeBvid);
     const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href));
     const tabStateBefore = appState.tabState;
@@ -500,12 +727,12 @@ function onStorageChanged(changes, areaName) {
         }
     }
     const tabKey = getTabStateKey();
-    if (tabKey && changes[tabKey]?.newValue) appState.tabState = changes[tabKey].newValue;
+    if (tabKey && changes[tabKey]?.newValue) mergeIncomingTabState(changes[tabKey].newValue);
     const afterBvid = normalizeBvidCase(appState.tabState?.activeBvid);
     const activeCid = Number(appState.tabState?.activeCid || 0);
     const routeMismatch = !!(routeBvid && afterBvid && String(afterBvid) !== routeBvid);
-    const switched = !!(beforeBvid && beforeBvid !== afterBvid);
-    if (beforeBvid && beforeBvid !== afterBvid) {
+    const switched = !!(beforeBvid && afterBvid && beforeBvid !== afterBvid);
+    if (switched) {
         pushSubtitleTimeline("bvid_switch", { from: beforeBvid, to: afterBvid || "" });
         resetPageStateByBvidSwitch();
         clearStreamCache();
@@ -864,6 +1091,7 @@ function scheduleStepProgressTimeout(taskId) {
     }
     appState.progressTimeoutTimer = setTimeout(() => {
         if (appState.progressTaskId !== taskId) return;
+        if (String(taskId || "").startsWith("transcribe:") && isAsrSessionActiveForCurrent()) return;
         updateProgress(0, taskId, { force: true });
     }, STEP_PROGRESS_TIMEOUT_MS);
 }
@@ -892,10 +1120,22 @@ function scheduleProgressFadeOut(taskId) {
 
 function updateProgress(percent, taskId, options) {
     const bar = panelShadowRoot ? panelShadowRoot.getElementById("step-progress-bar") : null;
-    if (!bar) return;
 
     const opts = options && typeof options === "object" ? options : {};
     const nextTaskId = String(taskId || "global");
+    const previousTaskId = String(appState.progressTaskId || "");
+    const previousPercent = Number(appState.progressLastPercent || 0);
+
+    if (!bar) {
+        logAsrUiTrace("progress_skip_no_bar", {
+            requested_percent: Number(percent) || 0,
+            task_id: nextTaskId,
+            options: opts,
+            previous_task_id: previousTaskId,
+            previous_percent: previousPercent
+        });
+        return;
+    }
 
     let clamped = Math.max(0, Math.min(100, Number(percent) || 0));
 
@@ -915,6 +1155,23 @@ function updateProgress(percent, taskId, options) {
     ) {
         clamped = Number(appState.progressLastPercent || clamped);
     }
+
+    logAsrUiTrace("progress_update", {
+        requested_percent: Number(percent) || 0,
+        final_percent: clamped,
+        task_id: nextTaskId,
+        previous_task_id: previousTaskId,
+        previous_percent: previousPercent,
+        same_task: sameTask,
+        has_active_task: hasActiveTask,
+        options: opts,
+        session: {
+            active: !!appState.asrSession?.active,
+            bvid: appState.asrSession?.bvid || "",
+            stage: appState.asrSession?.stage || "",
+            progress: Number(appState.asrSession?.progress || 0)
+        }
+    });
 
     // 记录当前任务的最大进度
     appState.progressTaskId = nextTaskId;
@@ -1956,9 +2213,11 @@ function renderCC(panel, rowsOverride) {
 
     const transcription = getTranscriptionState();
 
-    const currentBvidForProgress = normalizeBvidCase(resolveCurrentBvid() || "");
+    const currentBvidForProgress = normalizeBvidCase(currentBvid || getStableCurrentBvid() || "");
     const tabStateBvidForProgress = normalizeBvidCase(appState.tabState?.activeBvid || "");
     const transcriptionBvidForProgress = normalizeBvidCase(transcription.bvid || "");
+    const pendingTranscriptionForCurrent = isLocalPendingTranscriptionForCurrent(currentBvidForProgress);
+    const asrSessionForCurrent = isAsrSessionActiveForCurrent(currentBvidForProgress);
 
     const tabProgressBelongsToCurrent =
         !!currentBvidForProgress &&
@@ -1967,8 +2226,10 @@ function renderCC(panel, rowsOverride) {
 
     const localProgressBelongsToCurrent =
         !!currentBvidForProgress &&
-        !!transcriptionBvidForProgress &&
-        currentBvidForProgress === transcriptionBvidForProgress;
+        (
+            (!!transcriptionBvidForProgress && currentBvidForProgress === transcriptionBvidForProgress) ||
+            pendingTranscriptionForCurrent
+        );
 
     const stateProgress = tabProgressBelongsToCurrent
         ? Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? 0)))
@@ -1978,15 +2239,20 @@ function renderCC(panel, rowsOverride) {
         ? Math.max(0, Math.min(100, Number(transcription.progress ?? 0)))
         : 0;
 
-    const running = isTranscriptionRunning() && localProgressBelongsToCurrent;
-    const progress = running ? Math.max(stateProgress, localProgress) : 0;
+    const running = asrSessionForCurrent || ((isTranscriptionRunning() || pendingTranscriptionForCurrent) && localProgressBelongsToCurrent);
+    const sessionProgress = asrSessionForCurrent
+        ? Math.max(0, Math.min(100, Number(appState.asrSession?.progress ?? 0)))
+        : 0;
+    const progress = running ? Math.max(stateProgress, localProgress, sessionProgress) : 0;
 
     const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
     const isNoTimestampSubtitle = subtitleSource === "siliconflow" || subtitleSource === "funasr";
     const shouldShowRegenerate = rows.length > 0 && isAsrSubtitle && !running;
 
     const subtitleCacheSource = String(appState.cache?.subtitleCacheSource || "").toLowerCase();
-    const sourceText = rows.length
+    const sourceText = running
+        ? (appState.asrSession?.statusText || transcription.statusText || "正在转录音轨...")
+        : rows.length
         ? (subtitleCacheSource === "cloud" ? "云端缓存" : (isAsrSubtitle ? "ASR转录生成" : "官方AI字幕"))
         : "未检测到字幕";
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
@@ -1997,6 +2263,23 @@ function renderCC(panel, rowsOverride) {
     const controlCenterHtml = `<div class="transcription-control-center"><div class="cc-transcribe-head">${searchBoxHtml}<div class="cc-header-right"><div class="cc-transcribe-status">${escapeHtml(sourceText)}</div><div class="cc-transcribe-actions">${regenBtnHtml}</div></div></div>${(rows.length > 0 || running) ? progressBarHtml : ''}</div>`;
 
     if (rows.length > 0) {
+        logAsrUiTrace("cc_render", {
+            mode: "rows",
+            rows: rows.length,
+            current_bvid: currentBvidForProgress,
+            cache_bvid: cacheBvid,
+            running,
+            progress,
+            button_disabled: true,
+            button_text: "字幕列表",
+            source_text: sourceText,
+            tab_progress: stateProgress,
+            local_progress: localProgress,
+            session_progress: sessionProgress,
+            session_active: asrSessionForCurrent,
+            transcription_bvid: transcriptionBvidForProgress,
+            tab_state_bvid: tabStateBvidForProgress
+        });
         const rowsHtml = rows.map((row, index) => {
             const start = Number(row?.start ?? row?.from ?? 0);
             const end = row?.end ?? row?.to ?? "";
@@ -2036,14 +2319,49 @@ function renderCC(panel, rowsOverride) {
         const capsuleDisabled = (running || isDetectingSubtitle) ? "disabled" : "";
         const statusText = isDetectingSubtitle
             ? "正在读取字幕，请稍候..."
-            : ((running && transcription.statusText)
-                ? escapeHtml(transcription.statusText)
+            : ((running && (appState.asrSession?.statusText || transcription.statusText))
+                ? escapeHtml(appState.asrSession?.statusText || transcription.statusText)
                 : "未检测到字幕，可开启在线转录");
+        const buttonText = running ? "转录中..." : (isDetectingSubtitle ? "检测中..." : "开始在线转录");
+        logAsrUiTrace("cc_render", {
+            mode: "empty",
+            rows: rows.length,
+            current_bvid: currentBvidForProgress,
+            cache_bvid: cacheBvid,
+            cache_ready_for_current: cacheReadyForCurrent,
+            running,
+            progress,
+            is_detecting_subtitle: isDetectingSubtitle,
+            detect_elapsed_ms: detectElapsedMs,
+            detect_timeout_reached: detectTimeoutReached,
+            button_disabled: !!capsuleDisabled,
+            button_text: buttonText,
+            status_text: statusText.replace(/<[^>]*>/g, ""),
+            source_text: sourceText,
+            tab_progress: stateProgress,
+            local_progress: localProgress,
+            session_progress: sessionProgress,
+            session_active: asrSessionForCurrent,
+            session: {
+                active: !!appState.asrSession?.active,
+                bvid: appState.asrSession?.bvid || "",
+                stage: appState.asrSession?.stage || "",
+                progress: Number(appState.asrSession?.progress || 0),
+                status_text: appState.asrSession?.statusText || ""
+            },
+            transcription: {
+                phase: transcription.phase || "",
+                bvid: transcriptionBvidForProgress,
+                progress: Number(transcription.progress || 0),
+                status_text: transcription.statusText || ""
+            },
+            tab_state_bvid: tabStateBvidForProgress
+        });
             
         const capsuleHtml = `<div class="subtitle-empty-container">
             <div class="action-container">
                 <p class="action-tip">${statusText}</p>
-                <button id="start-groq-transcribe" class="action-btn" data-action="transcription-start" ${capsuleDisabled}>${running ? "转录中..." : (isDetectingSubtitle ? "检测中..." : "开始在线转录")}</button>
+                <button id="start-groq-transcribe" class="action-btn" data-action="transcription-start" ${capsuleDisabled}>${buttonText}</button>
             </div>
         </div>`;
         panel.innerHTML = `
@@ -3228,12 +3546,14 @@ function renderDebugPanel(panel) {
         <div class="page-body debug-page-body">
             ${renderSegmentPromptDebugControls()}
             ${renderSubtitleEmptyDemoControls()}
+            ${renderAsrUiTracePanel()}
             ${renderErrorDemoControls()}
             ${renderRealtimeLogPanel()}
         </div>
     `;
     bindSegmentPromptDebugControls(panel);
     bindRealtimeLogPanel(panel);
+    renderAsrUiTraceData();
     renderRealtimeLogData();
     startRealtimeLogPolling();
 }
@@ -3300,6 +3620,22 @@ function renderRealtimeLogPanel() {
     `;
 }
 
+function renderAsrUiTracePanel() {
+    return `
+        <div class="settings-group-title">转录 UI 状态日志</div>
+        <div class="debug-log-panel">
+            <div class="debug-log-toolbar">
+                <span class="debug-log-status" id="debug-asr-ui-log-status">本页本地记录</span>
+                <div class="debug-log-actions">
+                    <button type="button" class="panel-btn ghost" data-action="debug-asr-ui-copy">复制</button>
+                    <button type="button" class="panel-btn ghost" data-action="debug-asr-ui-clear">清空</button>
+                </div>
+            </div>
+            <pre class="debug-log-body debug-asr-ui-log-body" id="debug-asr-ui-log-body">暂无转录 UI 状态日志。</pre>
+        </div>
+    `;
+}
+
 function bindRealtimeLogPanel(panel) {
     if (!panel) return;
     panel.querySelector('[data-action="debug-logs-refresh"]')?.addEventListener("click", () => {
@@ -3311,18 +3647,29 @@ function bindRealtimeLogPanel(panel) {
     panel.querySelector('[data-action="debug-logs-clear"]')?.addEventListener("click", () => {
         clearRealtimeLogs();
     });
+    panel.querySelector('[data-action="debug-asr-ui-copy"]')?.addEventListener("click", () => {
+        copyAsrUiTraceData();
+    });
+    panel.querySelector('[data-action="debug-asr-ui-clear"]')?.addEventListener("click", () => {
+        clearAsrUiTraceData();
+    });
 }
 
 async function runTasks(tasks) {
+    if (hasLocalPendingTasks(tasks)) return;
+    setLocalPendingTasks(tasks, true);
+    renderContent();
     // Check for subtitle existence before running summary or segments
     if (!canRunTasksWithCache(tasks, resolveCurrentBvid(), appState.cache)) {
         const currentBvid = resolveCurrentBvid();
         if (needsSubtitleForTasks(tasks) && currentBvid) {
             const synced = await syncCacheFromBackgroundWithRetry(currentBvid, 3, 120, { skipCloud: false });
             if (synced && canRunTasksWithCache(tasks, currentBvid, appState.cache)) {
+                setLocalPendingTasks(tasks, false);
                 return runTasks(tasks);
             }
         }
+        setLocalPendingTasks(tasks, false);
         if (!currentBvid || normalizeBvidCase(appState.cache?.bvid || "") !== normalizeBvidCase(currentBvid) || !hasSubtitleInCache(appState.cache)) {
             if (currentBvid) {
                 appState.cloudReadState = createCloudReadState(
@@ -3373,6 +3720,9 @@ async function runTasks(tasks) {
         const view = setPanelError(targetPage, error, error.message || "任务失败");
         if (view?.presentation === "toast") showToast(view.message);
         else renderContent();
+    } finally {
+        setLocalPendingTasks(tasks, false);
+        renderContent();
     }
 }
 
@@ -3663,6 +4013,7 @@ function resetPageStateByBvidSwitch() {
     appState.lastSubtitleForwardAt = 0;
     appState.subtitleTimeline = [];
     resetTranscriptionState();
+    clearAsrSession();
     appState.transcriptionDeclinedBvid = "";
     appState.transcriptionSuppressUntil = 0;
     appState.transcriptionCapsuleVisible = false;
@@ -3731,6 +4082,7 @@ function resetAllState() {
 
     appState.subtitleDomDetected = false;
     resetTranscriptionState();
+    clearAsrSession();
     appState.subtitleObserveUntil = 0;
     appState.subtitleCheckTargetBvid = "";
     appState.expandedSummaryHeight = 0;
@@ -4915,6 +5267,13 @@ async function startTranscriptionFromCapsule() {
         return;
     }
     const asrRunId = `asr_${bvid}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    beginAsrSession({
+        bvid,
+        runId: asrRunId,
+        progress: 10,
+        statusText: "正在请求转录...",
+        stage: "start"
+    });
     const preparedAudioUrl = appState.playInfo?.audio?.[0]?.url || "";
     logContent.info("asr_start_clicked", {
         task: "asr",
@@ -4947,11 +5306,12 @@ async function startTranscriptionFromCapsule() {
     patchTranscriptionState({
         phase: "running",
         bvid,
-        progress: 0,
+        progress: 10,
         statusText: "正在请求转录..."
     });
     appState.transcriptionCapsuleVisible = true;
     updateProgress(10, progressTaskId, { force: true });
+    renderContent();
     renderSubtitleTimelinePanel(document.getElementById("panel-body"));
     try {
         const freshPlayInfo = await ensureAsrPlayInfoForBvid(bvid).catch(() => null);
@@ -4974,6 +5334,7 @@ async function startTranscriptionFromCapsule() {
         });
         if (!res?.ok) throw new Error(res?.error || "Groq 转录失败");
     } catch (error) {
+        clearAsrSession();
         logContent.error("asr_start_failed", {
             task: "asr",
             bvid,
@@ -5146,6 +5507,7 @@ function isTabStateForCurrentVideo() {
 }
 
 function getCurrentVideoTaskStatus(task) {
+    if (hasLocalPendingTask(task)) return "processing";
     if (!isTabStateForCurrentVideo()) return "idle";
     return appState.tabState?.taskStatus?.[task] || "idle";
 }
@@ -5290,6 +5652,25 @@ async function renderRealtimeLogData() {
     }
 }
 
+function formatAsrUiTraceLine(item) {
+    const detail = item?.detail && typeof item.detail === "object" ? item.detail : {};
+    return `${item?.time || ""} ${item?.event || ""} | ${JSON.stringify(detail)}`;
+}
+
+function renderAsrUiTraceData() {
+    const box = panelShadowRoot ? panelShadowRoot.getElementById("debug-asr-ui-log-body") : null;
+    const status = panelShadowRoot ? panelShadowRoot.getElementById("debug-asr-ui-log-status") : null;
+    if (!box) return;
+    const logs = Array.isArray(appState.asrUiTraceLogs) ? appState.asrUiTraceLogs : [];
+    box.textContent = logs.length
+        ? logs.slice(-200).map(formatAsrUiTraceLine).join("\n")
+        : "暂无转录 UI 状态日志。点击转录后这里会记录按钮/进度条状态。";
+    if (status) {
+        const shown = Math.min(logs.length, 200);
+        status.textContent = `${logs.length} 条，显示 ${shown} 条，${formatTimelineTime(Date.now())} 已刷新`;
+    }
+}
+
 function formatLogEntryLine(item) {
     const detail = item?.detail && typeof item.detail === "object" ? item.detail : {};
     const meta = [
@@ -5303,6 +5684,23 @@ function formatLogEntryLine(item) {
     ].filter(Boolean).join(" ");
     const detailText = JSON.stringify(detail || {});
     return `${item?.time || ""} ${String(item?.level || "").toUpperCase()} [${item?.module || ""}] ${item?.event || ""}${meta ? ` | ${meta}` : ""} | ${detailText}`;
+}
+
+function copyAsrUiTraceData() {
+    const box = panelShadowRoot ? panelShadowRoot.getElementById("debug-asr-ui-log-body") : null;
+    const text = box?.textContent || "";
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+        showToast("转录 UI 日志已复制");
+    }).catch(() => {
+        showToast("复制失败");
+    });
+}
+
+function clearAsrUiTraceData() {
+    appState.asrUiTraceLogs = [];
+    renderAsrUiTraceData();
+    showToast("转录 UI 日志已清空");
 }
 
 function copyRealtimeLogData() {
@@ -5716,7 +6114,17 @@ function hasSubtitleCacheForBvid(targetBvid) {
 }
 
 function reconcileTranscriptionState(targetBvid) {
-    const target = normalizeBvidCase(targetBvid || resolveCurrentBvid() || "");
+    const target = normalizeBvidCase(targetBvid || getStableCurrentBvid() || "");
+    if (isAsrSessionActiveForCurrent(target)) {
+        const session = updateAsrSession({ bvid: target });
+        patchTranscriptionState({
+            phase: "running",
+            bvid: session.bvid || target,
+            progress: Number(session.progress || 0),
+            statusText: session.statusText || getTranscriptionState().statusText || "正在转录音轨..."
+        });
+        return;
+    }
     const requestBvid = getTranscriptionBvid();
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
     const localState = getTranscriptionState();
@@ -5777,7 +6185,7 @@ async function syncCacheFromBackground(bvid, options = {}) {
             return false;
         }
         appState.cache = cache;
-        if (res.tabState) appState.tabState = res.tabState;
+        if (res.tabState) mergeIncomingTabState(res.tabState);
         applyCacheSubtitleState(cache, target);
         appState.subtitleCapturedBvid = target;
         reconcileTranscriptionState(target);
@@ -5821,7 +6229,21 @@ function onBackgroundMessage(message) {
     }
     if (action === "TRANSCRIBE_STATUS") {
         const messageBvid = normalizeBvidCase(message?.bvid || "");
-        const currentBvid = normalizeBvidCase(resolveCurrentBvid() || appState.injectBvid || "");
+        const currentBvid = normalizeBvidCase(getStableCurrentBvid() || appState.injectBvid || "");
+        logAsrUiTrace("transcribe_status_received", {
+            stage: String(message?.stage || ""),
+            level: String(message?.level || ""),
+            bvid: messageBvid,
+            current_bvid: currentBvid,
+            progress: Number(message?.progress || 0),
+            text: String(message?.text || ""),
+            session: {
+                active: !!appState.asrSession?.active,
+                bvid: appState.asrSession?.bvid || "",
+                stage: appState.asrSession?.stage || "",
+                progress: Number(appState.asrSession?.progress || 0)
+            }
+        });
 
         if (messageBvid && currentBvid && messageBvid !== currentBvid) {
             logContent.warn("transcription_stale_message_drop", {
@@ -5842,6 +6264,7 @@ function onBackgroundMessage(message) {
             patchTranscriptionState({ statusText: text });
         }
         if (isError) {
+            clearAsrSession();
             if (appState.tabState && typeof appState.tabState === "object") {
                 appState.tabState = {
                     ...appState.tabState,
@@ -5857,17 +6280,29 @@ function onBackgroundMessage(message) {
             return false;
         }
         if (message?.stage !== "done") {
+            const incomingProgress = Number.isFinite(Number(message?.progress))
+                ? Math.max(0, Math.min(100, Number(message.progress)))
+                : undefined;
+            updateAsrSession({
+                active: true,
+                bvid: activeTranscribeBvid,
+                stage: String(message?.stage || ""),
+                statusText: text || getTranscriptionState().statusText || appState.asrSession?.statusText || "正在转录音轨...",
+                progress: incomingProgress
+            });
             patchTranscriptionState({
                 phase: "running",
                 bvid: activeTranscribeBvid,
-                statusText: text || getTranscriptionState().statusText
+                statusText: text || getTranscriptionState().statusText,
+                ...(Number.isFinite(incomingProgress) ? { progress: Math.max(Number(getTranscriptionState().progress || 0), incomingProgress) } : {})
             });
         }
 
         if (Number.isFinite(Number(message?.progress))) {
             const incomingProgress = Math.max(0, Math.min(100, Number(message.progress)));
             const nextState = patchTranscriptionState({ progress: incomingProgress });
-            const progress = Math.max(incomingProgress, Number(nextState.progress || 0));
+            const session = updateAsrSession({ bvid: activeTranscribeBvid, progress: incomingProgress });
+            const progress = Math.max(incomingProgress, Number(nextState.progress || 0), Number(session?.progress || 0));
             updateProgress(Math.max(10, progress), progressTaskId);
         } else if (isTranscriptionRunning()) {
             updateProgress(20, progressTaskId);
@@ -5895,8 +6330,8 @@ function onBackgroundMessage(message) {
             }, 1000);
         }
         if (message?.stage === "done") {
-            const taskBvid = getTranscriptionBvid();
-            const currentBvid = normalizeBvidCase(appState.injectBvid || resolveCurrentBvid() || "");
+            const taskBvid = normalizeBvidCase(appState.asrSession?.bvid || getTranscriptionBvid() || "");
+            const currentBvid = normalizeBvidCase(appState.injectBvid || getStableCurrentBvid() || "");
             
             if (taskBvid && currentBvid && taskBvid !== currentBvid) {
                 logContent.warn("transcription_stale_result_drop", {
@@ -5907,24 +6342,49 @@ function onBackgroundMessage(message) {
                 return false;
             }
             
-            resetTranscriptionState({ phase: "done", progress: 100 });
-            appState.transcriptionCapsuleVisible = false;
-            appState.transcriptionCapsuleMeta = null;
             appState.isStateDirty = true;
+            updateAsrSession({
+                active: true,
+                bvid: activeTranscribeBvid,
+                stage: "done",
+                progress: 100,
+                statusText: "转录成功，正在加载字幕..."
+            });
+            patchTranscriptionState({
+                phase: "running",
+                bvid: activeTranscribeBvid,
+                progress: 100,
+                statusText: "转录成功，正在加载字幕..."
+            });
+            appState.transcriptionCapsuleVisible = true;
             updateProgress(95, progressTaskId);
             
             const targetBvid = normalizeBvidCase(message?.bvid || currentBvid || "");
-            syncCacheFromBackgroundWithRetry(targetBvid).then((ok) => {
+            const finishTranscriptionDone = (ok) => {
                 if (ok && hasUsableSubtitleCache(appState.cache, targetBvid)) {
+                    applyCacheSubtitleState(appState.cache, targetBvid);
+                    clearAsrSession();
+                    resetTranscriptionState({ phase: "done", progress: 100 });
+                    appState.transcriptionCapsuleVisible = false;
+                    appState.transcriptionCapsuleMeta = null;
                     updateProgress(100, progressTaskId);
+                } else {
+                    clearAsrSession();
+                    resetTranscriptionState();
                 }
                 renderContent();
-            });
+            };
+            if (hasUsableSubtitleCache(appState.cache, targetBvid)) {
+                finishTranscriptionDone(true);
+            } else {
+                renderContent();
+                syncCacheFromBackgroundWithRetry(targetBvid).then(finishTranscriptionDone);
+            }
             renderSubtitleTimelinePanel(document.getElementById("panel-body"));
         }
         if (message?.stage !== "done" && message?.level !== "error") {
             const msgBvid = normalizeBvidCase(message?.bvid || "");
-            const currentBvid = normalizeBvidCase(appState.injectBvid || resolveCurrentBvid() || "");
+            const currentBvid = normalizeBvidCase(appState.injectBvid || getStableCurrentBvid() || "");
             if (!msgBvid || !currentBvid || msgBvid === currentBvid) {
                 renderContent();
             }
@@ -5939,7 +6399,7 @@ function onBackgroundMessage(message) {
         return false;
     }
     if (message?.tabState) {
-        appState.tabState = message.tabState;
+        mergeIncomingTabState(message.tabState);
         syncStepProgressByTaskState(appState.tabState);
     }
     const cache = message?.cache || null;

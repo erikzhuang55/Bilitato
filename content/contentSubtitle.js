@@ -4,6 +4,7 @@
 
     function getRawSubtitleRows(cache) {
         if (Array.isArray(cache?.rawSubtitle) && cache.rawSubtitle.length) return cache.rawSubtitle;
+        if (Array.isArray(cache?.processedSubtitle) && cache.processedSubtitle.length) return cache.processedSubtitle;
         if (Array.isArray(cache?.rows) && cache.rows.length) return cache.rows;
         return [];
     }

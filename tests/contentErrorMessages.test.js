@@ -67,6 +67,39 @@ describe("contentErrorMessages", () => {
     expect(html).toContain('data-action="run-summary"');
   });
 
+  it("maps invalid model 400 errors to panel guidance with retry", () => {
+    const view = messages.mapErrorToView({ message: 'API Error 400: {"error":{"message":"Invalid model id: GLM-5.1"}}' });
+    const html = messages.renderErrorPanel(view, "run-summary");
+
+    expect(view).toMatchObject({
+      code: "HTTP_400",
+      title: "请求参数有误",
+      action: "goto-setup-guide",
+      secondaryAction: "retry",
+      presentation: "panel"
+    });
+    expect(html).toContain("模型 ID");
+    expect(html).toContain('data-action="goto-setup-guide"');
+    expect(html).toContain('data-action="run-summary"');
+  });
+
+  it("keeps unknown errors retryable when rendered in a task panel", () => {
+    const view = messages.mapErrorToView(
+      { message: "context is not defined" },
+      "任务失败",
+      { surface: "panel" }
+    );
+    const html = messages.renderErrorPanel(view, "run-rumors");
+
+    expect(view).toMatchObject({
+      code: "UNKNOWN",
+      presentation: "panel",
+      secondaryAction: "retry"
+    });
+    expect(html).toContain("context is not defined");
+    expect(html).toContain('data-action="run-rumors"');
+  });
+
   it("maps missing subtitles to refresh guidance", () => {
     const view = messages.mapErrorToView({ message: "未获取到视频字幕" });
     const html = messages.renderErrorPanel(view, "run-summary");

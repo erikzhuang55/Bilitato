@@ -108,6 +108,36 @@ describe("providerAdapter", () => {
     expect(onDelta).toHaveBeenCalledWith("一次性返回");
   });
 
+  it("ignores reasoning_content in OpenAI-compatible streams", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"reasoning_content":"让我分析一下"}}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"正式总结"}}]}\n\n'));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      }
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: stream
+    }));
+    const onDelta = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAIStream("openai", {
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-test"
+    }, [{ role: "user", content: "hello" }], undefined, onDelta);
+
+    expect(result.text).toBe("正式总结");
+    expect(onDelta).toHaveBeenCalledTimes(1);
+    expect(onDelta).toHaveBeenCalledWith("正式总结");
+  });
+
   it("throws coded http errors", async () => {
     const fetchMock = vi.fn(async () => mockJsonResponse({ error: "unauthorized" }, false, 401));
     vi.stubGlobal("fetch", fetchMock);

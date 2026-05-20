@@ -4,50 +4,99 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
-    "1.2.2": {
-      title: "Bilitato 已更新至 v1.2.2",
-      subtitle: "本次重点优化新手体验、总结模式和云端缓存提示。",
-      highlights: [
+    "1.2.3": {
+      title: "Bilitato 已更新至 v1.2.3",
+      displayVersion: "v1.2.1 - v1.2.3",
+      subtitle: "本次合并了近期多版更新，重点优化新手引导、转录、字幕缓存、总结、分段、聊天和验真体验。",
+      groups: [
         {
           tag: "新增",
-          title: "新手引导预览",
-          desc: "新增第三步预览效果，无需先配置 API Key，也能查看已有云端缓存的视频总结。",
+          items: [
+            {
+              title: "新手引导预览",
+              desc: "新增第三步预览效果，无需先配置 API Key，也能查看已有云端缓存的视频总结。",
+            },
+          ],
         },
         {
           tag: "优化",
-          title: "高速/省流模式",
-          desc: "默认使用高速模式，总结支持流式展示；省流模式保留 1 次调用生成总结和分段。",
-        },
-        {
-          tag: "体验",
-          title: "设置与缓存提示",
-          desc: "设置页改为自动保存提示，API Key 可显示明文并自动清理首尾空格，云端缓存会提示不消耗调用次数。",
-        },
-        
-      ],
-      privacy: "本插件不会上传任何API Key、Prompt或您和AI的聊天内容。",
-    },
-    "1.2.0": {
-      title: "Bilitato 已更新至 v1.2.0",
-      subtitle: "本次重点优化转录、下载与稳定性。",
-      highlights: [
-        {
-          tag: "新增",
-          title: "SiliconFlow转录支持",
-          desc: "支持无需翻墙的FunAudioLLM/SenseVoiceSmall大模型（无法生成时间戳，但不影响总结）",
-        },
-        {
-          tag: "优化",
-          title: "视频/音频下载更稳定",
-          desc: "重做下载方式，减少 403、下载失败、下载成网页文件等问题。",
+          items: [
+            {
+              title: "高速/省流模式",
+              desc: "默认使用高速模式，总结支持流式展示；省流模式保留 1 次调用生成总结和分段。",
+            },
+            {
+              title: "设置与缓存提示",
+              desc: "设置页改为自动保存提示，API Key 可显示明文并自动清理首尾空格，云端缓存会提示不消耗调用次数。",
+            },
+            {
+              title: "云端字幕缓存更稳定",
+              desc: "CC、总结、聊天、验真都会主动读取云端字幕；云端已有字幕时会直接加载，减少重复转录。",
+            },
+            {
+              title: "在线转录反馈更及时",
+              desc: "点击转录后会立即进入检查/转录状态，按钮同步禁用，避免卡顿感和重复点击。",
+            },
+            {
+              title: "分段和广告识别更准确",
+              desc: "优化分段边界和广告识别逻辑，减少错分、漏分和时间点偏移，长视频结构更清晰。",
+            },
+          ],
         },
         {
           tag: "修复",
-          title: "音频转录修复",
-          desc: "修复无字幕视频音频转录可能会出现字幕串线的问题。",
+          items: [
+            {
+              title: "修复字幕状态不同步",
+              desc: "修复转录完成后总结仍显示暂无字幕、刷新无反应，以及页面未及时刷新字幕的问题。",
+            },
+            {
+              title: "修复聊天输入问题",
+              desc: "修复聊天框无法输入空格、中文输入法可能被打断，以及报错后页面强制滚到底部的问题。",
+            },
+            {
+              title: "修复总结与验真异常",
+              desc: "修复无 API Key 时总结页空白、验真读取转录字幕报错、已有字幕却提示无字幕等问题。",
+            },
+          ],
         },
       ],
-      privacy: "本插件不会上传任何API Key、Prompt或您和AI的聊天内容。",
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。",
+    },
+    "1.2.0": {
+      title: "Bilitato 已更新至 v1.2.0",
+      displayVersion: "v1.2.0",
+      subtitle: "本次重点优化转录、下载与稳定性。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "SiliconFlow 转录支持",
+              desc: "支持无需翻墙的 FunAudioLLM/SenseVoiceSmall 大模型（无法生成时间戳，但不影响总结）。",
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "视频/音频下载更稳定",
+              desc: "重做下载方式，减少 403、下载失败、下载成网页文件等问题。",
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "音频转录修复",
+              desc: "修复无字幕视频音频转录可能会出现字幕串线的问题。",
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。",
     },
   };
 
@@ -129,39 +178,68 @@
     `;
 
     let pageIndex = 0;
+    const normalizeGroups = (pageNote) => {
+      if (Array.isArray(pageNote?.groups)) return pageNote.groups;
+      const buckets = [];
+      (Array.isArray(pageNote?.highlights) ? pageNote.highlights : []).forEach((item) => {
+        const tag = String(item?.tag || "优化");
+        let group = buckets.find((entry) => entry.tag === tag);
+        if (!group) {
+          group = { tag, items: [] };
+          buckets.push(group);
+        }
+        group.items.push({ title: item.title, desc: item.desc });
+      });
+      return buckets;
+    };
+
     const renderPage = () => {
       const pageVersion = pageVersions[pageIndex] || version;
       const pageNote = RELEASE_NOTES[pageVersion] || note;
+      const displayVersion = pageNote.displayVersion || `v${pageVersion}`;
+      const groups = normalizeGroups(pageNote);
       const content = overlay.querySelector(".release-notice-content");
       const pager = overlay.querySelector(".release-notice-pager");
       if (content) {
         content.innerHTML = `
-          <div class="release-notice-top">
-            <span class="release-notice-badge">更新说明</span>
-            <span class="release-notice-version">v${escapeHtml(pageVersion)}</span>
+          <div class="release-notice-fixed-head">
+            <div class="release-notice-top">
+              <span class="release-notice-badge">更新说明</span>
+              <span class="release-notice-version">${escapeHtml(displayVersion)}</span>
+            </div>
+
+            <div class="release-notice-title">${escapeHtml(pageNote.title)}</div>
+            <div class="release-notice-subtitle">${escapeHtml(pageNote.subtitle)}</div>
           </div>
 
-          <div class="release-notice-title">${escapeHtml(pageNote.title)}</div>
-          <div class="release-notice-subtitle">${escapeHtml(pageNote.subtitle)}</div>
-
-          <div class="release-notice-list">
-            ${pageNote.highlights
+          <div class="release-notice-scroll-body">
+            <div class="release-notice-group-list">
+              ${groups
               .map(
-                (item) => `
-                  <div class="release-notice-item">
-                    <span class="release-notice-item-tag">${escapeHtml(item.tag)}</span>
-                    <div class="release-notice-item-main">
-                      <div class="release-notice-item-title">${escapeHtml(item.title)}</div>
-                      <div class="release-notice-item-desc">${escapeHtml(item.desc)}</div>
+                (group) => `
+                  <section class="release-notice-group">
+                    <div class="release-notice-group-tag">${escapeHtml(group.tag)}</div>
+                    <div class="release-notice-group-items">
+                      ${(Array.isArray(group.items) ? group.items : [])
+                        .map(
+                          (item) => `
+                            <div class="release-notice-item">
+                              <div class="release-notice-item-title">${escapeHtml(item.title)}</div>
+                              <div class="release-notice-item-desc">${escapeHtml(item.desc)}</div>
+                            </div>
+                          `
+                        )
+                        .join("")}
                     </div>
-                  </div>
+                  </section>
                 `
               )
               .join("")}
-          </div>
+            </div>
 
-          <div class="release-notice-privacy">
-            ${escapeHtml(pageNote.privacy)}
+            <div class="release-notice-privacy">
+              ${escapeHtml(pageNote.privacy)}
+            </div>
           </div>
         `;
       }

@@ -61,6 +61,7 @@ async function getSentryRuntimeContext() {
 
 const MAX_GLOBAL_CONCURRENCY = 1;
 const TASK_TIMEOUT_MS = 60000;
+const EFFICIENCY_TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
 const MAX_SEGMENTS_SUBTITLE_CHARS = 120000;
 const GROQ_AUDIO_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -534,7 +535,7 @@ async function handleMessage(msg, sender) {
         const text = String(msg.text || "").trim();
         const messageId = String(msg.messageId || "");
         if (!text || !messageId) throw new Error("聊天参数不完整");
-        const result = await runChatForTab(tabId, text, messageId);
+        const result = await runChatForTab(tabId, text, messageId, normalizeBvid(msg.bvid));
         return { answer: result.answer, metrics: result.metrics };
     }
     if (msg.action === "ABORT_TRANSCRIPTION") {
@@ -1904,7 +1905,11 @@ async function runTasksForTab(tabId, tasks, force, taskContext = {}, requestedBv
         await updateTabState(tabId, { activeBvid: bvid, updatedAt: Date.now() });
     }
     const resolvedSettings = await getResolvedSettings();
-    await hydrateCloudCacheIfNeeded(bvid, tasks, resolvedSettings);
+    const hydrateTasks = [...new Set([
+        ...tasks,
+        ...(tasks.some((task) => ["summary", "segments", "rumors"].includes(task)) ? ["subtitle"] : [])
+    ])];
+    await hydrateCloudCacheIfNeeded(bvid, hydrateTasks, resolvedSettings);
     const hasSummarySegments = tasks.includes("summary") && tasks.includes("segments");
     const otherTasks = tasks.filter((task) => !(hasSummarySegments && (task === "summary" || task === "segments")));
 
@@ -2011,12 +2016,16 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
     return results;
 }
 
-async function runChatForTab(tabId, text, messageId) {
+async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
     const tabState = await getTabState(tabId);
-    const bvid = tabState?.activeBvid;
+    const bvid = normalizeBvid(requestedBvid || tabState?.activeBvid);
     if (!bvid) throw new Error("未获取到视频字幕");
+    if (normalizeBvid(tabState?.activeBvid) !== bvid) {
+        await updateTabState(tabId, { activeBvid: bvid, updatedAt: Date.now() });
+    }
     await setTaskStatus(tabId, ["chat"], "processing");
     const resolvedSettings = await getResolvedSettings();
+    await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings);
     const cache = await getCache(bvid);
     const history = Array.isArray(cache.history) ? cache.history : [];
     const key = `${bvid}|chat|${messageId}`;
@@ -2073,10 +2082,14 @@ async function runChatForPort(port, msg) {
     const messageId = String(msg?.messageId || "");
     if (!text || !messageId) throw new Error("聊天参数不完整");
     const tabState = await getTabState(tabId);
-    const bvid = tabState?.activeBvid;
+    const bvid = normalizeBvid(msg?.bvid || tabState?.activeBvid);
     if (!bvid) throw new Error("未获取到视频字幕");
+    if (normalizeBvid(tabState?.activeBvid) !== bvid) {
+        await updateTabState(tabId, { activeBvid: bvid, updatedAt: Date.now() });
+    }
     await setTaskStatus(tabId, ["chat"], "processing");
     const resolvedSettings = await getResolvedSettings();
+    await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings);
     const cache = await getCache(bvid);
     const history = Array.isArray(cache.history) ? cache.history : [];
     const key = `${bvid}|chat_stream|${messageId}`;
@@ -2148,6 +2161,8 @@ async function runChatForPort(port, msg) {
 }
 
 async function requestTaskResult(bvid, task, settings, taskContext = {}) {
+    const cloudTasks = ["summary", "segments", "rumors"].includes(task) ? ["subtitle", task] : [task];
+    await hydrateCloudCacheIfNeeded(bvid, cloudTasks, settings);
     const cache = await getCache(bvid);
     const subtitlePayloadOptions = task === "segments"
         ? { purpose: "segments", mode: "quality" }
@@ -2185,7 +2200,7 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
             pref_mode: settings.prefMode || ""
         }
     });
-    const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, { tabId: context.tabId });
+    const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, { tabId: taskContext.tabId });
     logAI.info("ai_request_success", {
         bvid,
         task,
@@ -2578,7 +2593,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                 pref_mode: settings.prefMode || ""
             }
         });
-        const aiRes = await callAIWithTimeoutStream(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, (delta) => {
+        const aiRes = await callAIWithTimeoutStream(settings, [{ role: "user", content: prompt }], EFFICIENCY_TASK_TIMEOUT_MS, (delta) => {
             if (!firstChunkMs) {
                 firstChunkMs = Date.now() - requestStartedAt;
                 logAI.info("ai_first_chunk", {
@@ -3689,7 +3704,10 @@ function normalizeSettings(settings) {
 
 function hasTaskResult(cache, task) {
     if (!cache || typeof cache !== "object") return false;
-    if (task === "subtitle") return Array.isArray(cache.rawSubtitle) && cache.rawSubtitle.length > 0;
+    if (task === "subtitle") {
+        return (Array.isArray(cache.rawSubtitle) && cache.rawSubtitle.length > 0)
+            || (Array.isArray(cache.processedSubtitle) && cache.processedSubtitle.length > 0);
+    }
     if (task === "summary") return !!String(cache.summary || "").trim();
     if (task === "segments") return Array.isArray(cache.segments) && cache.segments.length > 0;
     if (task === "rumors") return !!normalizeRumors(cache.rumors);

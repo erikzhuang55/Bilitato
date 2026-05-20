@@ -2,7 +2,8 @@
     const normalizeBvidCase = globalThis.BilitatoContentUtils?.normalizeBvidCase || ((value) => String(value || "").trim());
 
     function hasSubtitle(cache) {
-        return Array.isArray(cache?.rawSubtitle) && cache.rawSubtitle.length > 0;
+        return (Array.isArray(cache?.rawSubtitle) && cache.rawSubtitle.length > 0)
+            || (Array.isArray(cache?.processedSubtitle) && cache.processedSubtitle.length > 0);
     }
 
     function hasSummary(cache) {
@@ -38,10 +39,12 @@
         const target = normalizeBvidCase(bvid || "");
         const activePage = String(page || "");
         if (!target) return false;
-        if (!["summary", "real"].includes(activePage)) return false;
+        if (!["CC", "summary", "real", "chat"].includes(activePage)) return false;
         if (!shouldAttemptCloudReadForVideo(cache, cloudReadState, target)) return false;
-        if (activePage === "summary") return !(hasSummary(cache) || hasSegments(cache));
-        return !hasRumors(cache);
+        if (activePage === "CC") return !hasSubtitle(cache);
+        if (activePage === "summary") return !hasSubtitle(cache) || !(hasSummary(cache) || hasSegments(cache));
+        if (activePage === "chat") return !hasSubtitle(cache);
+        return !hasSubtitle(cache) || !hasRumors(cache);
     }
 
     function createCloudReadState(bvid, status, requestId, startedAt = Date.now()) {

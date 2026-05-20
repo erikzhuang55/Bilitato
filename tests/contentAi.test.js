@@ -12,7 +12,8 @@ describe("contentAi", () => {
   it("requires subtitles for summary and segment tasks", () => {
     expect(ai.canRunTasksWithCache(["summary"], "BV1", { bvid: "BV1", rawSubtitle: [{ text: "字幕" }] })).toBe(true);
     expect(ai.canRunTasksWithCache(["summary"], "BV1", { bvid: "BV1", rawSubtitle: [] })).toBe(false);
-    expect(ai.canRunTasksWithCache(["rumors"], "BV1", null)).toBe(true);
+    expect(ai.canRunTasksWithCache(["rumors"], "BV1", null)).toBe(false);
+    expect(ai.canRunTasksWithCache(["rumors"], "BV1", { bvid: "BV1", processedSubtitle: [{ text: "字幕" }] })).toBe(true);
   });
 
   it("creates pending chat messages", () => {

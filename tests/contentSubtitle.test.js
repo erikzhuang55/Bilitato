@@ -22,6 +22,15 @@ describe("contentSubtitle", () => {
     expect(subtitle.getRawSubtitlePlainText(cache)).toBe("fallback");
   });
 
+  it("falls back to processed subtitles when raw subtitles are missing", () => {
+    const cache = {
+      processedSubtitle: [{ start: 2, text: "processed fallback" }]
+    };
+
+    expect(subtitle.getRawSubtitleRows(cache)).toEqual([{ start: 2, text: "processed fallback" }]);
+    expect(subtitle.getRawSubtitlePlainText(cache)).toBe("processed fallback");
+  });
+
   it("builds plain text without empty subtitle lines", () => {
     const text = subtitle.getRawSubtitlePlainText({
       rawSubtitle: [

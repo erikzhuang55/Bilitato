@@ -468,7 +468,8 @@ function toErrorInput(error, fallbackMessage = "请求失败") {
 
 function setPanelError(page, error, fallbackMessage = "请求失败") {
     const view = mapErrorToView ? mapErrorToView(toErrorInput(error, fallbackMessage), fallbackMessage, {
-        provider: appState.settings?.provider || ""
+        provider: appState.settings?.provider || "",
+        surface: "panel"
     }) : null;
     if (!view) return null;
     appState.panelErrors = {
@@ -547,6 +548,7 @@ async function bootstrap() {
     scheduleInjectRetry();
     window.addEventListener("message", onInjectMessage, false);
     chrome.runtime.onMessage.addListener(onBackgroundMessage);
+    window.addEventListener("keydown", isolateChatInputKeyboardEvent, true);
     window.addEventListener("keydown", onGlobalShortcut, true);
     window.addEventListener("resize", syncPanelHeightMode);
     chrome.storage.onChanged.addListener(onStorageChanged);
@@ -741,17 +743,20 @@ function onStorageChanged(changes, areaName) {
         renderNav();
         clearCCListImmediately();
     }
-    const beforeKey = beforeBvid ? `cache_${beforeBvid}` : "";
-    const afterKey = afterBvid ? `cache_${afterBvid}` : "";
-    if (!switched && !routeMismatch && beforeKey && changes[beforeKey]?.newValue) {
-        const newCache = changes[beforeKey].newValue;
-        const cacheBvid = normalizeBvidCase(newCache?.bvid || "");
+    const candidateCacheKeys = [...new Set([beforeBvid, afterBvid, routeBvid].filter(Boolean).map((bvid) => `cache_${bvid}`))];
+    if (!switched && !routeMismatch) {
         const currentRoute = normalizeBvidCase(getBvidFromUrl(location.href));
-        if (!currentRoute || cacheBvid === currentRoute) {
-            appState.cache = newCache;
+        const nextCache = candidateCacheKeys
+            .map((key) => changes[key]?.newValue)
+            .find((cache) => {
+                const cacheBvid = normalizeBvidCase(cache?.bvid || "");
+                return cacheBvid && (!currentRoute || cacheBvid === currentRoute);
+            });
+        if (nextCache) {
+            appState.cache = nextCache;
+            applyCacheSubtitleState(appState.cache, currentRoute || afterBvid || beforeBvid);
         }
     }
-    if (!routeMismatch && afterKey && changes[afterKey]?.newValue) appState.cache = changes[afterKey].newValue;
     if (routeMismatch) {
         appState.cache = null;
     }
@@ -761,7 +766,7 @@ function onStorageChanged(changes, areaName) {
     if (routeBvid && appState.cache?.bvid && normalizeBvidCase(appState.cache.bvid) !== routeBvid) {
         appState.cache = null;
     }
-    if (afterBvid && Array.isArray(appState.cache?.rawSubtitle) && appState.cache.rawSubtitle.length) {
+    if (afterBvid && hasUsableSubtitleCache(appState.cache, afterBvid)) {
         appState.subtitleCapturedBvid = afterBvid;
     }
     pruneChatPendingByHistory(appState.cache?.history);
@@ -1604,6 +1609,13 @@ function bindPanelDelegatedEvents() {
             showToast("已清空错误测试状态");
             return;
         }
+        if (action === "debug-show-release-notice") {
+            globalThis.BilitatoReleaseNotice?.renderReleaseNotice?.({
+                root: panelShadowRoot,
+                version: "1.2.3"
+            });
+            return;
+        }
         if (action === "follow-now") {
             appState.followEnabled = true;
             appState.followPausedAt = 0;
@@ -1872,6 +1884,7 @@ async function takePanelScreenshot() {
 function renderSummary(panel) {
     const debugErrorView = appState.panelErrors?.summary;
     if (debugErrorView && renderErrorPanel) {
+        panel.classList.remove("summary-no-apikey");
         panel.classList.remove("is-segments-expanded");
         panel.dataset.lastSignature = "";
         panel.innerHTML = `
@@ -1890,9 +1903,10 @@ function renderSummary(panel) {
     const hasContent = !!String(summary || "").trim() || segments.length > 0;
     const apiKey = String(appState.settings?.apiKey || "").trim();
     if (!apiKey && !hasContent) {
+        panel.classList.add("summary-no-apikey");
         panel.classList.remove("is-segments-expanded");
         panel.dataset.lastSignature = "";
-        if (isCloudReadLoading()) {
+        if (isCloudReadLoadingForCurrentVideo()) {
             panel.innerHTML = renderCloudLoadingState("总结", "正在读取云端演示内容...");
             return;
         }
@@ -1903,14 +1917,20 @@ function renderSummary(panel) {
                 <button class="no-apikey-btn" data-action="goto-setup-guide">点此配置 →</button>
             </div>
         `;
+        panel.scrollTop = 0;
         return;
     }
+    panel.classList.remove("summary-no-apikey");
 
     const signature = JSON.stringify({
         summary,
         segmentsLength: segments.length,
         summaryStatus,
         segmentsStatus,
+        cacheBvid: normalizeBvidCase(appState.cache?.bvid || ""),
+        rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
+        processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
+        cloudReadStatus: String(appState.cloudReadState?.status || ""),
         summarySource: getTaskCacheSource(appState.cache, "summary"),
         segmentsSource: getTaskCacheSource(appState.cache, "segments"),
         sessionFresh: appState.sessionGeneratedTasks.has("summary") || appState.sessionGeneratedTasks.has("segments")
@@ -2197,7 +2217,7 @@ function renderCC(panel, rowsOverride) {
     const currentBvid = normalizeBvidCase(appState.tabState?.activeBvid || getBvidFromUrl(location.href) || "");
     const cacheBvid = normalizeBvidCase(appState.cache?.bvid || "");
     const cacheReadyForCurrent = !!currentBvid && cacheBvid === currentBvid;
-    const rows = Array.isArray(rowsOverride) ? rowsOverride : (cacheReadyForCurrent && Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle : []);
+    const rows = Array.isArray(rowsOverride) ? rowsOverride : (cacheReadyForCurrent ? getRawSubtitleRowsFromCache(appState.cache) : []);
     if (!Array.isArray(rowsOverride) && cacheBvid && currentBvid && cacheBvid !== currentBvid) {
         logContent.warn("cc_cache_mismatch_drop", {
             task: "subtitle",
@@ -2205,7 +2225,7 @@ function renderCC(panel, rowsOverride) {
             code: "CC_CACHE_BVID_MISMATCH",
             detail: {
                 cache_bvid: cacheBvid,
-                row_count: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0
+                row_count: getRawSubtitleRowsFromCache(appState.cache).length
             }
         });
     }
@@ -2502,6 +2522,10 @@ function renderChat(panel) {
     const pending = Array.isArray(appState.chatPending) ? appState.chatPending : [];
     
     const signature = JSON.stringify({
+        cacheBvid: normalizeBvidCase(appState.cache?.bvid || ""),
+        rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
+        processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
+        cloudReadStatus: String(appState.cloudReadState?.status || ""),
         h: history.length,
         hLast: history[history.length - 1]?.content?.length,
         p: pending.length,
@@ -2680,6 +2704,10 @@ function renderReal(panel) {
         overview: rumors?.overview,
         claimsLength: sortedClaims.length,
         rumorsStatus,
+        cacheBvid: normalizeBvidCase(appState.cache?.bvid || ""),
+        rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
+        processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
+        cloudReadStatus: String(appState.cloudReadState?.status || ""),
         rumorsSource: getTaskCacheSource(appState.cache, "rumors"),
         sessionFresh: appState.sessionGeneratedTasks.has("rumors")
     });
@@ -3061,7 +3089,7 @@ function renderSettings(panel) {
     const modelScopeModelOptions = [
         "moonshotai/Kimi-K2.5",
         "MiniMax/MiniMax-M2.5",
-        "GLM-5.1",
+        "ZhipuAI/GLM-5.1",
         "deepseek-ai/DeepSeek-V3.2",
         "Qwen3.5-27B"
     ];
@@ -3498,6 +3526,8 @@ function renderErrorDemoControls() {
             <div class="error-demo-grid">${panelErrors.map(renderButton).join("")}</div>
             <div class="error-demo-label">Toast 提示</div>
             <div class="error-demo-grid">${toastErrors.map(renderButton).join("")}</div>
+            <div class="error-demo-label">更新导览</div>
+            <button type="button" class="panel-btn ghost" data-action="debug-show-release-notice">显示 v1.2.3 更新导览</button>
             <button type="button" class="panel-btn ghost error-demo-clear" data-action="debug-clear-errors">清空测试状态</button>
         </div>
     `;
@@ -3733,6 +3763,7 @@ async function handleSendChat() {
     if (!text) return;
     const messageId = createChatMessageId();
     const progressTaskId = buildChatProgressTaskId(messageId);
+    clearPanelError("chat");
     
     input.value = "";
     appState.chatAutoScrollPausedUntil = 0;
@@ -3745,7 +3776,12 @@ async function handleSendChat() {
     startAsymptoticPseudoProgress(progressTaskId, 14);
     rerenderChatKeepInputAndScroll("");
     const port = getChatStreamPort();
-    port.postMessage({ action: "RUN_CHAT_STREAM", text, messageId });
+    port.postMessage({
+        action: "RUN_CHAT_STREAM",
+        text,
+        messageId,
+        bvid: normalizeBvidCase(resolveCurrentBvid() || "")
+    });
 }
 
 function handleStopChat() {
@@ -3921,6 +3957,15 @@ function onChatStreamMessage(message) {
         const errorInput = toErrorInput(message, "请求失败");
         const view = mapErrorToView ? mapErrorToView(errorInput, "请求失败") : null;
         const error = view?.message || String(message?.error || message?.message || "请求失败");
+        if (view?.presentation !== "toast") {
+            setPanelError("chat", errorInput, "请求失败");
+            appState.chatPending = (appState.chatPending || []).filter((item) => item.id !== assistantId);
+            appState.chatStreamingId = "";
+            appState.chatActiveMessageId = "";
+            finishAsymptoticPseudoProgress(progressTaskId, true);
+            renderContent();
+            return;
+        }
     
         appState.chatPending = (appState.chatPending || []).map((item) => {
             if (item.id !== assistantId) return item;
@@ -4236,7 +4281,8 @@ function bindChatListAutoScroll(list) {
 }
 
 function shouldAutoScrollChat() {
-    return Date.now() >= Number(appState.chatAutoScrollPausedUntil || 0);
+    const isStreaming = !!String(appState.chatStreamingId || "").trim();
+    return isStreaming && Date.now() >= Number(appState.chatAutoScrollPausedUntil || 0);
 }
 
 function isCloudReadLoadingForCurrentVideo() {
@@ -4315,13 +4361,13 @@ function startCloudReadForCurrentVideo(options = {}) {
                 applyCacheSubtitleState(cache, target);
             }
             appState.cloudReadState = createCloudReadState(target, "success", nextRequestId);
-            if (cacheUpdated || !silent || appState.activePage === "summary") renderContent();
+            if (cacheUpdated || !silent || ["CC", "summary", "chat", "real"].includes(appState.activePage)) renderContent();
         })
         .catch((error) => {
             if (normalizeBvidCase(appState.cloudReadState?.bvid || "") !== target) return;
             if (Number(appState.cloudReadState?.requestId || 0) !== nextRequestId) return;
             appState.cloudReadState = createCloudReadState(target, "failed", nextRequestId);
-            if (!silent || appState.activePage === "summary") renderContent();
+            if (!silent || ["CC", "summary", "chat", "real"].includes(appState.activePage)) renderContent();
             if (String(error?.message || "") && String(error.message) !== "CLOUD_TIMEOUT") {
                 reportContentError?.(error, { task: "cloud_read", source: "cloud_read" });
                 notifyMappedError({ ...error, code: "CLOUD_FAILED" }, "访问云端数据库失败");
@@ -4700,7 +4746,7 @@ function startFocusTicker() {
 }
 
 function scrollToCurrentSubtitle(force, behavior = "smooth") {
-    const rows = Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle : [];
+    const rows = getRawSubtitleRowsFromCache(appState.cache);
     if (!rows.length) return;
     let canFollowScroll = appState.followEnabled;
     if (!appState.followEnabled && !force) {
@@ -5267,12 +5313,64 @@ async function startTranscriptionFromCapsule() {
         return;
     }
     const asrRunId = `asr_${bvid}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    appState.progressTaskId = "";
+    appState.progressLastPercent = 0;
+    appState.progressLastTick = 0;
+    clearStepProgressTimers();
+    clearPseudoProgressTicker();
+
+    if (appState.tabState && typeof appState.tabState === "object") {
+        appState.tabState = {
+            ...appState.tabState,
+            activeBvid: bvid,
+            transcriptionProgress: 0
+        };
+    }
     beginAsrSession({
+        bvid,
+        runId: asrRunId,
+        progress: 10,
+        statusText: "正在检查云端字幕...",
+        stage: "cloud_check"
+    });
+    patchTranscriptionState({
+        phase: "running",
+        bvid,
+        progress: 10,
+        statusText: "正在检查云端字幕..."
+    });
+    appState.transcriptionCapsuleVisible = true;
+    updateProgress(10, progressTaskId, { force: true });
+    renderContent();
+    renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+
+    if (!hasUsableSubtitleCache(appState.cache, bvid)) {
+        appState.cloudReadState = createCloudReadState(bvid, "idle", Number(appState.cloudReadState?.requestId || 0) + 1);
+        const synced = await syncCacheFromBackgroundWithRetry(bvid, 2, 150, { skipCloud: false });
+        if (synced && hasUsableSubtitleCache(appState.cache, bvid)) {
+            applyCacheSubtitleState(appState.cache, bvid);
+            clearAsrSession();
+            resetTranscriptionState({ phase: "done", progress: 100 });
+            appState.transcriptionCapsuleVisible = false;
+            appState.transcriptionCapsuleMeta = null;
+            updateProgress(100, progressTaskId);
+            renderContent();
+            showToast("已读取云端字幕");
+            return;
+        }
+    }
+    updateAsrSession({
         bvid,
         runId: asrRunId,
         progress: 10,
         statusText: "正在请求转录...",
         stage: "start"
+    });
+    patchTranscriptionState({
+        phase: "running",
+        bvid,
+        progress: 10,
+        statusText: "正在请求转录..."
     });
     const preparedAudioUrl = appState.playInfo?.audio?.[0]?.url || "";
     logContent.info("asr_start_clicked", {
@@ -5289,27 +5387,6 @@ async function startTranscriptionFromCapsule() {
         }
     });
 
-    appState.progressTaskId = "";
-    appState.progressLastPercent = 0;
-    appState.progressLastTick = 0;
-    clearStepProgressTimers();
-    clearPseudoProgressTicker();
-
-    if (appState.tabState && typeof appState.tabState === "object") {
-        appState.tabState = {
-            ...appState.tabState,
-            activeBvid: bvid,
-            transcriptionProgress: 0
-        };
-    }
-
-    patchTranscriptionState({
-        phase: "running",
-        bvid,
-        progress: 10,
-        statusText: "正在请求转录..."
-    });
-    appState.transcriptionCapsuleVisible = true;
     updateProgress(10, progressTaskId, { force: true });
     renderContent();
     renderSubtitleTimelinePanel(document.getElementById("panel-body"));
@@ -5554,6 +5631,39 @@ function summarizeMediaLocator(locator) {
             audio_query_keys_hash: ""
         };
     }
+}
+
+function isolateChatInputKeyboardEvent(event) {
+    const path = typeof event?.composedPath === "function" ? event.composedPath() : [];
+    const target = path.find((node) => node?.id === "chat-input") || event?.target;
+    if (!target || target.id !== "chat-input") return;
+    if (event.isComposing || event.keyCode === 229) return;
+    const key = String(event.key || "");
+    if ((key === " " || key === "Spacebar") && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        event.stopImmediatePropagation?.();
+        insertTextIntoControl(target, " ");
+        return;
+    }
+    const isPlainTextKey = key.length === 1 || key === " " || key === "Spacebar";
+    if (!isPlainTextKey) return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    event.stopPropagation();
+}
+
+function insertTextIntoControl(input, text) {
+    if (!input || typeof input.value !== "string") return;
+    const start = Number.isFinite(input.selectionStart) ? input.selectionStart : input.value.length;
+    const end = Number.isFinite(input.selectionEnd) ? input.selectionEnd : start;
+    if (typeof input.setRangeText === "function") {
+        input.setRangeText(text, start, end, "end");
+    } else {
+        input.value = `${input.value.slice(0, start)}${text}${input.value.slice(end)}`;
+        const nextPosition = start + text.length;
+        input.selectionStart = nextPosition;
+        input.selectionEnd = nextPosition;
+    }
+    input.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
 }
 
 function onGlobalShortcut(event) {
@@ -5803,14 +5913,15 @@ function syncPanelHeightMode() {
     const main = root?.querySelector(".plugin-main-container");
     if (!root || !main) return;
     
-    const isSummaryPage = appState.activePage === "summary";
+    const summaryPanel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
+    const isSummaryNoApiKey = appState.activePage === "summary" && summaryPanel?.classList.contains("summary-no-apikey");
+    const isSummaryPage = appState.activePage === "summary" && !isSummaryNoApiKey;
     root.classList.toggle("summary-flex-mode", isSummaryPage);
     root.classList.toggle("fixed-lock-mode", !isSummaryPage);
     
     syncPluginHeight();
     if (isSummaryPage) {
-        const panel = panelShadowRoot ? panelShadowRoot.getElementById("page-summary") : null;
-        if (panel) requestAnimationFrame(() => applySummaryRatio(panel));
+        if (summaryPanel) requestAnimationFrame(() => applySummaryRatio(summaryPanel));
     }
 }
 

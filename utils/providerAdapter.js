@@ -314,8 +314,19 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
                 }
                 if (parsed?.usage) usage = parsed.usage;
                 const delta = parsed?.choices?.[0]?.delta || parsed?.choices?.[0]?.message || {};
-                const content = delta?.content || delta?.reasoning_content || delta?.text || "";
-                if (!delta?.content && !delta?.reasoning_content && !delta?.text) {
+                const content = delta?.content || delta?.text || "";
+                if (delta?.reasoning_content && !delta?.content && !delta?.text) {
+                    getProviderLogger()?.debug("provider_stream_reasoning_delta_ignored", {
+                        task: "ai",
+                        provider: providerKey,
+                        model: req.model || "",
+                        detail: {
+                            reasoning_chars: String(delta.reasoning_content || "").length
+                        }
+                    });
+                    continue;
+                }
+                if (!delta?.content && !delta?.text) {
                     getProviderLogger()?.debug("provider_stream_empty_delta", {
                         task: "ai",
                         provider: providerKey,

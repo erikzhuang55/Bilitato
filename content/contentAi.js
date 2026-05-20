@@ -10,7 +10,7 @@
 
     function needsSubtitleForTasks(tasks) {
         const list = Array.isArray(tasks) ? tasks : [];
-        return list.includes("summary") || list.includes("segments");
+        return list.includes("summary") || list.includes("segments") || list.includes("rumors");
     }
 
     function canRunTasksWithCache(tasks, currentBvid, cache) {

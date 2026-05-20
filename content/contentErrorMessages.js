@@ -14,6 +14,13 @@
             action: "goto-setup-guide",
             presentation: "modal"
         },
+        HTTP_400: {
+            title: "请求参数有误",
+            message: "服务商返回参数错误，常见原因是模型 ID 填写不正确、模型已下线，或当前接口不支持该模型。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            presentation: "panel"
+        },
         HTTP_404: {
             title: "接口或模型不存在",
             message: "请检查模型名称和自定义 API 地址，或确认该模型是否还可用。",
@@ -116,6 +123,9 @@
             ...base,
             rawMessage: String(errorInput?.message || errorInput || "")
         };
+        if (code === "UNKNOWN" && context?.surface === "panel") {
+            view.presentation = "panel";
+        }
         const provider = String(context?.provider || errorInput?.provider || "").toLowerCase();
         if (code === "HTTP_401" && provider === "modelscope") {
             view.extraMessage = "请务必确保您的 ModelScope 账号已绑定阿里云！";

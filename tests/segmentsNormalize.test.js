@@ -37,6 +37,26 @@ describe("normalizeSegments", () => {
       { start: 1, end: 2, label: "有效段落", type: "content" }
     ]);
   });
+
+  it("keeps ad subtitle line ids for local boundary mapping", () => {
+    const result = normalizeSegments([
+      { start: 100, end: 160, label: "品牌推广", type: "ad", start_line: 12, end_line: 18, ad_start_line: 12, ad_end_line: 18 }
+    ]);
+
+    expect(result).toEqual([
+      { start: 100, end: 160, label: "品牌推广", type: "ad", start_line: 12, end_line: 18, ad_start_line: 12, ad_end_line: 18 }
+    ]);
+  });
+
+  it("keeps content subtitle line ids for local boundary mapping", () => {
+    const result = normalizeSegments([
+      { start: 5, end: 20, label: "正文段落", type: "content", start_line: 2, end_line: 8 }
+    ]);
+
+    expect(result).toEqual([
+      { start: 5, end: 20, label: "正文段落", type: "content", start_line: 2, end_line: 8 }
+    ]);
+  });
 });
 
 describe("parseTimeToSeconds", () => {

@@ -353,6 +353,46 @@ body::-webkit-scrollbar {
     transform: none;
 }
 
+.action-inline-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin-top: 10px;
+    width: 100%;
+}
+
+.action-inline-buttons .panel-btn {
+    height: 30px;
+    padding: 0 12px;
+    font-size: 12px;
+}
+
+.subtitle-empty-actions {
+    display: grid;
+    grid-template-columns: minmax(112px, 1fr) 76px;
+    align-items: center;
+    gap: 10px;
+    width: min(236px, 100%);
+    margin-top: 2px;
+}
+
+.subtitle-empty-actions .action-btn {
+    width: 100% !important;
+    height: 36px;
+    border-radius: 8px;
+    font-size: 13px;
+    transform: none;
+}
+
+.subtitle-empty-actions .action-btn:hover {
+    transform: translateY(-1px);
+}
+
+.subtitle-empty-secondary {
+    font-weight: 600;
+}
+
 .subtitle-empty-container {
     display: flex;
     flex-direction: column;
@@ -1626,6 +1666,23 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .error-demo-clear {
     width: 100%;
+}
+
+.debug-state-preview {
+    min-height: 92px;
+    border: 1px dashed #d8dee8;
+    border-radius: 8px;
+    background: #fff;
+    overflow: hidden;
+}
+
+.debug-state-preview .page-body {
+    min-height: 92px;
+    padding: 10px;
+}
+
+.debug-state-preview .subtitle-empty-container {
+    justify-content: center;
 }
 
 .debug-page-body {
@@ -2955,12 +3012,17 @@ input[type="range"]:active::-webkit-slider-thumb {
     background: rgba(0, 0, 0, 0.42);
     border-radius: 12px;
     pointer-events: auto;
+    box-sizing: border-box;
+    overflow: hidden;
     animation: release-overlay-fade 0.18s ease;
 }
 
 .release-notice-card {
     width: 100%;
     max-width: 360px;
+    max-height: 100%;
+    min-height: 0;
+    box-sizing: border-box;
     background: rgba(255, 255, 255, 0.98);
     border: 1px solid rgba(0, 0, 0, 0.06);
     border-radius: 12px;
@@ -2970,13 +3032,28 @@ input[type="range"]:active::-webkit-slider-thumb {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    overflow: hidden;
     animation: release-card-pop 0.2s ease forwards;
 }
 
 .release-notice-content {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
     flex-direction: column;
     gap: 10px;
+    padding-right: 2px;
+    scrollbar-width: thin;
+}
+
+.release-notice-content::-webkit-scrollbar {
+    width: 4px;
+}
+
+.release-notice-content::-webkit-scrollbar-thumb {
+    background: #d8dde5;
+    border-radius: 999px;
 }
 
 .release-notice-close {
@@ -3097,6 +3174,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 .release-notice-actions {
+    flex-shrink: 0;
     display: flex;
     justify-content: flex-end;
     gap: 6px;
@@ -3104,6 +3182,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 .release-notice-pager {
+    flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;

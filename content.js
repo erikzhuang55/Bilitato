@@ -54,7 +54,8 @@ const {
     buildTasksProgressTaskId,
     canRunTasksWithCache,
     createChatMessageId,
-    createPendingChatMessages
+    createPendingChatMessages,
+    needsSubtitleForTasks
 } = globalThis.BilitatoContentAi || {};
 const {
     createCloudReadState,
@@ -77,6 +78,8 @@ const {
     mapErrorToView,
     renderErrorPanel
 } = globalThis.BilitatoContentErrorMessages || {};
+
+const DEBUG_LOG_DISPLAY_LIMIT = 2000;
 
 const SETUP_PREVIEW_VIDEO_URL = "https://www.bilibili.com/video/BV1ojfDBSEPv/?spm_id_from=333.337.search-card.all.click&vd_source=3f5a30216e0108cea18aa63a3bff11b8";
 const SETUP_PREVIEW_BVID = normalizeBvidCase(getBvidFromUrl?.(SETUP_PREVIEW_VIDEO_URL) || "BV1ojfDBSEPv");
@@ -212,7 +215,8 @@ function patchTranscriptionState(patch = {}) {
         const incomingProgress = Math.max(0, Math.min(100, Number(nextPatch.progress) || 0));
         const sameTask = !nextPatch.bvid || !current.bvid || normalizeBvidCase(nextPatch.bvid) === normalizeBvidCase(current.bvid);
         const stillRunning = current.phase === "running" || nextPatch.phase === "running";
-        nextPatch.progress = sameTask && stillRunning && incomingProgress < currentProgress
+        const startsNewRun = nextPatch.phase === "running" && current.phase !== "running" && incomingProgress <= 10;
+        nextPatch.progress = !startsNewRun && sameTask && stillRunning && incomingProgress < currentProgress
             ? currentProgress
             : incomingProgress;
     }
@@ -1247,6 +1251,20 @@ function bindPanelDelegatedEvents() {
             renderContent();
             return;
         }
+        if (action === "summary-refresh-subtitle-cache") {
+            const target = normalizeBvidCase(resolveCurrentBvid() || "");
+            if (target) {
+                appState.cloudReadState = createCloudReadState(target, "idle", Number(appState.cloudReadState?.requestId || 0) + 1);
+                startCloudReadForCurrentVideo({ bvid: target, silent: false });
+            }
+            return;
+        }
+        if (action === "goto-cc-tab") {
+            appState.activePage = "CC";
+            renderNav();
+            renderContent();
+            return;
+        }
         if (action === "settings-toggle-secret") {
             const targetId = String(actionNode.dataset.target || "").trim();
             const input = targetId && panelShadowRoot ? panelShadowRoot.getElementById(targetId) : null;
@@ -1413,7 +1431,7 @@ function renderNav() {
         { id: "summary", file: "summary.png", slot: "top" },
         { id: "chat", file: "chat.png", slot: "top" },
         { id: "real", file: "real.png", slot: "top" },
-        ...(IS_DEBUG_MODE ? [{ id: "debug", file: "settings.png", slot: "top", label: "测试" }] : []),
+        { id: "debug", file: "settings.png", slot: "top", label: "测试" },
         { id: "copy", file: "copy.png", slot: "bottom", label: "复制" },
         { id: "export", file: "download.png", slot: "bottom", label: "导出" },
         { id: "settings", file: "settings.png", slot: "bottom", label: "设置" }
@@ -1423,6 +1441,7 @@ function renderNav() {
 
     items.forEach((item) => {
         const shouldRender = (() => {
+            if (item.id === "debug" && !isDebugLoggingEnabled()) return false;
             if (appState.activePage === "summary") {
                 return item.id !== "copy" && item.id !== "export";
             }
@@ -1502,6 +1521,10 @@ function renderContent() {
 
     const pages = ["CC", "summary", "chat", "real", "debug", "settings"];
     pages.forEach((id) => {
+        if (id === "debug" && !isDebugLoggingEnabled()) {
+            if (appState.activePage === "debug") appState.activePage = "settings";
+            return;
+        }
         let container = panelShadowRoot.getElementById(`page-${id}`);
         if (!container) {
             container = document.createElement("div");
@@ -1672,16 +1695,26 @@ function renderSummary(panel) {
             return;
         }
         const hasSubtitle = hasUsableSubtitleCache(appState.cache, resolveCurrentBvid());
-        let btnDisabled = (!hasSubtitle && !isTranscriptionRunning()) ? "disabled" : "";
-        let tipText = hasSubtitle ? "去除噪音，抓住重点。" : "当前视频未检测到字幕，无法总结";
-        let btnOpacity = (hasSubtitle || isTranscriptionRunning()) ? "1" : "0.5";
-        let btnText = "生成 AI 总结";
+        const isCheckingSubtitleCache = !hasSubtitle && isCloudReadLoadingForCurrentVideo();
+        let btnDisabled = isTranscriptionRunning() ? "disabled" : "";
+        let tipText = hasSubtitle ? "去除噪音，抓住重点。" : "点击后将先检查字幕缓存。";
+        let btnOpacity = isTranscriptionRunning() ? "0.5" : "1";
+        let btnText = isCheckingSubtitleCache ? "检查并生成" : "生成 AI 总结";
+        let extraActionsHtml = "";
 
         if (isTranscriptionRunning()) {
             btnDisabled = "disabled";
             tipText = "正在生成字幕，请稍候...";
             btnOpacity = "0.5";
             btnText = "生成 AI 总结";
+        } else if (isCheckingSubtitleCache) {
+            tipText = "正在检查字幕缓存，也可以直接点击生成重试。";
+        } else if (!hasSubtitle) {
+            panel.innerHTML = `
+                ${headerHtml}
+                ${renderMissingSubtitleState()}
+            `;
+            return;
         }
         
         panel.innerHTML = `
@@ -1690,6 +1723,7 @@ function renderSummary(panel) {
                 <div class="action-container">
                     <p class="action-tip">${tipText}</p>
                     <button class="action-btn" data-action="run-summary" ${btnDisabled} style="opacity: ${btnOpacity}">${btnText}</button>
+                    ${extraActionsHtml}
                 </div>
             </div>
         `;
@@ -3151,6 +3185,40 @@ function renderErrorDemoControls() {
     `;
 }
 
+function renderSubtitleEmptyDemoControls() {
+    return `
+        <div class="settings-group-title">字幕空状态</div>
+        <div class="error-demo-section">
+            <div class="error-demo-label">总结页无字幕提示预览</div>
+            <div class="debug-state-preview">
+                ${renderMissingSubtitleState()}
+            </div>
+        </div>
+    `;
+}
+
+function renderSegmentPromptDebugControls() {
+    const variant = String(appState.settings?.segmentPromptVariant || "test").toLowerCase() === "original" ? "original" : "test";
+    const debugEnabled = !!appState.settings?.debugMode;
+    return `
+        <div class="settings-group-title">分段 Prompt 对比</div>
+        <div class="error-demo-section">
+            <div class="error-demo-label">调试日志</div>
+            <select id="debug-mode-inline">
+                <option value="false" ${debugEnabled ? "" : "selected"}>关闭</option>
+                <option value="true" ${debugEnabled ? "selected" : ""}>开启</option>
+            </select>
+            <div class="empty-text" style="margin-top:8px;">开启后会记录完整 Prompt 分块。测试完建议关闭。</div>
+            <div class="error-demo-label">当前用于“视频分段 + 广告识别”的 Prompt</div>
+            <select id="debug-segment-prompt-variant">
+                <option value="test" ${variant === "test" ? "selected" : ""}>测试版：简化分段 + 广告识别</option>
+                <option value="original" ${variant === "original" ? "selected" : ""}>原版：当前正式分段 Prompt</option>
+            </select>
+            <div class="empty-text" style="margin-top:8px;">切换后重新点击总结/分段刷新生效。开启调试模式后，日志会输出实际发送给 AI 的 Prompt 分块。</div>
+        </div>
+    `;
+}
+
 function renderDebugPanel(panel) {
     panel.dataset.lastSignature = "debug";
     panel.innerHTML = `
@@ -3158,13 +3226,61 @@ function renderDebugPanel(panel) {
             <h3>测试</h3>
         </div>
         <div class="page-body debug-page-body">
+            ${renderSegmentPromptDebugControls()}
+            ${renderSubtitleEmptyDemoControls()}
             ${renderErrorDemoControls()}
             ${renderRealtimeLogPanel()}
         </div>
     `;
+    bindSegmentPromptDebugControls(panel);
     bindRealtimeLogPanel(panel);
     renderRealtimeLogData();
     startRealtimeLogPolling();
+}
+
+function bindSegmentPromptDebugControls(panel) {
+    const debugSelect = panel?.querySelector("#debug-mode-inline");
+    if (debugSelect) {
+        debugSelect.addEventListener("change", async () => {
+            const debugMode = String(debugSelect.value || "false") === "true";
+            const nextSettings = { ...(appState.settings || {}), debugMode };
+            try {
+                const res = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: nextSettings });
+                if (!res?.ok) throw new Error(res?.error || "保存失败");
+                appState.settings = res.settings || nextSettings;
+                IS_DEBUG_MODE = !!debugMode;
+                logUI.info(debugMode ? "runtime_debug_enabled" : "runtime_debug_disabled", {
+                    task: "debug",
+                    detail: { source: "debug_page_inline_toggle" }
+                });
+                showToast(debugMode ? "已开启调试日志" : "已关闭调试日志");
+                renderNav();
+                renderRealtimeLogData();
+            } catch (error) {
+                showToast(error.message || "切换失败");
+                debugSelect.value = appState.settings?.debugMode ? "true" : "false";
+            }
+        });
+    }
+    const select = panel?.querySelector("#debug-segment-prompt-variant");
+    if (!select) return;
+    select.addEventListener("change", async () => {
+        const segmentPromptVariant = String(select.value || "test") === "original" ? "original" : "test";
+        const nextSettings = { ...(appState.settings || {}), segmentPromptVariant };
+        try {
+            const res = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: nextSettings });
+            if (!res?.ok) throw new Error(res?.error || "保存失败");
+            appState.settings = res.settings || nextSettings;
+            logUI.info("debug_segment_prompt_variant_changed", {
+                task: "debug",
+                detail: { segment_prompt_variant: segmentPromptVariant }
+            });
+            showToast(segmentPromptVariant === "original" ? "已切换为原版分段 Prompt" : "已切换为测试版分段 Prompt");
+        } catch (error) {
+            showToast(error.message || "切换失败");
+            select.value = String(appState.settings?.segmentPromptVariant || "test") === "original" ? "original" : "test";
+        }
+    });
 }
 
 function renderRealtimeLogPanel() {
@@ -3201,7 +3317,23 @@ async function runTasks(tasks) {
     // Check for subtitle existence before running summary or segments
     if (!canRunTasksWithCache(tasks, resolveCurrentBvid(), appState.cache)) {
         const currentBvid = resolveCurrentBvid();
-        if (!currentBvid || appState.cache?.bvid !== currentBvid || !hasSubtitleInCache(appState.cache)) showToast("当前视频暂无字幕，无法生成总结");
+        if (needsSubtitleForTasks(tasks) && currentBvid) {
+            const synced = await syncCacheFromBackgroundWithRetry(currentBvid, 3, 120, { skipCloud: false });
+            if (synced && canRunTasksWithCache(tasks, currentBvid, appState.cache)) {
+                return runTasks(tasks);
+            }
+        }
+        if (!currentBvid || normalizeBvidCase(appState.cache?.bvid || "") !== normalizeBvidCase(currentBvid) || !hasSubtitleInCache(appState.cache)) {
+            if (currentBvid) {
+                appState.cloudReadState = createCloudReadState(
+                    currentBvid,
+                    "failed",
+                    Number(appState.cloudReadState?.requestId || 0)
+                );
+            }
+            if (appState.activePage === "summary") renderContent();
+            showToast("当前视频暂无字幕，无法生成总结");
+        }
         return;
     }
 
@@ -3756,7 +3888,17 @@ function shouldAutoScrollChat() {
 }
 
 function isCloudReadLoadingForCurrentVideo() {
-    return isCloudReadLoadingForVideo(appState.cloudReadState, resolveCurrentBvid());
+    if (!isCloudReadLoadingForVideo(appState.cloudReadState, resolveCurrentBvid())) return false;
+    const startedAt = Number(appState.cloudReadState?.startedAt || 0);
+    if (startedAt && Date.now() - startedAt > CLOUD_READ_TIMEOUT_MS + 500) {
+        appState.cloudReadState = createCloudReadState(
+            appState.cloudReadState?.bvid || resolveCurrentBvid() || "",
+            "failed",
+            Number(appState.cloudReadState?.requestId || 0)
+        );
+        return false;
+    }
+    return true;
 }
 
 function shouldAttemptCloudReadForVideo(bvid) {
@@ -3821,13 +3963,13 @@ function startCloudReadForCurrentVideo(options = {}) {
                 applyCacheSubtitleState(cache, target);
             }
             appState.cloudReadState = createCloudReadState(target, "success", nextRequestId);
-            if (cacheUpdated || !silent) renderContent();
+            if (cacheUpdated || !silent || appState.activePage === "summary") renderContent();
         })
         .catch((error) => {
             if (normalizeBvidCase(appState.cloudReadState?.bvid || "") !== target) return;
             if (Number(appState.cloudReadState?.requestId || 0) !== nextRequestId) return;
             appState.cloudReadState = createCloudReadState(target, "failed", nextRequestId);
-            if (!silent) renderContent();
+            if (!silent || appState.activePage === "summary") renderContent();
             if (String(error?.message || "") && String(error.message) !== "CLOUD_TIMEOUT") {
                 reportContentError?.(error, { task: "cloud_read", source: "cloud_read" });
                 notifyMappedError({ ...error, code: "CLOUD_FAILED" }, "访问云端数据库失败");
@@ -3848,6 +3990,20 @@ function renderCloudLoadingState(title, detail = "读取云端数据中...") {
         <div class="page-body subtitle-empty-container">
             <div class="action-container">
                 <p class="action-tip">${detail}</p>
+            </div>
+        </div>
+    `;
+}
+
+function renderMissingSubtitleState() {
+    return `
+        <div class="page-body subtitle-empty-container">
+            <div class="action-container">
+                <p class="action-tip">暂无字幕</p>
+                <div class="subtitle-empty-actions">
+                    <button class="action-btn subtitle-empty-primary" data-action="goto-cc-tab">去生成字幕</button>
+                    <button class="action-btn ghost subtitle-empty-secondary" data-action="summary-refresh-subtitle-cache">刷新</button>
+                </div>
             </div>
         </div>
     `;
@@ -5089,7 +5245,7 @@ async function renderLogWindowData() {
         if (!res?.ok) throw new Error(res?.error || "读取日志失败");
         const logs = Array.isArray(res.logs) ? res.logs : [];
         box.textContent = logs
-            .slice(-200)
+            .slice(-DEBUG_LOG_DISPLAY_LIMIT)
             .map((item) => `${item.time} ${item.level} ${item.module} ${item.event} ${JSON.stringify(item.detail || {})}`)
             .join("\n");
     } catch (error) {
@@ -5114,9 +5270,12 @@ async function renderRealtimeLogData() {
         if (!res?.ok) throw new Error(res?.error || "读取日志失败");
         const logs = Array.isArray(res.logs) ? res.logs : [];
         box.textContent = logs.length
-            ? logs.slice(-200).map(formatLogEntryLine).join("\n")
+            ? logs.slice(-DEBUG_LOG_DISPLAY_LIMIT).map(formatLogEntryLine).join("\n")
             : "暂无日志。请先在测试页或插件里触发一次操作。";
-        if (status) status.textContent = `${logs.length} 条，${formatTimelineTime(Date.now())} 已刷新`;
+        if (status) {
+            const shown = Math.min(logs.length, DEBUG_LOG_DISPLAY_LIMIT);
+            status.textContent = `${logs.length} 条，显示 ${shown} 条，${formatTimelineTime(Date.now())} 已刷新`;
+        }
     } catch (error) {
         box.textContent = `读取日志失败：${error.message || "未知错误"}`;
         if (status) status.textContent = "读取失败";
@@ -5590,13 +5749,17 @@ async function syncCacheFromBackground(bvid, options = {}) {
     const target = normalizeBvidCase(bvid || getBvidFromUrl(location.href) || "");
     if (!target) return;
     const now = Date.now();
-    if (!appState.isStateDirty && appState.lastCacheSyncBvid === target && now - Number(appState.lastCacheSyncTime || 0) < CACHE_SYNC_THROTTLE_MS) {
+    if (options.force !== true && !appState.isStateDirty && appState.lastCacheSyncBvid === target && now - Number(appState.lastCacheSyncTime || 0) < CACHE_SYNC_THROTTLE_MS) {
         return;
     }
     try {
         appState.lastCacheSyncTime = now;
         appState.lastCacheSyncBvid = target;
-        const res = await chrome.runtime.sendMessage({ action: "GET_CACHE", bvid: target, skipCloud: true });
+        const res = await chrome.runtime.sendMessage({
+            action: "GET_CACHE",
+            bvid: target,
+            skipCloud: options.skipCloud !== false
+        });
         if (!res?.ok) return;
         const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href));
         if (routeBvid && routeBvid !== target) return;
@@ -5628,11 +5791,15 @@ async function syncCacheFromBackground(bvid, options = {}) {
     return false;
 }
 
-async function syncCacheFromBackgroundWithRetry(bvid, attempts = 6, delayMs = 250) {
+async function syncCacheFromBackgroundWithRetry(bvid, attempts = 6, delayMs = 250, options = {}) {
     const target = normalizeBvidCase(bvid || "");
     if (!target) return false;
     for (let i = 0; i < attempts; i++) {
-        const ok = await syncCacheFromBackground(target, { preserveCacheOnMiss: true });
+        const ok = await syncCacheFromBackground(target, {
+            preserveCacheOnMiss: true,
+            force: true,
+            skipCloud: options.skipCloud !== false
+        });
         if (ok && hasSubtitleCacheForBvid(target)) {
             return true;
         }
@@ -5781,7 +5948,10 @@ function onBackgroundMessage(message) {
     renderNav();
     const messageCacheBvid = normalizeBvidCase(cache?.bvid || "");
     appState.cache = cache && (!routeBvid || messageCacheBvid === routeBvid) ? cache : null;
-    if (cache?.rawSubtitle?.length) {
+    if (appState.cache) {
+        applyCacheSubtitleState(appState.cache, payloadBvid || routeBvid);
+    }
+    if (cache?.rawSubtitle?.length || cache?.processedSubtitle?.length) {
         reconcileTranscriptionState(payloadBvid || routeBvid);
     }
     appState.isStateDirty = false;
@@ -5802,66 +5972,7 @@ function pushSubtitleTimeline(stage, detail) {
 function renderSubtitleTimelinePanel(panel) {
     if (!panel) return;
     const oldNode = panel.querySelector(".subtitle-timeline-panel");
-    const isDebugMode = !!appState.settings?.debugMode;
-    if (!isDebugMode) {
-        if (oldNode) oldNode.remove();
-        return;
-    }
-    const timelineRows = Array.isArray(appState.subtitleTimeline) ? appState.subtitleTimeline : [];
-    const rows = timelineRows.slice(-12).reverse();
-    const hadFocus = (panelShadowRoot && panelShadowRoot.activeElement && panelShadowRoot.activeElement.id === "subtitle-search");
-    const activeInput = hadFocus ? panelShadowRoot.activeElement : null;
-    const activeSelectionStart = activeInput ? Number(activeInput.selectionStart || 0) : 0;
-    const activeSelectionEnd = activeInput ? Number(activeInput.selectionEnd || 0) : 0;
-    const section = oldNode || document.createElement("section");
-    section.className = "panel-section subtitle-timeline-panel";
-    if (!oldNode) {
-        section.innerHTML = `<div class="section-head"><h3>时序</h3><div class="timeline-search-box"><input type="text" id="subtitle-search" /><button type="button" id="clear-search" class="timeline-search-clear clear-btn" aria-label="清空">×</button></div></div><div class="subtitle-timeline-list"></div>`;
-        panel.appendChild(section);
-    }
-    const searchInput = section.querySelector("#subtitle-search");
-    const clearButton = section.querySelector("#clear-search");
-    const listContainer = section.querySelector(".subtitle-timeline-list");
-    if (!searchInput || !clearButton || !listContainer) return;
-    const currentTerm = String(appState.timelineSearchTerm || "");
-    if (searchInput.value !== currentTerm) searchInput.value = currentTerm;
-    const renderListOnly = (rawTerm) => {
-        const term = String(rawTerm || "");
-        appState.timelineSearchTerm = term;
-        clearButton.classList.toggle("visible", term.length > 0);
-        const logsHtml = renderTimelineRowsHtml(timelineRows, term);
-        listContainer.innerHTML = `<div class="timeline-logs-container">${logsHtml}</div>`;
-    };
-    renderListOnly(currentTerm);
-    searchInput.oninput = () => {
-        const nextTerm = String(searchInput.value || "");
-        if (appState.timelineSearchDebounceTimer) {
-            clearTimeout(appState.timelineSearchDebounceTimer);
-            appState.timelineSearchDebounceTimer = null;
-        }
-        appState.timelineSearchDebounceTimer = setTimeout(() => {
-            appState.timelineSearchDebounceTimer = null;
-            renderListOnly(nextTerm);
-        }, 100);
-    };
-    clearButton.onclick = () => {
-        if (appState.timelineSearchDebounceTimer) {
-            clearTimeout(appState.timelineSearchDebounceTimer);
-            appState.timelineSearchDebounceTimer = null;
-        }
-        searchInput.value = "";
-        renderListOnly("");
-        searchInput.focus();
-    };
-    if (hadFocus) {
-        searchInput.focus();
-        if (typeof searchInput.setSelectionRange === "function") {
-            const max = String(searchInput.value || "").length;
-            const start = Math.max(0, Math.min(max, activeSelectionStart));
-            const end = Math.max(0, Math.min(max, activeSelectionEnd));
-            searchInput.setSelectionRange(start, end);
-        }
-    }
+    if (oldNode) oldNode.remove();
 }
 
 function renderTimelineRowsHtml(sourceRows, rawTerm, showCapsule) {

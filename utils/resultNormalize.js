@@ -90,7 +90,22 @@ export function normalizeSegments(value, hooks = {}) {
                 });
                 return null;
             }
-            return { start, end, label, type };
+            const result = { start, end, label, type };
+            if (item && typeof item === "object") {
+                const startLine = Number(item.start_line ?? item.startLine ?? item.line_start ?? item.lineStart);
+                const endLine = Number(item.end_line ?? item.endLine ?? item.line_end ?? item.lineEnd);
+                if (Number.isInteger(startLine) && startLine >= 0) result.start_line = startLine;
+                if (Number.isInteger(endLine) && endLine >= 0) result.end_line = endLine;
+                if (type === "ad") {
+                    const adStartLine = Number(item.ad_start_line ?? item.adStartLine ?? item.start_line ?? item.startLine);
+                    const adEndLine = Number(item.ad_end_line ?? item.adEndLine ?? item.end_line ?? item.endLine);
+                    if (Number.isInteger(adStartLine) && adStartLine >= 0) result.ad_start_line = adStartLine;
+                    if (Number.isInteger(adEndLine) && adEndLine >= 0) result.ad_end_line = adEndLine;
+                    if (!Number.isInteger(startLine) && Number.isInteger(adStartLine) && adStartLine >= 0) result.start_line = adStartLine;
+                    if (!Number.isInteger(endLine) && Number.isInteger(adEndLine) && adEndLine >= 0) result.end_line = adEndLine;
+                }
+            }
+            return result;
         })
         .filter(Boolean);
     if (fuzzyHits.length && typeof hooks.onFuzzyHit === "function") {

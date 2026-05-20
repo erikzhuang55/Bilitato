@@ -1,20 +1,102 @@
 export const TASK_PROMPT_FORMAT_RULES = {
-    segments: "【技术规范】只输出 JSON 数组，严禁包含任何 Markdown 代码块或解释性文字。格式严格遵守：[{\"start\":数字,\"end\":数字,\"label\":\"字符串\",\"type\":\"content\"|\"ad\"}]。",
+    segments: "【技术规范】只输出 JSON 数组，严禁包含任何 Markdown 代码块或解释性文字。格式严格遵守：普通章节为 {\"start\":数字,\"end\":数字,\"start_line\":数字,\"end_line\":数字,\"label\":\"字符串\",\"type\":\"content\"}；广告章节为 {\"start\":数字,\"end\":数字,\"start_line\":数字,\"end_line\":数字,\"label\":\"字符串\",\"type\":\"ad\",\"ad_start_line\":数字,\"ad_end_line\":数字}。所有 line 值必须来自逐句字幕前的 #编号，系统会优先用 line_id 映射最终时间。",
     rumors: "【技术规范】只输出 JSON 对象，严禁 Markdown。结构必须包含：{ \"overall_score\": 数字, \"overview\": \"字符串\", \"claims\": [{\"text\":\"内容\",\"timestamp\":数字,\"verdict\":布尔值,\"analysis\":\"原因\"}] }。",
     summary:  "【技术规范】输出 Markdown 正文，严禁输出 JSON。必须使用 3-5 个加粗小标题（格式：**小标题**）；禁止使用一级标题 ；禁止整段纯文本输出。"
 };
 
 export const MERGED_SEGMENTS_FORMAT_RULE = `
 【分段输出字段规范（必须匹配系统标准）】
-SEGMENTS 部分必须输出 JSON 数组，每个对象必须且仅能包含以下字段：
+SEGMENTS 部分必须输出 JSON 数组，每个对象必须包含以下字段：
 - start: 数字（秒）
 - end: 数字（秒，且必须大于 start）
+- start_line: 数字（章节开始对应的逐句字幕 #编号）
+- end_line: 数字（章节结束对应的逐句字幕 #编号）
 - label: 字符串（章节标题）
 - type: "content" 或 "ad"
 
+广告段额外必须包含：
+- ad_start_line: 数字（广告开始对应的逐句字幕 #编号）
+- ad_end_line: 数字（广告结束对应的逐句字幕 #编号）
+
 禁止输出字段：time_start、time_end、start_time、end_time、title、name、summary、content 等。
 示例：
-[{"start":0,"end":105,"label":"案件引入与背景介绍","type":"content"}]
+[{"start":0,"end":105,"start_line":0,"end_line":40,"label":"案件引入与背景介绍","type":"content"},{"start":407,"end":520,"start_line":120,"end_line":145,"label":"品牌推广","type":"ad","ad_start_line":120,"ad_end_line":145}]
+`.trim();
+
+export const SEGMENTS_AD_TEST_PROMPT = `
+你是一个 B 站视频分段助手。请基于字幕，把视频划分为适合进度条展示的章节，并识别广告片段。
+
+【输入说明】
+字幕每行格式如下：
+#行号 [开始时间-结束时间] 字幕内容
+
+【任务】
+1. 按视频内容变化划分章节。
+2. 识别广告片段。
+3. 必须覆盖整个视频，从第一行字幕到最后一行字幕。
+4. 不要只分析前半段，最后一个章节必须覆盖到字幕最后一行附近。
+
+【分段要求】
+- 10 分钟以内：4-7 段。
+- 10-25 分钟：6-10 段。
+- 25-45 分钟：8-12 段。
+- 45 分钟以上：10-16 段。
+- 遇到新案件、新人物、新阶段、新证据、新观点、结论变化时，应拆成新段。
+- 普通正文段 type 为 "content"。
+- 广告段 type 为 "ad"。
+
+【广告判断】
+广告是指视频主线暂停，开始推广产品、服务、课程、APP、活动、优惠、购买/下载/注册链接等内容。
+
+广告段必须返回：
+- ad_start_line：广告开始的字幕行号。
+- ad_end_line：广告结束的字幕行号。
+
+广告开始行：
+第一句明确进入推广内容的字幕。
+
+广告结束行：
+最后一句仍属于推广内容的字幕。
+
+广告结束规则补充：
+- 广告段中的情绪铺垫、送礼场景、亲情表达、用户痛点共鸣、使用体验延伸，仍属于广告的一部分。
+- 不要因为某几句没有出现品牌名、产品名或购买词，就判定广告结束。
+- 只有当字幕明确回到视频原本主题、案件、故事、教程或正文主线时，才算广告结束。
+- 如果广告后出现“回到正题 / 说回案件 / 继续刚才的话题 / 接着讲故事 / 话说回来”等明显回归主线表达，应把这些句子作为正文，不算广告。
+
+【输出格式】
+只输出 JSON 数组，不要 Markdown，不要解释。
+
+普通段格式：
+{
+  "start": 秒数,
+  "end": 秒数,
+  "start_line": 行号,
+  "end_line": 行号,
+  "label": "简短章节标题",
+  "type": "content"
+}
+
+广告段格式：
+{
+  "start": 秒数,
+  "end": 秒数,
+  "start_line": 行号,
+  "end_line": 行号,
+  "label": "广告：产品或服务名称",
+  "type": "ad",
+  "ad_start_line": 行号,
+  "ad_end_line": 行号
+}
+
+【重要约束】
+- start/end 必须来自字幕时间，不要凭空估算。
+- start_line/end_line 必须来自字幕开头的 #行号；普通正文和广告都必须填写。
+- 系统会优先使用 start_line/end_line 映射最终 start/end，start/end 只作为兼容字段。
+- 所有分段按时间升序排列。
+- 不要重叠。
+- 不要漏掉视频后半段。
+- 最后一段 end 必须接近最后一行字幕的结束时间。
 `.trim();
 
 export const OUTPUT_PROTOCOL = `
@@ -112,14 +194,22 @@ export const TASK_PROMPTS = {
 任务：根据字幕内容划分视频章节，并识别广告段落。
 
 要求：
-1. 按内容逻辑划分章节，通常为 5–10 个，具体数量可根据视频长度调整。
+1. 按内容逻辑划分章节，粒度要适合进度条导航，不要只按“大事件”粗分。
+   - 10 分钟以内：通常 4–7 个章节。
+   - 10–25 分钟：通常 6–10 个章节。
+   - 25–45 分钟：通常 8–12 个章节。
+   - 45 分钟以上：通常 10–16 个章节。
+   - 除非视频本身确实长期只讲同一件事，否则普通 content 章节尽量不要超过 5–7 分钟。
 2. 每个章节需要有：
    - 一个简短清晰的小标题，像视频进度条章节标题
    - 一段精炼的内容概述，概括本段核心信息
+   - start_line 和 end_line，必须直接来自逐句字幕前的 #编号
 3. 章节必须按时间顺序排列，并尽量连续覆盖视频内容，不要出现明显重叠或错序。
    - 但广告段例外：广告的 start 和 end 必须精确对应字幕中推广内容的实际边界，
    - 允许广告段与相邻 content 段之间存在小段空隙，不强求无缝衔接。
 4. 必须覆盖视频全程，不要在视频中途停止分段，字幕中最后出现的内容必须被包含在某个章节内。
+   - 遇到案件、人物、地点、观点、时间线、证据、争议点、结论明显切换时，应拆成新章节。
+   - 广告前后的正文内容应拆成不同 content 章节，不要用一个超长 content 章节跨过广告。
 
 广告识别规则：
 5. 广告通常具有以下特征：
@@ -134,9 +224,11 @@ export const TASK_PROMPTS = {
    - 广告段内出现的"用户好评""家人推荐""朋友使用体验"等内容，仍属于广告段的一部分，不视为回归主线。
 
 7. 时间戳规则（严格执行）：
-   - 输出的 start 和 end 必须直接来自字幕中对应那句话的时间戳，禁止自行估算。
+   - 对所有段落，必须输出 start_line 和 end_line，line 值必须直接来自【分段与广告逐句字幕】中的 #编号。
+   - 对广告段，还必须额外输出 ad_start_line 和 ad_end_line；通常它们应与 start_line/end_line 相同。
+   - 所有段落的 start/end 可以先按对应行的时间填写，但最终系统会以 start_line/end_line 映射到原始字幕时间为准。
    - 转换方法：[m:ss] 转秒数 = m×60+ss，例如 [6:47] = 6×60+47 = 407。
-   - 如果找不到对应句子的精确时间戳，宁可缩小广告区间，不可扩大。
+   - 如果找不到对应的 #编号，宁可缩小到确定的字幕行，不要估算区间。
 
 8. 其他规则：
    - 广告段标记为 ad，正常内容标记为 content。
@@ -287,7 +379,23 @@ export function buildDurationHardRule(taskContext) {
     const info = resolveDurationPromptContext(taskContext);
     if (!info) return "";
     const lastSegmentStart = Math.floor(info.totalSeconds * 0.75);
-    return `核心强制：视频总时长 ${info.totalSeconds} 秒（${info.formattedTime}），最后一个章节的 start 必须大于 ${lastSegmentStart} 秒，确保视频后半段内容（包括结局）不被遗漏。章节时间戳必须直接来自字幕，禁止估算。请根据总时长将章节控制为 6-8 个并尽量均衡分布。`;
+    const minutes = info.totalSeconds / 60;
+    let target = "6-8";
+    let maxContentMinutes = 5;
+    if (minutes <= 10) {
+        target = "4-7";
+        maxContentMinutes = 4;
+    } else if (minutes <= 25) {
+        target = "6-10";
+        maxContentMinutes = 5;
+    } else if (minutes <= 45) {
+        target = "8-12";
+        maxContentMinutes = 6;
+    } else {
+        target = "10-16";
+        maxContentMinutes = 7;
+    }
+    return `核心强制：视频总时长 ${info.totalSeconds} 秒（${info.formattedTime}），最后一个章节的 start 必须大于 ${lastSegmentStart} 秒，确保视频后半段内容（包括结局）不被遗漏。章节时间戳必须直接来自字幕，禁止估算。请根据总时长将章节控制为 ${target} 个，普通 content 章节尽量不要超过 ${maxContentMinutes} 分钟；如果出现案件阶段、人物视角、证据、观点或结论切换，必须拆成新章节，不要为了少分段把多个主题合并。`;
 }
 
 export function buildPrompt({
@@ -328,12 +436,28 @@ export function buildPrompt({
     ].filter(Boolean).join("\n\n");
 }
 
+export function buildSegmentsAdTestPrompt({
+    subtitle,
+    taskContext = {}
+}) {
+    const videoMetaBlock = buildVideoMetaBlock(taskContext);
+    const durationHardRule = buildDurationHardRule(taskContext);
+    const subtitleBlock = `【字幕内容】\n${subtitle}`.trim();
+    return [
+        SEGMENTS_AD_TEST_PROMPT,
+        durationHardRule,
+        videoMetaBlock,
+        subtitleBlock
+    ].filter(Boolean).join("\n\n");
+}
+
 export function buildMergedSummarySegmentsPrompt({
     subtitle,
     mode = "guided",
     guided = {},
     customPrompts = {},
-    taskContext = {}
+    taskContext = {},
+    segmentsPromptOverride = ""
 }) {
     const videoMetaBlock = buildVideoMetaBlock(taskContext);
     const durationHardRule = buildDurationHardRule(taskContext);
@@ -351,7 +475,7 @@ export function buildMergedSummarySegmentsPrompt({
         parts.push("【输出风格要求】", toneRule, detailRule);
     }
     parts.push("【任务1：视频总结】", summaryPrompt);
-    parts.push("【任务2：视频分段】", segmentsPrompt, durationHardRule);
+    parts.push("【任务2：视频分段】", segmentsPromptOverride || segmentsPrompt, durationHardRule);
     parts.push(MERGED_SEGMENTS_FORMAT_RULE);
     parts.push(videoMetaBlock);
     parts.push(subtitleBlock);

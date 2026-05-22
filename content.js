@@ -39,6 +39,81 @@ function isNoTimestampSubtitleCache(cache = {}) {
     if (!raw.length) return false;
     return raw.some((item) => item?.noTimestamp === true);
 }
+
+function getProviderModelOptions(providerKey) {
+    const key = String(providerKey || "").toLowerCase();
+    const options = {
+        modelscope: [
+            "moonshotai/Kimi-K2.5",
+            "MiniMax/MiniMax-M2.5",
+            "ZhipuAI/GLM-5.1",
+            "deepseek-ai/DeepSeek-V3.2",
+            "Qwen3.5-27B"
+        ],
+        zhipu: [
+            "glm-5.1",
+            "glm-5",
+            "glm-5-turbo",
+            "glm-4.7",
+            "glm-4.6",
+            "glm-4.5"
+        ],
+        gemini: [
+            "gemini-3.5-flash",
+            "gemini-3.1-pro-preview",
+            "gemini-3-flash-preview",
+            "gemini-3.1-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite"
+        ],
+        openai: [
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.4-pro",
+            "gpt-5.4-mini",
+            "gpt-5.4-nano",
+            "gpt-5.2",
+            "gpt-5.2-pro",
+            "gpt-5.1",
+            "gpt-5",
+            "gpt-5-pro",
+            "gpt-5-mini",
+            "gpt-5-nano",
+            "gpt-4.1",
+            "gpt-4.1-mini",
+            "gpt-4o",
+            "gpt-4o-mini"
+        ],
+        deepseek: [
+            "deepseek-v4-flash",
+            "deepseek-v4-pro"
+        ],
+        kimi: [
+            "kimi-k2.6",
+            "kimi-k2.5",
+            "kimi-k2-turbo-preview",
+            "kimi-k2-thinking",
+            "kimi-k2-thinking-turbo",
+            "moonshot-v1-8k",
+            "moonshot-v1-32k",
+            "moonshot-v1-128k"
+        ],
+        claude: [
+            "claude-opus-4-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5",
+            "claude-haiku-4-5"
+        ]
+    };
+    return options[key] || [];
+}
+
+function getDefaultProviderModel(providerKey) {
+    const options = getProviderModelOptions(providerKey);
+    return options[0] || "";
+}
 const {
     buildCacheTagHtml,
     getTaskCacheSource
@@ -3113,19 +3188,13 @@ function renderSettings(panel) {
     const promptRumors = String(promptSettings.custom.rumors || "");
     const customProtocol = String(settings.customProtocol || "openai").toLowerCase() === "claude" ? "claude" : "openai";
     const defaultOpenPage = resolveDefaultOpenPage(settings.defaultOpenPage);
-    const modelScopeModelOptions = [
-        "moonshotai/Kimi-K2.5",
-        "MiniMax/MiniMax-M2.5",
-        "ZhipuAI/GLM-5.1",
-        "deepseek-ai/DeepSeek-V3.2",
-        "Qwen3.5-27B"
-    ];
-    const currentModel = String(settings.model || "moonshotai/Kimi-K2.5").trim();
-    const isModelScopeProvider = providerKey === "modelscope";
-    const modelScopeSelectValue = modelScopeModelOptions.includes(currentModel) ? currentModel : "custom";
-    const modelScopeCustomVisible = isModelScopeProvider && modelScopeSelectValue === "custom" ? "" : "settings-hidden";
-    const modelScopeWrapVisible = isModelScopeProvider ? "" : "settings-hidden";
-    const plainModelVisible = isModelScopeProvider ? "settings-hidden" : "";
+    const providerModelOptions = getProviderModelOptions(providerKey);
+    const hasProviderModelSelect = providerKey !== "custom" && providerModelOptions.length > 0;
+    const currentModel = String(settings.model || getDefaultProviderModel(providerKey) || "").trim();
+    const providerModelSelectValue = hasProviderModelSelect && providerModelOptions.includes(currentModel) ? currentModel : "custom";
+    const providerModelWrapVisible = hasProviderModelSelect ? "" : "settings-hidden";
+    const providerCustomModelVisible = hasProviderModelSelect && providerModelSelectValue === "custom" ? "" : "settings-hidden";
+    const plainModelVisible = hasProviderModelSelect ? "settings-hidden" : "";
     const asrProviderKey = String(settings.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
     const asrProviders = {
         groq: {
@@ -3179,12 +3248,12 @@ function renderSettings(panel) {
                 <label>API Key</label>
                 ${renderSecretInput("settings-api-key", settings.apiKey || "", "示例：sk-xxxxx")}
                 <label>Model</label>
-                <div id="settings-modelscope-model-wrap" class="${modelScopeWrapVisible}">
-                    ${renderCustomSelect("settings-modelscope-model", [
-                        ...modelScopeModelOptions.map((model) => ({ value: model, label: model })),
+                <div id="settings-provider-model-wrap" class="${providerModelWrapVisible}">
+                    ${renderCustomSelect("settings-provider-model", [
+                        ...providerModelOptions.map((model) => ({ value: model, label: model })),
                         { value: "custom", label: "自定义" }
-                    ], modelScopeSelectValue)}
-                    <input id="settings-modelscope-custom-model" class="${modelScopeCustomVisible}" type="text" value="${escapeHtml(currentModel)}" placeholder="请输入 ModelScope 模型名">
+                    ], providerModelSelectValue)}
+                    <input id="settings-provider-custom-model" class="${providerCustomModelVisible}" type="text" value="${escapeHtml(currentModel)}" placeholder="请输入模型名">
                 </div>
                 <input id="settings-model" class="${plainModelVisible}" type="text" value="${escapeHtml(settings.model || "")}" placeholder="示例：gpt-4o-mini / deepseek-chat / glm-4-flash">
                 <div class="settings-custom-only ${customVisible}">
@@ -3340,13 +3409,17 @@ function renderSettings(panel) {
                     // Update internal state
                     if(!appState.settings) appState.settings = {};
                     appState.settings.provider = val;
+                    const providerOptions = getProviderModelOptions(val);
+                    if (val !== "custom" && providerOptions.length && !providerOptions.includes(String(appState.settings.model || "").trim())) {
+                        appState.settings.model = providerOptions[0];
+                    }
                     
                     // Update selection visual
                     selectOptions.querySelectorAll(".custom-option").forEach(opt => opt.classList.remove("selected"));
                     option.classList.add("selected");
                     
                     // Trigger hints update
-                    updateSettingsProviderHint(panel);
+                    renderSettings(panel);
 
                     // Trigger save
                     saveSettingsFromPanel(true);
@@ -3419,20 +3492,20 @@ function renderSettings(panel) {
     const promptModeSelect = panel.querySelector("#settings-prompt-mode");
     const promptGuidedWrap = panel.querySelector("#settings-prompt-guided-wrap");
     const promptCustomWrap = panel.querySelector("#settings-prompt-custom-wrap");
-    const modelScopeModelSelect = panel.querySelector("#settings-modelscope-model");
-    const modelScopeCustomInput = panel.querySelector("#settings-modelscope-custom-model");
-    const applyModelScopeModelVisibility = () => {
-        if (modelScopeCustomInput) {
-            modelScopeCustomInput.classList.toggle("settings-hidden", String(modelScopeModelSelect?.value || "") !== "custom");
+    const providerModelSelect = panel.querySelector("#settings-provider-model");
+    const providerCustomModelInput = panel.querySelector("#settings-provider-custom-model");
+    const applyProviderModelVisibility = () => {
+        if (providerCustomModelInput) {
+            providerCustomModelInput.classList.toggle("settings-hidden", String(providerModelSelect?.value || "") !== "custom");
         }
     };
-    if (modelScopeModelSelect) {
-        modelScopeModelSelect.addEventListener("change", () => {
-            applyModelScopeModelVisibility();
+    if (providerModelSelect) {
+        providerModelSelect.addEventListener("change", () => {
+            applyProviderModelVisibility();
             triggerAutoSave();
         });
     }
-    applyModelScopeModelVisibility();
+    applyProviderModelVisibility();
     const applyPromptModeVisibility = () => {
         const mode = String(promptModeSelect?.value || "guided") === "custom" ? "custom" : "guided";
         if (promptGuidedWrap) promptGuidedWrap.classList.toggle("settings-hidden", mode !== "guided");
@@ -4463,18 +4536,18 @@ function updateSettingsProviderHint(panel) {
     const urlNode = panel?.querySelector(".settings-provider-url");
     const regBtn = panel?.querySelector('[data-action="settings-open-reg"]');
     const customWrap = panel?.querySelector(".settings-custom-only");
-    const modelScopeWrap = panel?.querySelector("#settings-modelscope-model-wrap");
+    const providerModelWrap = panel?.querySelector("#settings-provider-model-wrap");
     const plainModelInput = panel?.querySelector("#settings-model");
-    const modelScopeSelect = panel?.querySelector("#settings-modelscope-model");
-    const modelScopeCustomInput = panel?.querySelector("#settings-modelscope-custom-model");
+    const providerModelSelect = panel?.querySelector("#settings-provider-model");
+    const providerCustomModelInput = panel?.querySelector("#settings-provider-custom-model");
     const customBase = String(panel?.querySelector("#settings-base-url")?.value || "").trim();
     const isCustom = key === "custom";
-    const isModelScope = key === "modelscope";
+    const hasProviderModelSelect = !isCustom && getProviderModelOptions(key).length > 0;
     if (customWrap) customWrap.classList.toggle("settings-hidden", !isCustom);
-    if (modelScopeWrap) modelScopeWrap.classList.toggle("settings-hidden", !isModelScope);
-    if (plainModelInput) plainModelInput.classList.toggle("settings-hidden", isModelScope);
-    if (modelScopeCustomInput) {
-        modelScopeCustomInput.classList.toggle("settings-hidden", !isModelScope || String(modelScopeSelect?.value || "") !== "custom");
+    if (providerModelWrap) providerModelWrap.classList.toggle("settings-hidden", !hasProviderModelSelect);
+    if (plainModelInput) plainModelInput.classList.toggle("settings-hidden", hasProviderModelSelect);
+    if (providerCustomModelInput) {
+        providerCustomModelInput.classList.toggle("settings-hidden", !hasProviderModelSelect || String(providerModelSelect?.value || "") !== "custom");
     }
     if (urlNode) {
         urlNode.textContent = isCustom ? (customBase || "请填写自定义 Base URL") : (provider.baseUrl || "-");
@@ -4661,11 +4734,12 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
     const detailVal = Number(panel.querySelector("#settings-prompt-detail")?.value ?? 1);
     const promptTone = toneVal === 0 ? "casual" : (toneVal === 2 ? "professional" : "balanced");
     const promptDetail = detailVal === 0 ? "brief" : (detailVal === 2 ? "detailed" : "normal");
-    const modelScopeModelValue = String(panel.querySelector("#settings-modelscope-model")?.value || "").trim();
-    const resolvedModelValue = providerValue === "modelscope"
-        ? (modelScopeModelValue === "custom"
-            ? String(panel.querySelector("#settings-modelscope-custom-model")?.value || "").trim()
-            : modelScopeModelValue)
+    const providerModelValue = String(panel.querySelector("#settings-provider-model")?.value || "").trim();
+    const hasProviderModelSelect = providerValue !== "custom" && getProviderModelOptions(providerValue).length > 0;
+    const resolvedModelValue = hasProviderModelSelect
+        ? (providerModelValue === "custom"
+            ? String(panel.querySelector("#settings-provider-custom-model")?.value || "").trim()
+            : providerModelValue)
         : String(panel.querySelector("#settings-model")?.value || "").trim();
 
     const payload = {

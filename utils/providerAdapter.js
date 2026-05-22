@@ -48,6 +48,13 @@ export const PROVIDERS = {
         tokenPrefix: "Bearer ",
         regUrl: "https://platform.moonshot.cn/console/api-keys"
     },
+    claude: {
+        name: "Claude",
+        baseUrl: "https://api.anthropic.com",
+        model: "claude-sonnet-4-6",
+        type: "claude",
+        regUrl: "https://console.anthropic.com/settings/keys"
+    },
     custom: {
         name: "自定义",
         baseUrl: "",
@@ -99,6 +106,52 @@ function shouldIncludeStreamUsage(providerKey, isCustom, protocol) {
     return normalized === "openai" || normalized === "deepseek" || normalized === "custom";
 }
 
+function isClaudeRequest(req) {
+    return req?.provider?.type === "claude" || (req?.isCustom && req?.protocol === "claude");
+}
+
+function normalizeTextContent(content) {
+    if (Array.isArray(content)) {
+        return content.map((item) => {
+            if (typeof item === "string") return item;
+            return item?.text || "";
+        }).join("");
+    }
+    return String(content || "");
+}
+
+function extractGeminiText(data) {
+    const candidates = Array.isArray(data?.candidates) ? data.candidates : [];
+    return candidates.map((candidate) => {
+        const parts = candidate?.content?.parts;
+        if (Array.isArray(parts)) return parts.map((part) => part?.text || "").join("");
+        return "";
+    }).join("");
+}
+
+function extractOpenAIMessageText(data) {
+    return normalizeTextContent(data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? "");
+}
+
+function splitSseEvents(buffer) {
+    const parts = String(buffer || "").split(/\r?\n\r?\n/);
+    return {
+        events: parts.slice(0, -1),
+        rest: parts[parts.length - 1] || ""
+    };
+}
+
+function getSseDataPayloads(part) {
+    const payload = String(part || "")
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trim())
+        .join("\n")
+        .trim();
+    return payload ? [payload] : [];
+}
+
 function resolveProviderRequest(providerKey, config, messages, streaming) {
     const provider = PROVIDERS[providerKey] || PROVIDERS[config.provider] || PROVIDERS.modelscope || PROVIDERS.default;
     const isCustom = (providerKey || config.provider) === "custom";
@@ -113,10 +166,14 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
 
     let finalUrl = baseUrl;
     if (provider.type === "google") {
-        if (!finalUrl.includes(':generateContent')) {
-             finalUrl = finalUrl.replace(/\/+$/, '') + `/models/${model}:generateContent`;
+        if (!finalUrl.includes(":generateContent") && !finalUrl.includes(":streamGenerateContent")) {
+             finalUrl = finalUrl.replace(/\/+$/, "") + `/models/${model}:${streaming ? "streamGenerateContent" : "generateContent"}`;
+        } else if (streaming && finalUrl.includes(":generateContent")) {
+            finalUrl = finalUrl.replace(":generateContent", ":streamGenerateContent");
+        } else if (!streaming && finalUrl.includes(":streamGenerateContent")) {
+            finalUrl = finalUrl.replace(":streamGenerateContent", ":generateContent");
         }
-    } else if (isCustom && protocol === "claude") {
+    } else if (provider.type === "claude" || (isCustom && protocol === "claude")) {
         if (!/\/v1\/messages$/.test(finalUrl)) {
             finalUrl = finalUrl.replace(/\/+$/, "") + "/v1/messages";
         }
@@ -142,7 +199,7 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
         "Content-Type": "application/json"
     };
 
-    if (isCustom && protocol === "claude") {
+    if (provider.type === "claude" || (isCustom && protocol === "claude")) {
         headers["x-api-key"] = apiKey;
         headers["anthropic-version"] = "2023-06-01";
     } else if (provider.headerKey && provider.type !== "google") {
@@ -156,6 +213,7 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
         };
         const urlObj = new URL(finalUrl);
         urlObj.searchParams.set('key', apiKey);
+        if (streaming) urlObj.searchParams.set("alt", "sse");
         return {
             provider,
             isCustom,
@@ -165,7 +223,7 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
             body,
             finalUrl: urlObj.toString()
         };
-    } else if (isCustom && protocol === "claude") {
+    } else if (provider.type === "claude" || (isCustom && protocol === "claude")) {
         body = {
             model,
             max_tokens: 4096,
@@ -174,6 +232,7 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
                 content: String(item.content || "")
             }))
         };
+        if (streaming) body.stream = true;
         return {
             provider,
             isCustom,
@@ -235,11 +294,11 @@ export async function callAI(providerKey, config, messages, signal) {
     const data = await res.json();
     if (req.provider.type === "google") {
         return {
-            text: data.candidates?.[0]?.content?.parts?.[0]?.text || "",
+            text: extractGeminiText(data),
             headers: res.headers
         };
     }
-    if (req.isCustom && req.protocol === "claude") {
+    if (isClaudeRequest(req)) {
         const text = Array.isArray(data.content)
             ? data.content.map((item) => item?.text || "").join("\n").trim()
             : "";
@@ -250,7 +309,7 @@ export async function callAI(providerKey, config, messages, signal) {
         };
     }
     return {
-        text: data.choices?.[0]?.message?.content || "",
+        text: extractOpenAIMessageText(data),
         headers: res.headers,
         usage: data.usage
     };
@@ -269,11 +328,6 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
             stream: !!requestBody.stream
         }
     });
-    if (req.provider.type === "google" || (req.isCustom && req.protocol === "claude")) {
-        const once = await callAI(providerKey, config, messages, signal);
-        if (typeof onDelta === "function" && once.text) onDelta(once.text);
-        return once;
-    }
     const res = await fetch(req.finalUrl, {
         method: "POST",
         headers: req.headers,
@@ -287,7 +341,13 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
     const reader = res.body?.getReader?.();
     if (!reader) {
         const data = await res.json();
-        const text = data.choices?.[0]?.message?.content || "";
+        let text = extractOpenAIMessageText(data);
+        if (req.provider.type === "google") text = extractGeminiText(data);
+        if (isClaudeRequest(req)) {
+            text = Array.isArray(data.content)
+                ? data.content.map((item) => item?.text || "").join("\n").trim()
+                : "";
+        }
         if (typeof onDelta === "function" && text) onDelta(text);
         return { text, headers: res.headers, usage: data.usage };
     }
@@ -295,55 +355,113 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
     let buffer = "";
     let fullText = "";
     let usage = null;
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() || "";
-        for (const part of parts) {
-            const lines = String(part || "").split("\n").map((line) => line.trim()).filter((line) => line.startsWith("data:"));
-            for (const line of lines) {
-                const dataPart = line.slice(5).trim();
-                if (!dataPart || dataPart === "[DONE]") continue;
-                let parsed;
-                try {
-                    parsed = JSON.parse(dataPart);
-                } catch (_) {
-                    continue;
-                }
-                if (parsed?.usage) usage = parsed.usage;
-                const delta = parsed?.choices?.[0]?.delta || parsed?.choices?.[0]?.message || {};
-                const content = delta?.content || delta?.text || "";
-                if (delta?.reasoning_content && !delta?.content && !delta?.text) {
-                    getProviderLogger()?.debug("provider_stream_reasoning_delta_ignored", {
-                        task: "ai",
-                        provider: providerKey,
-                        model: req.model || "",
-                        detail: {
-                            reasoning_chars: String(delta.reasoning_content || "").length
-                        }
-                    });
-                    continue;
-                }
-                if (!delta?.content && !delta?.text) {
-                    getProviderLogger()?.debug("provider_stream_empty_delta", {
-                        task: "ai",
-                        provider: providerKey,
-                        model: req.model || "",
-                        detail: {
-                            has_usage: !!parsed?.usage,
-                            choice_count: Array.isArray(parsed?.choices) ? parsed.choices.length : 0
-                        }
-                    });
-                }
-                const token = Array.isArray(content) ? content.map((item) => item?.text || "").join("") : String(content || "");
-                if (!token) continue;
-                fullText += String(token);
-                if (typeof onDelta === "function") onDelta(String(token));
+    const emitToken = (token) => {
+        const text = String(token || "");
+        if (!text) return;
+        fullText += text;
+        if (typeof onDelta === "function") onDelta(text);
+    };
+    const consumeOpenAISsePart = (part) => {
+        for (const dataPart of getSseDataPayloads(part)) {
+            if (!dataPart || dataPart === "[DONE]") continue;
+            let parsed;
+            try {
+                parsed = JSON.parse(dataPart);
+            } catch (_) {
+                continue;
+            }
+            if (parsed?.usage) usage = parsed.usage;
+            const delta = parsed?.choices?.[0]?.delta || parsed?.choices?.[0]?.message || {};
+            const content = delta?.content ?? delta?.text ?? "";
+            if (delta?.reasoning_content && delta?.content == null && delta?.text == null) {
+                getProviderLogger()?.debug("provider_stream_reasoning_delta_ignored", {
+                    task: "ai",
+                    provider: providerKey,
+                    model: req.model || "",
+                    detail: {
+                        reasoning_chars: String(delta.reasoning_content || "").length
+                    }
+                });
+                continue;
+            }
+            if (delta?.content == null && delta?.text == null) {
+                getProviderLogger()?.debug("provider_stream_empty_delta", {
+                    task: "ai",
+                    provider: providerKey,
+                    model: req.model || "",
+                    detail: {
+                        has_usage: !!parsed?.usage,
+                        choice_count: Array.isArray(parsed?.choices) ? parsed.choices.length : 0
+                    }
+                });
+            }
+            const token = normalizeTextContent(content);
+            emitToken(token);
+        }
+    };
+    const consumeGeminiSsePart = (part) => {
+        for (const dataPart of getSseDataPayloads(part)) {
+            if (!dataPart || dataPart === "[DONE]") continue;
+            let parsed;
+            try {
+                parsed = JSON.parse(dataPart);
+            } catch (_) {
+                continue;
+            }
+            if (parsed?.usageMetadata) {
+                usage = {
+                    prompt_tokens: parsed.usageMetadata.promptTokenCount,
+                    completion_tokens: parsed.usageMetadata.candidatesTokenCount,
+                    total_tokens: parsed.usageMetadata.totalTokenCount
+                };
+            }
+            emitToken(extractGeminiText(parsed));
+        }
+    };
+    const consumeClaudeSsePart = (part) => {
+        const event = {};
+        String(part || "").split("\n").forEach((line) => {
+            const value = String(line || "").trim();
+            if (!value) return;
+            if (value.startsWith("event:")) event.type = value.slice(6).trim();
+            if (value.startsWith("data:")) event.data = `${event.data || ""}${value.slice(5).trim()}`;
+        });
+        if (!event.data || event.data === "[DONE]") return;
+        let parsed;
+        try {
+            parsed = JSON.parse(event.data);
+        } catch (_) {
+            return;
+        }
+        if (parsed?.type === "message_start" && parsed?.message?.usage) usage = parsed.message.usage;
+        if (parsed?.type === "message_delta" && parsed?.usage) usage = { ...(usage || {}), ...parsed.usage };
+        const text = parsed?.type === "content_block_delta" && parsed?.delta?.type === "text_delta"
+            ? parsed.delta.text
+            : "";
+        emitToken(text);
+    };
+    const consumeSsePart = (part) => {
+        if (req.provider.type === "google") {
+            consumeGeminiSsePart(part);
+            return;
+        }
+        if (isClaudeRequest(req)) {
+            consumeClaudeSsePart(part);
+            return;
+        }
+        consumeOpenAISsePart(part);
+    };
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const { events, rest } = splitSseEvents(buffer);
+            buffer = rest;
+            for (const part of events) {
+                consumeSsePart(part);
             }
         }
-    }
+    if (buffer.trim()) consumeSsePart(buffer);
     return {
         text: fullText,
         headers: res.headers,

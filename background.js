@@ -2120,14 +2120,17 @@ async function runChatForPort(port, msg) {
             const conversation = recent.map((item) => `${item.role === "assistant" ? "助手" : "用户"}：${item.content}`).join("\n");
             const prompt = `你是 B 站视频助手。基于字幕回答用户的问题，回答要准确、简洁。\n字幕：\n${subtitleText}\n历史：\n${conversation}\n用户问题：${text}`;
             logAIPromptBuilt({ bvid, task: "chat_stream", provider: resolvedSettings.provider, mode: "chat", prompt, promptSettings: resolvedSettings.promptSettings });
+            let streamedAnswerText = "";
             const aiRes = await callAIWithTimeoutStream(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, (delta) => {
-                safePortPost(port, { type: "delta", messageId, delta });
+                const chunk = String(delta || "");
+                streamedAnswerText += chunk;
+                safePortPost(port, { type: "delta", messageId, delta: chunk });
 
             }, abortController, { tabId });
             lastMetrics = aiRes.metrics || null;
             await appendMetrics(bvid, tabId, "chat", aiRes.metrics);
             await reportFeatureUsage("chat", bvid, resolvedSettings, aiRes.metrics);
-            return aiRes.text.trim();
+            return String(aiRes.text || streamedAnswerText || "").trim();
         });
         const mergedHistory = [
             ...history,
@@ -2414,8 +2417,24 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                         .then(() => writeStreamingSummaryPartial(streamedSummaryText, partialState, false));
                 }, null, { tabId });
                 await partialWritePromise.catch(() => {});
-                const summaryText = String(aiRes.text || "").trim();
-                if (!summaryText) throw new Error("总结生成为空");
+                const summaryText = String(aiRes.text || streamedSummaryText || "").trim();
+                if (!summaryText) {
+                    logAI.error("summary_empty", {
+                        bvid,
+                        task: "summary",
+                        code: "SUMMARY_EMPTY",
+                        provider: settings.provider,
+                        model: settings.model || "",
+                        detail: {
+                            mode: "quality",
+                            response_text_chars: String(aiRes.text || "").length,
+                            streamed_text_chars: String(streamedSummaryText || "").length,
+                            subtitle_chars: summarySubtitleText.length,
+                            prompt_chars: summaryPrompt.length
+                        }
+                    });
+                    throw new Error("总结生成为空");
+                }
                 await writeStreamingSummaryPartial(summaryText, partialState, true);
                 logSummaryQualitySummary(bvid, summaryText, {
                     subtitleChars: summarySubtitleText.length,

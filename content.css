@@ -1781,6 +1781,11 @@ input[type="range"]:active::-webkit-slider-thumb {
 .custom-select-container {
     position: relative;
     width: 100%;
+    z-index: 1;
+}
+
+.custom-select-container.open {
+    z-index: 1000;
 }
 
 .settings-native-select-hidden {
@@ -1833,7 +1838,7 @@ input[type="range"]:active::-webkit-slider-thumb {
     border: 1px solid rgba(255, 255, 255, 0.6);
     border-radius: 12px;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-    z-index: 100;
+    z-index: 1001;
     padding: 6px;
     display: none;
     flex-direction: column;
@@ -1890,7 +1895,11 @@ input[type="range"]:active::-webkit-slider-thumb {
     gap: 8px;
     align-items: center;
     position: relative;
-    z-index: 10;
+    z-index: 1;
+}
+
+.settings-provider-row:has(.custom-select-container.open) {
+    z-index: 1000;
 }
 
 .settings-provider-url {
@@ -1905,7 +1914,7 @@ input[type="range"]:active::-webkit-slider-thumb {
     gap: 6px;
 }
 
-#settings-modelscope-model-wrap {
+#settings-provider-model-wrap {
     display: grid;
     grid-template-columns: 1fr;
     gap: 6px;
@@ -1975,7 +1984,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 }
 
 .settings-hidden {
-    display: none;
+    display: none !important;
 }
 
 .panel-btn.ghost:disabled {

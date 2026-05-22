@@ -43,7 +43,7 @@ describe("providerAdapter", () => {
 
   it("builds Gemini generateContent requests with API key in the URL", async () => {
     const fetchMock = vi.fn(async () => mockJsonResponse({
-      candidates: [{ content: { parts: [{ text: "Gemini 返回" }] } }]
+      candidates: [{ content: { parts: [{ text: "Gemini " }, { text: "返回" }] } }]
     }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -91,6 +91,31 @@ describe("providerAdapter", () => {
     });
   });
 
+  it("builds built-in Claude provider requests", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      content: [{ text: "内置 Claude 返回" }],
+      usage: { input_tokens: 5, output_tokens: 6 }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAI("claude", {
+      provider: "claude",
+      apiKey: "anthropic-key",
+      model: "claude-sonnet-4-6"
+    }, [{ role: "user", content: "总结" }]);
+
+    expect(result.text).toBe("内置 Claude 返回");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    expect(init.headers["x-api-key"]).toBe("anthropic-key");
+    expect(init.headers["anthropic-version"]).toBe("2023-06-01");
+    expect(JSON.parse(init.body)).toMatchObject({
+      model: "claude-sonnet-4-6",
+      max_tokens: 4096,
+      messages: [{ role: "user", content: "总结" }]
+    });
+  });
+
   it("falls back to non-streaming calls for Gemini streaming requests", async () => {
     const fetchMock = vi.fn(async () => mockJsonResponse({
       candidates: [{ content: { parts: [{ text: "一次性返回" }] } }]
@@ -106,6 +131,138 @@ describe("providerAdapter", () => {
 
     expect(result.text).toBe("一次性返回");
     expect(onDelta).toHaveBeenCalledWith("一次性返回");
+  });
+
+  it("streams Gemini generateContent chunks", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode('data: {"candidates":[{"content":{"parts":[{"text":"第一"}]}}]}\n\n'));
+        controller.enqueue(encoder.encode('data: {"candidates":[{"content":{"parts":[{"text":"第二"}]}}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":3,"totalTokenCount":5}}\n\n'));
+        controller.close();
+      }
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: stream
+    }));
+    const onDelta = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAIStream("gemini", {
+      provider: "gemini",
+      apiKey: "gemini-key",
+      model: "gemini-test"
+    }, [{ role: "user", content: "hello" }], undefined, onDelta);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-test:streamGenerateContent?key=gemini-key&alt=sse");
+    expect(JSON.parse(init.body)).toEqual({
+      contents: [{ parts: [{ text: "hello" }] }]
+    });
+    expect(result.text).toBe("第一第二");
+    expect(result.usage).toEqual({ prompt_tokens: 2, completion_tokens: 3, total_tokens: 5 });
+    expect(onDelta).toHaveBeenNthCalledWith(1, "第一");
+    expect(onDelta).toHaveBeenNthCalledWith(2, "第二");
+  });
+
+  it("streams Gemini chunks separated with CRLF", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode('data: {"candidates":[{"content":{"parts":[{"text":"CRLF"}]}}]}\r\n\r\n'));
+        controller.enqueue(encoder.encode('data: {"candidates":[{"content":{"parts":[{"text":" 流式"}]}}]}\r\n\r\n'));
+        controller.close();
+      }
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: stream
+    }));
+    const onDelta = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAIStream("gemini", {
+      provider: "gemini",
+      apiKey: "gemini-key",
+      model: "gemini-test"
+    }, [{ role: "user", content: "hello" }], undefined, onDelta);
+
+    expect(result.text).toBe("CRLF 流式");
+    expect(onDelta).toHaveBeenNthCalledWith(1, "CRLF");
+    expect(onDelta).toHaveBeenNthCalledWith(2, " 流式");
+  });
+
+  it("parses Gemini SSE events with multiline data payloads", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode('data: {"candidates":[{"content":{"parts":[\n'));
+        controller.enqueue(encoder.encode('data: {"text":"多行"}]}}]}\r\n\r\n'));
+        controller.close();
+      }
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: stream
+    }));
+    const onDelta = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAIStream("gemini", {
+      provider: "gemini",
+      apiKey: "gemini-key",
+      model: "gemini-test"
+    }, [{ role: "user", content: "hello" }], undefined, onDelta);
+
+    expect(result.text).toBe("多行");
+    expect(onDelta).toHaveBeenCalledWith("多行");
+  });
+
+  it("streams built-in Claude text deltas", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":4,"output_tokens":0}}}\n\n'));
+        controller.enqueue(encoder.encode('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"Claude "}}\n\n'));
+        controller.enqueue(encoder.encode('event: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"流式"}}\n\n'));
+        controller.enqueue(encoder.encode('event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":6}}\n\n'));
+        controller.close();
+      }
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: stream
+    }));
+    const onDelta = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAIStream("claude", {
+      provider: "claude",
+      apiKey: "anthropic-key",
+      model: "claude-sonnet-4-6"
+    }, [{ role: "user", content: "hello" }], undefined, onDelta);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    expect(init.headers["x-api-key"]).toBe("anthropic-key");
+    expect(JSON.parse(init.body)).toMatchObject({
+      model: "claude-sonnet-4-6",
+      stream: true,
+      messages: [{ role: "user", content: "hello" }]
+    });
+    expect(result.text).toBe("Claude 流式");
+    expect(result.usage).toEqual({ input_tokens: 4, output_tokens: 6 });
+    expect(onDelta).toHaveBeenNthCalledWith(1, "Claude ");
+    expect(onDelta).toHaveBeenNthCalledWith(2, "流式");
   });
 
   it("ignores reasoning_content in OpenAI-compatible streams", async () => {
@@ -136,6 +293,33 @@ describe("providerAdapter", () => {
     expect(result.text).toBe("正式总结");
     expect(onDelta).toHaveBeenCalledTimes(1);
     expect(onDelta).toHaveBeenCalledWith("正式总结");
+  });
+
+  it("parses the final OpenAI-compatible stream event without trailing blank line", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"最后一段"}}]}'));
+        controller.close();
+      }
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: stream
+    }));
+    const onDelta = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAIStream("openai", {
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-test"
+    }, [{ role: "user", content: "hello" }], undefined, onDelta);
+
+    expect(result.text).toBe("最后一段");
+    expect(onDelta).toHaveBeenCalledWith("最后一段");
   });
 
   it("throws coded http errors", async () => {

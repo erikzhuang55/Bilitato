@@ -34,7 +34,7 @@ export async function supabaseSelect(settings, tableName, params = {}, options =
   const url = appendSearchParams(new URL(buildRestUrl(settings, table)), params);
   const result = await requestJson(url.toString(), {
     method: "GET",
-    headers: buildSupabaseHeaders(settings, { Accept: "application/json" }),
+    headers: buildSupabaseHeaders(settings, { Accept: "application/json", ...(options.headers || {}) }),
     requestName: options.requestName || `supabase_select:${tableName}`,
     errorMessage: options.errorMessage
   });
@@ -48,7 +48,8 @@ export async function supabaseWrite(settings, tableName, body, options = {}) {
     method: options.method || "POST",
     headers: buildSupabaseHeaders(settings, {
       "Content-Type": "application/json",
-      Prefer: options.prefer || "return=minimal"
+      Prefer: options.prefer || "return=minimal",
+      ...(options.headers || {})
     }),
     body: JSON.stringify(body || {}),
     requestName: options.requestName || `supabase_write:${tableName}`,

@@ -86,6 +86,28 @@ function getProviderModelOptions(providerKey) {
             "gpt-4o",
             "gpt-4o-mini"
         ],
+        openrouter: [
+            "openrouter/free",
+            "openrouter/auto",
+            "~openai/gpt-latest",
+            "~openai/gpt-mini-latest",
+            "openai/gpt-5.5",
+            "openai/gpt-chat-latest",
+            "~anthropic/claude-sonnet-latest",
+            "anthropic/claude-opus-4.7",
+            "anthropic/claude-opus-4.7-fast",
+            "~google/gemini-pro-latest",
+            "~google/gemini-flash-latest",
+            "google/gemini-3.5-flash",
+            "qwen/qwen3.7-max",
+            "x-ai/grok-4.3",
+            "x-ai/grok-build-0.1",
+            "moonshotai/kimi-k2.6",
+            "deepseek/deepseek-v4-pro",
+            "deepseek/deepseek-v3.2",
+            "z-ai/glm-5.1",
+            "openrouter/owl-alpha"
+        ],
         deepseek: [
             "deepseek-v4-flash",
             "deepseek-v4-pro"
@@ -113,6 +135,49 @@ function getProviderModelOptions(providerKey) {
 function getDefaultProviderModel(providerKey) {
     const options = getProviderModelOptions(providerKey);
     return options[0] || "";
+}
+
+function getSortedProviderKeys(providers = {}) {
+    const keys = Object.keys(providers || {});
+    return keys.sort((left, right) => {
+        if (left === "custom") return 1;
+        if (right === "custom") return -1;
+        const leftName = String(providers[left]?.name || left);
+        const rightName = String(providers[right]?.name || right);
+        const byName = leftName.localeCompare(rightName, "en", { sensitivity: "base" });
+        if (byName !== 0) return byName;
+        return left.localeCompare(right, "en", { sensitivity: "base" });
+    });
+}
+
+function getProviderFreeQuotaText(providerKey) {
+    const key = String(providerKey || "").toLowerCase();
+    const quotaText = {
+        modelscope: [
+            "ModelScope 免费额度",
+            "Kimi-K2.5：50次/天",
+            "MiniMax-M2.5：100次/天",
+            "DeepSeek-R1/V3：20次/天",
+            "Qwen3/3.5系列：500次/天",
+            "GLM-4.5/4.7/5系列：50次/天",
+            "RPM：每个模型约5-20"
+        ],
+        gemini: [
+            "Gemini 免费额度",
+            "3.5 Flash：5 RPM / 250K TPM / 20 RPD",
+            "2.5 Flash：5 RPM / 250K TPM / 20 RPD",
+            "3.1 Flash Lite：15 RPM / 250K TPM / 500 RPD",
+            "2.5 Flash Lite：10 RPM / 250K TPM / 20 RPD"
+        ],
+        openrouter: [
+            "OpenRouter 免费额度",
+            "openrouter/free 自动路由免费模型",
+            "限额：20 RPM",
+            "未购买credits：约50 RPD",
+            "购买 >= $10 credits：约1000 RPD"
+        ]
+    };
+    return quotaText[key]?.join("\n") || "";
 }
 const {
     buildCacheTagHtml,
@@ -190,6 +255,8 @@ const CACHE_SYNC_THROTTLE_MS = 500;
 const SUBTITLE_OBSERVE_GRACE_MS = 3500;
 const STEP_PROGRESS_TIMEOUT_MS = 60000;
 const CLOUD_READ_TIMEOUT_MS = 1000;
+const FEEDBACK_POLL_INTERVAL_MS = 60000;
+const FEEDBACK_PENDING_REPLY_TEXT = "感谢你的反馈！我会尽量在24小时内回复。";
 const appState = {
     tabId: null,
     activePage: "CC",
@@ -290,12 +357,72 @@ const appState = {
         tasks: {},
         transcription: false
     },
+    feedback: {
+        rows: [],
+        unreadCount: 0,
+        enabled: true,
+        loading: false,
+        submitting: false,
+        statusText: "",
+        errorText: "",
+        loadedAt: 0
+    },
+    feedbackDraft: {
+        type: "bug",
+        title: "",
+        content: "",
+        includeLogs: true
+    },
+    feedbackPollTimer: null,
+    feedbackSeenTimer: null,
+    feedbackVisibleUnreadIds: new Set(),
     playInfo: null,
     playInfoUpdatedAt: 0,
     isPlayInfoReady: false,
     panelErrors: {}
 };
 globalThis.BilitatoAppState = appState;
+
+function getFeedbackState() {
+    return {
+        rows: [],
+        unreadCount: 0,
+        enabled: true,
+        loading: false,
+        submitting: false,
+        statusText: "",
+        errorText: "",
+        loadedAt: 0,
+        ...(appState.feedback || {})
+    };
+}
+
+function setFeedbackState(patch = {}) {
+    appState.feedback = {
+        ...getFeedbackState(),
+        ...(patch || {})
+    };
+}
+
+function hasFeedbackUnread() {
+    return Number(getFeedbackState().unreadCount || 0) > 0;
+}
+
+function isFeedbackRowUnread(row = {}) {
+    const updatedAt = Date.parse(row.updatedAt || "");
+    const seenAt = Date.parse(row.seenAt || "");
+    if (!Number.isFinite(updatedAt)) return false;
+    return !Number.isFinite(seenAt) || updatedAt > seenAt + 1000;
+}
+
+function getUnreadFeedbackIds(rows = []) {
+    return new Set((Array.isArray(rows) ? rows : []).filter(isFeedbackRowUnread).map((row) => String(row.id || "")).filter(Boolean));
+}
+
+function shouldShowFeedbackItemDot(row = {}) {
+    const id = String(row.id || "");
+    return !!id && (isFeedbackRowUnread(row) || appState.feedbackVisibleUnreadIds?.has?.(id));
+}
 
 function getDefaultTranscriptionState() {
     return {
@@ -1372,6 +1499,16 @@ async function loadBootstrapData() {
     appState.cache = bootstrapCache && normalizeBvidCase(bootstrapCache?.bvid || "") === bootstrapBvid ? bootstrapCache : null;
     appState.settings = res?.settings || null;
     appState.providers = res?.providers || null;
+    if (res?.feedback) {
+        setFeedbackState({
+            ...res.feedback,
+            loadedAt: Date.now(),
+            loading: false,
+            submitting: false,
+            statusText: "",
+            errorText: ""
+        });
+    }
     let previewTarget = null;
     try {
         const previewRes = await chrome.storage.local.get([SETUP_PREVIEW_STORAGE_KEY]);
@@ -1395,6 +1532,7 @@ function renderApp() {
     renderNav();
     renderContent();
     renderTopRemaining();
+    startFeedbackAutoPolling();
     maybeAutoShowSetupGuideOnFirstRun();
     globalThis.BilitatoReleaseNotice?.maybeShowReleaseNotice({
         root: panelShadowRoot,
@@ -1411,6 +1549,36 @@ function refreshLogoDebugCaptureState() {
     if (!logoImg) return;
     logoImg.style.cursor = IS_DEBUG_MODE ? "pointer" : "default";
     logoImg.title = IS_DEBUG_MODE ? "点击截图当前面板" : "";
+}
+
+function hideProviderQuotaTooltip() {
+    panelShadowRoot?.getElementById("provider-quota-tooltip")?.remove();
+}
+
+function showProviderQuotaTooltip(target) {
+    if (!target || !panelShadowRoot) return;
+    const text = String(target.dataset.tooltip || "").trim();
+    if (!text) return;
+    let tooltip = panelShadowRoot.getElementById("provider-quota-tooltip");
+    if (!tooltip) {
+        tooltip = document.createElement("div");
+        tooltip.id = "provider-quota-tooltip";
+        tooltip.className = "provider-quota-tooltip";
+        panelShadowRoot.appendChild(tooltip);
+    }
+    tooltip.textContent = text;
+    const rect = target.getBoundingClientRect();
+    const tooltipWidth = 220;
+    const margin = 8;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    let left = rect.right + margin;
+    if (left + tooltipWidth + margin > viewportWidth) {
+        left = rect.left - tooltipWidth - margin;
+    }
+    left = Math.max(margin, Math.min(left, Math.max(margin, viewportWidth - tooltipWidth - margin)));
+    tooltip.style.left = `${Math.round(left)}px`;
+    tooltip.style.top = `${Math.round(Math.max(margin, Math.min(rect.top - 8, viewportHeight - tooltip.offsetHeight - margin)))}px`;
 }
 
 function syncRuntimeDebugModeToBackground() {
@@ -1432,6 +1600,9 @@ function bindPanelDelegatedEvents() {
         const inCopyMenu = event.target.closest(".copy-menu-overlay");
         if (!inCopyMenu && !event.target.closest('[data-nav="copy"]')) {
             closeCopyMenu();
+        }
+        if (!event.target.closest(".provider-free-badge")) {
+            hideProviderQuotaTooltip();
         }
         const navNode = event.target.closest("[data-nav]");
         if (navNode && navNode.dataset.nav === "settings") {
@@ -1483,6 +1654,12 @@ function bindPanelDelegatedEvents() {
             }
             if (navId === "debug" && appState.activePage !== "debug") {
                 logUI.info("debug_page_open", { task: "debug" });
+            }
+            if (navId !== "settings" && appState.feedbackVisibleUnreadIds?.size) {
+                appState.feedbackVisibleUnreadIds.clear();
+            }
+            if (navId !== "settings" && (getFeedbackState().statusText || getFeedbackState().errorText)) {
+                setFeedbackState({ statusText: "", errorText: "" });
             }
             appState.activePage = navId;
             setNavActionActive("");
@@ -1621,8 +1798,8 @@ function bindPanelDelegatedEvents() {
             }
             return;
         }
-        if (action === "open-feedback") {
-            window.open("https://www.wenjuan.com/s/UZBZJvus3xI/", "_blank", "noopener,noreferrer");
+        if (action === "feedback-submit") {
+            submitFeedbackFromPanel();
             return;
         }
         if (action === "open-help") {
@@ -1695,7 +1872,7 @@ function bindPanelDelegatedEvents() {
         if (action === "debug-show-release-notice") {
             globalThis.BilitatoReleaseNotice?.renderReleaseNotice?.({
                 root: panelShadowRoot,
-                version: "1.2.3"
+                version: "1.3.0"
             });
             return;
         }
@@ -1749,6 +1926,14 @@ function bindPanelDelegatedEvents() {
         if (action === "transcription-start") {
             startTranscriptionFromCapsule();
         }
+    });
+    panelRoot.addEventListener("mouseover", (event) => {
+        const badge = event.target.closest(".provider-free-badge");
+        if (badge) showProviderQuotaTooltip(badge);
+    });
+    panelRoot.addEventListener("mouseout", (event) => {
+        const badge = event.target.closest(".provider-free-badge");
+        if (badge && !badge.contains(event.relatedTarget)) hideProviderQuotaTooltip();
     });
 }
 
@@ -1843,6 +2028,16 @@ function renderNav() {
 
             container.appendChild(node);
         }
+        const existingDot = node.querySelector(".nav-red-dot");
+        if (item.id === "settings" && hasFeedbackUnread()) {
+            if (!existingDot) {
+                const dot = document.createElement("span");
+                dot.className = "nav-red-dot";
+                node.appendChild(dot);
+            }
+        } else if (existingDot) {
+            existingDot.remove();
+        }
     });
 
     // Remove obsolete buttons
@@ -1868,6 +2063,9 @@ function renderContent() {
     const panel = panelShadowRoot ? panelShadowRoot.getElementById("panel-body") : null;
     if (!panel) return;
     if (appState.activePage !== "debug") stopRealtimeLogPolling();
+    if (appState.activePage !== "settings" && appState.feedbackVisibleUnreadIds?.size) {
+        appState.feedbackVisibleUnreadIds.clear();
+    }
     renderTopRemaining();
     ensureCloudReadForActivePage();
 
@@ -1904,6 +2102,248 @@ function renderContent() {
     renderSegmentsFloatWindow();
     renderSegmentsProgressMarkers();
     ensureSegmentsVideoEvents();
+}
+
+function getFeedbackStatusLabel(status) {
+    const map = {
+        open: "已收到",
+        investigating: "处理中",
+        fixed: "已解决",
+        need_more_info: "需补充",
+        rejected: "已关闭"
+    };
+    return map[String(status || "open")] || "已收到";
+}
+
+function getFeedbackTypeLabel(type) {
+    const map = {
+        bug: "问题",
+        suggestion: "建议",
+        question: "咨询"
+    };
+    return map[String(type || "bug")] || "问题";
+}
+
+function formatFeedbackTime(value) {
+    const time = Date.parse(value || "");
+    if (!Number.isFinite(time)) return "";
+    const date = new Date(time);
+    const pad = (num) => String(num).padStart(2, "0");
+    return `${date.getMonth() + 1}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function collectFeedbackLogs() {
+    const debugLogs = Array.isArray(appState.asrUiTraceLogs) ? appState.asrUiTraceLogs.slice(-80) : [];
+    return debugLogs.filter((item) => {
+        const event = String(item?.event || "").toLowerCase();
+        const detail = JSON.stringify(item?.detail || {}).toLowerCase();
+        return /error|failed|fail|timeout|exception|abort|invalid|denied/.test(event)
+            || /error|failed|fail|timeout|exception|abort|invalid|denied/.test(detail);
+    }).map((item) => ({
+        source: "asr_ui",
+        level: "warn",
+        time: item.time || "",
+        event: item.event || "",
+        detail: item.detail || null
+    }));
+}
+
+async function refreshFeedbackState({ markSeen = false, silent = false } = {}) {
+    if (getFeedbackState().loading) return;
+    if (appState.feedbackSeenTimer) {
+        clearTimeout(appState.feedbackSeenTimer);
+        appState.feedbackSeenTimer = null;
+    }
+    const beforeRows = getFeedbackState().rows || [];
+    const beforeUnreadIds = getUnreadFeedbackIds(beforeRows);
+    setFeedbackState({ loading: true, errorText: "", statusText: silent ? getFeedbackState().statusText : "正在读取反馈..." });
+    if (!silent) renderContent();
+    try {
+        const res = await chrome.runtime.sendMessage({ action: "GET_FEEDBACK", markSeen });
+        if (!res?.ok) throw new Error(res?.error || "读取反馈失败");
+        if (markSeen && appState.activePage === "settings") {
+            const idsToKeep = beforeUnreadIds.size ? beforeUnreadIds : getUnreadFeedbackIds(res.feedback?.rows || []);
+            appState.feedbackVisibleUnreadIds = new Set([
+                ...(appState.feedbackVisibleUnreadIds || []),
+                ...idsToKeep
+            ]);
+        }
+        setFeedbackState({
+            ...(res.feedback || {}),
+            loading: false,
+            loadedAt: Date.now(),
+            statusText: "",
+            errorText: ""
+        });
+        renderNav();
+        renderContent();
+    } catch (error) {
+        setFeedbackState({
+            loading: false,
+            errorText: error?.message || "读取反馈失败",
+            statusText: ""
+        });
+        renderContent();
+    }
+}
+
+function ensureFeedbackLoadedForSettings() {
+    const state = getFeedbackState();
+    if (state.loading) return;
+    if (Date.now() - Number(state.loadedAt || 0) < 15000) return;
+    refreshFeedbackState({ markSeen: false, silent: true });
+}
+
+function scheduleFeedbackSeenAfterDisplay() {
+    if (appState.activePage !== "settings") return;
+    const rows = getFeedbackState().rows || [];
+    const unreadIds = getUnreadFeedbackIds(rows);
+    if (!unreadIds.size || appState.feedbackSeenTimer) return;
+    appState.feedbackVisibleUnreadIds = new Set([
+        ...(appState.feedbackVisibleUnreadIds || []),
+        ...unreadIds
+    ]);
+    appState.feedbackSeenTimer = setTimeout(() => {
+        appState.feedbackSeenTimer = null;
+        if (appState.activePage !== "settings") return;
+        refreshFeedbackState({ markSeen: true, silent: true });
+    }, 800);
+}
+
+function startFeedbackAutoPolling() {
+    if (appState.feedbackPollTimer) return;
+    appState.feedbackPollTimer = setInterval(() => {
+        if (document.visibilityState === "hidden") return;
+        refreshFeedbackState({ markSeen: false, silent: true });
+    }, FEEDBACK_POLL_INTERVAL_MS);
+}
+
+async function submitFeedbackFromPanel() {
+    const panel = panelShadowRoot ? panelShadowRoot.getElementById("page-settings") : null;
+    const titleInput = panel?.querySelector("#feedback-title");
+    const contentInput = panel?.querySelector("#feedback-content");
+    const typeInput = panel?.querySelector("#feedback-type");
+    const includeLogsInput = panel?.querySelector("#feedback-include-logs");
+    const title = String(titleInput?.value || "").trim();
+    const content = String(contentInput?.value || "").trim();
+    appState.feedbackDraft = {
+        type: String(typeInput?.value || "bug"),
+        title,
+        content,
+        includeLogs: includeLogsInput?.checked !== false
+    };
+    if (!title || !content) {
+        setFeedbackState({ errorText: "标题和内容都要填一下", statusText: "" });
+        renderContent();
+        return;
+    }
+    setFeedbackState({ submitting: true, errorText: "", statusText: "正在提交反馈..." });
+    renderContent();
+    try {
+        const res = await chrome.runtime.sendMessage({
+            action: "SUBMIT_FEEDBACK",
+            type: String(typeInput?.value || "bug"),
+            title,
+            content,
+            bvid: resolveCurrentBvid() || appState.tabState?.activeBvid || "",
+            includeLogs: includeLogsInput?.checked !== false,
+            logs: collectFeedbackLogs()
+        });
+        if (!res?.ok) throw new Error(res?.error || "提交反馈失败");
+        setFeedbackState({
+            ...(res.feedback || {}),
+            submitting: false,
+            loadedAt: Date.now(),
+            statusText: FEEDBACK_PENDING_REPLY_TEXT,
+            errorText: ""
+        });
+        appState.feedbackDraft = { type: "bug", title: "", content: "", includeLogs: true };
+        showToast("反馈已提交");
+        renderNav();
+        renderContent();
+    } catch (error) {
+        setFeedbackState({
+            submitting: false,
+            errorText: error?.message || "提交反馈失败",
+            statusText: ""
+        });
+        renderContent();
+    }
+}
+
+function renderFeedbackCenter() {
+    const feedback = getFeedbackState();
+    const draft = {
+        type: "bug",
+        title: "",
+        content: "",
+        includeLogs: true,
+        ...(appState.feedbackDraft || {})
+    };
+    const rows = Array.isArray(feedback.rows) ? feedback.rows : [];
+    const statusText = feedback.errorText || feedback.statusText || (feedback.loading ? "正在读取反馈..." : "");
+    scheduleFeedbackSeenAfterDisplay();
+    const listHtml = rows.length ? rows.map((row) => {
+        const message = row.reply || "";
+        const showDot = shouldShowFeedbackItemDot(row);
+        return `
+            <div class="feedback-item ${showDot ? "has-update" : ""}">
+                <div class="feedback-item-head">
+                    <span class="feedback-item-title">${showDot ? `<span class="feedback-item-dot"></span>` : ""}${escapeHtml(row.title || "未命名反馈")}</span>
+                    <span class="feedback-status">${escapeHtml(getFeedbackStatusLabel(row.status))}</span>
+                </div>
+                <div class="feedback-item-meta">${escapeHtml(getFeedbackTypeLabel(row.type))} · ${escapeHtml(formatFeedbackTime(row.updatedAt || row.createdAt))}</div>
+                <div class="feedback-item-content">${escapeHtml(row.content || "")}</div>
+                ${message ? `<div class="feedback-reply">${escapeHtml(message)}</div>` : ""}
+            </div>
+        `;
+    }).join("") : `<div class="feedback-empty">暂无反馈记录。</div>`;
+    return `
+        <div class="feedback-card">
+            <div class="feedback-card-head">
+                <div>
+                    <div class="feedback-title">反馈中心</div>
+                    <div class="feedback-subtitle">我非常重视你和你的意见。</div>
+                </div>
+            </div>
+            ${renderFeedbackTypeSelect(draft.type)}
+            <input id="feedback-title" data-feedback-field="true" type="text" maxlength="120" value="${escapeHtmlAttr(draft.title)}" placeholder="一句话说说遇到了什么问题～">
+            <textarea id="feedback-content" data-feedback-field="true" maxlength="3000" placeholder="告诉我你具体遇到了什么问题">${escapeHtml(draft.content)}</textarea>
+            <label class="feedback-check">
+                <input id="feedback-include-logs" data-feedback-field="true" type="checkbox" ${draft.includeLogs === false ? "" : "checked"}>
+                <span>默认附带异常日志，便于定位问题</span>
+            </label>
+            <div class="feedback-actions">
+                <button type="button" class="panel-btn primary feedback-submit-btn" data-action="feedback-submit" ${feedback.submitting ? "disabled" : ""}>${feedback.submitting ? "提交中..." : "提交反馈"}</button>
+            </div>
+            ${statusText ? `<div class="feedback-status-line ${feedback.errorText ? "error" : ""}">${escapeHtml(statusText)}</div>` : ""}
+            <div class="feedback-list">${listHtml}</div>
+        </div>
+    `;
+}
+
+function renderFeedbackTypeSelect(selectedValue = "bug") {
+    const items = [
+        { value: "bug", label: "问题反馈" },
+        { value: "suggestion", label: "功能建议" },
+        { value: "question", label: "使用咨询" }
+    ];
+    const selected = items.find((item) => item.value === selectedValue) || items[0];
+    const arrowIcon = `<svg class="custom-select-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+    return `
+        <select id="feedback-type" class="settings-native-select-hidden" data-feedback-field="true">
+            ${items.map((item) => `<option value="${escapeHtmlAttr(item.value)}" ${item.value === selected.value ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}
+        </select>
+        <div class="custom-select-container settings-custom-select" data-target-select="feedback-type">
+            <div class="custom-select-trigger">
+                <span class="current-value">${escapeHtml(selected.label)}</span>
+                ${arrowIcon}
+            </div>
+            <div class="custom-select-options">
+                ${items.map((item) => `<div class="custom-option ${item.value === selected.value ? "selected" : ""}" data-value="${escapeHtmlAttr(item.value)}">${escapeHtml(item.label)}</div>`).join("")}
+            </div>
+        </div>
+    `;
 }
 
 async function takePanelScreenshot() {
@@ -3131,7 +3571,18 @@ function maybeAutoShowSetupGuideOnFirstRun() {
 
 function renderSettings(panel) {
     const settings = appState.settings || {};
-    const signature = JSON.stringify(settings);
+    const feedbackState = getFeedbackState();
+    const signature = JSON.stringify({
+        settings,
+        feedback: {
+            rows: feedbackState.rows,
+            unreadCount: feedbackState.unreadCount,
+            loading: feedbackState.loading,
+            submitting: feedbackState.submitting,
+            statusText: feedbackState.statusText,
+            errorText: feedbackState.errorText
+        }
+    });
     if (panel.dataset.lastSignature === signature && panel.innerHTML.trim()) return;
     const prevScrollBody = panel.querySelector(".settings-scroll-body");
     const prevScrollTop = Number(prevScrollBody?.scrollTop || 0);
@@ -3148,11 +3599,16 @@ function renderSettings(panel) {
     }
     const providerKey = settings.provider || "modelscope";
     const provider = providers[providerKey] || {};
-    const keys = Object.keys(providers);
+    const keys = getSortedProviderKeys(providers);
+    const freeQuotaProviderKeys = new Set(["gemini", "modelscope", "openrouter"]);
     const optionsHtml = keys.map((key) => {
         const item = providers[key] || {};
         const isSelected = key === providerKey;
-        return `<div class="custom-option ${isSelected ? "selected" : ""}" data-value="${escapeHtml(key)}">${escapeHtml(item.name || key)}</div>`;
+        const quotaText = getProviderFreeQuotaText(key);
+        const badge = freeQuotaProviderKeys.has(key)
+            ? `<span class="provider-free-badge" data-tooltip="${escapeHtmlAttr(quotaText)}">免费额度</span>`
+            : "";
+        return `<div class="custom-option ${isSelected ? "selected" : ""}" data-value="${escapeHtml(key)}"><span class="provider-option-main"><span>${escapeHtml(item.name || key)}</span>${badge}</span></div>`;
     }).join("");
     
     const currentProviderName = providers[providerKey]?.name || providerKey;
@@ -3190,7 +3646,10 @@ function renderSettings(panel) {
     const defaultOpenPage = resolveDefaultOpenPage(settings.defaultOpenPage);
     const providerModelOptions = getProviderModelOptions(providerKey);
     const hasProviderModelSelect = providerKey !== "custom" && providerModelOptions.length > 0;
-    const currentModel = String(settings.model || getDefaultProviderModel(providerKey) || "").trim();
+    const currentModel = String(providerKey === "custom"
+        ? (settings.customModel || settings.model || "")
+        : (settings.model || getDefaultProviderModel(providerKey) || "")
+    ).trim();
     const providerModelSelectValue = hasProviderModelSelect && providerModelOptions.includes(currentModel) ? currentModel : "custom";
     const providerModelWrapVisible = hasProviderModelSelect ? "" : "settings-hidden";
     const providerCustomModelVisible = hasProviderModelSelect && providerModelSelectValue === "custom" ? "" : "settings-hidden";
@@ -3255,7 +3714,7 @@ function renderSettings(panel) {
                     ], providerModelSelectValue)}
                     <input id="settings-provider-custom-model" class="${providerCustomModelVisible}" type="text" value="${escapeHtml(currentModel)}" placeholder="请输入模型名">
                 </div>
-                <input id="settings-model" class="${plainModelVisible}" type="text" value="${escapeHtml(settings.model || "")}" placeholder="示例：gpt-4o-mini / deepseek-chat / glm-4-flash">
+                <input id="settings-model" class="${plainModelVisible}" type="text" value="${escapeHtml(currentModel)}" placeholder="示例：gpt-4o-mini / deepseek-chat / glm-4-flash">
                 <div class="settings-custom-only ${customVisible}">
                     <label>自定义地址协议</label>
                     <select id="settings-custom-protocol">
@@ -3375,9 +3834,9 @@ function renderSettings(panel) {
                 <div class="settings-group-title">帮助与反馈</div>
                 <div class="settings-action-row">
                     <button type="button" class="panel-btn ghost" data-action="open-help">帮助文档</button>
-                    <button type="button" class="panel-btn ghost" data-action="open-feedback">反馈建议</button>
                     <button type="button" class="panel-btn ghost" data-action="open-review">去好评</button>
                 </div>
+                ${renderFeedbackCenter()}
             </div>
         </div>
     `;
@@ -3408,9 +3867,28 @@ function renderSettings(panel) {
                     selectContainer.classList.remove("open");
                     // Update internal state
                     if(!appState.settings) appState.settings = {};
+                    const previousProvider = String(appState.settings.provider || providerKey || "modelscope");
+                    const currentApiKey = String(panel.querySelector("#settings-api-key")?.value || "").trim();
+                    const currentModelValue = String(panel.querySelector("#settings-provider-model")?.value || "").trim();
+                    const previousModel = currentModelValue === "custom"
+                        ? String(panel.querySelector("#settings-provider-custom-model")?.value || "").trim()
+                        : String(panel.querySelector("#settings-model")?.value || currentModelValue || appState.settings.model || "").trim();
+                    appState.settings.providerApiKeys = {
+                        ...(appState.settings.providerApiKeys || {}),
+                        ...(currentApiKey ? { [previousProvider]: currentApiKey } : {})
+                    };
+                    appState.settings.providerModels = {
+                        ...(appState.settings.providerModels || {}),
+                        ...(previousModel ? { [previousProvider]: previousModel } : {})
+                    };
                     appState.settings.provider = val;
+                    appState.settings.apiKey = String(appState.settings.providerApiKeys?.[val] || "").trim();
                     const providerOptions = getProviderModelOptions(val);
-                    if (val !== "custom" && providerOptions.length && !providerOptions.includes(String(appState.settings.model || "").trim())) {
+                    if (val === "custom") {
+                        appState.settings.model = String(appState.settings.customModel || appState.settings.model || "").trim();
+                    } else if (appState.settings.providerModels?.[val]) {
+                        appState.settings.model = String(appState.settings.providerModels[val] || "").trim();
+                    } else if (providerOptions.length && !providerOptions.includes(String(appState.settings.model || "").trim())) {
                         appState.settings.model = providerOptions[0];
                     }
                     
@@ -3544,6 +4022,7 @@ function renderSettings(panel) {
     const inputs = panel.querySelectorAll("input, textarea");
     inputs.forEach(input => {
         if (input.type === "range") return;
+        if (input.dataset.feedbackField === "true") return;
         if (input.dataset.secretInput === "true") {
             input.addEventListener("input", () => {
                 validateSecretInput(input, false);
@@ -3574,7 +4053,20 @@ function renderSettings(panel) {
 
     const selects = panel.querySelectorAll("select");
     selects.forEach(select => {
+        if (select.dataset.feedbackField === "true") return;
         select.addEventListener("change", triggerAutoSave);
+    });
+    panel.querySelectorAll("[data-feedback-field='true']").forEach((node) => {
+        const syncDraft = () => {
+            appState.feedbackDraft = {
+                type: String(panel.querySelector("#feedback-type")?.value || "bug"),
+                title: String(panel.querySelector("#feedback-title")?.value || ""),
+                content: String(panel.querySelector("#feedback-content")?.value || ""),
+                includeLogs: panel.querySelector("#feedback-include-logs")?.checked !== false
+            };
+        };
+        node.addEventListener("input", syncDraft);
+        node.addEventListener("change", syncDraft);
     });
     const nextScrollBody = panel.querySelector(".settings-scroll-body");
     if (nextScrollBody) nextScrollBody.scrollTop = prevScrollTop;
@@ -3594,6 +4086,7 @@ function renderSettings(panel) {
             }
         }
     }
+    ensureFeedbackLoadedForSettings();
 }
 
 function renderErrorDemoControls() {
@@ -3627,7 +4120,7 @@ function renderErrorDemoControls() {
             <div class="error-demo-label">Toast 提示</div>
             <div class="error-demo-grid">${toastErrors.map(renderButton).join("")}</div>
             <div class="error-demo-label">更新导览</div>
-            <button type="button" class="panel-btn ghost" data-action="debug-show-release-notice">显示 v1.2.3 更新导览</button>
+            <button type="button" class="panel-btn ghost" data-action="debug-show-release-notice">显示 v1.3.0 更新导览</button>
             <button type="button" class="panel-btn ghost error-demo-clear" data-action="debug-clear-errors">清空测试状态</button>
         </div>
     `;
@@ -4644,6 +5137,39 @@ async function authorizeCustomOriginFromPanel() {
     }
 }
 
+async function requestCustomOriginPermissionFromSettings(customUrl, statusEl) {
+    const normalizedUrl = String(customUrl || "").trim();
+    if (!normalizedUrl) return false;
+    if (appState.customPermissionPromptingUrl === normalizedUrl) return false;
+    appState.customPermissionPromptingUrl = normalizedUrl;
+    try {
+        if (statusEl) {
+            statusEl.textContent = "请在新窗口中授权自定义 API 域名...";
+            statusEl.className = "show syncing pulse";
+        }
+        const openRes = await chrome.runtime.sendMessage({
+            action: "OPEN_PERMISSION_REQUEST_PAGE",
+            baseUrl: normalizedUrl
+        });
+        if (!openRes?.ok) throw new Error("打开授权窗口失败");
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 60000) {
+            const permissionRes = await chrome.runtime.sendMessage({
+                action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION",
+                baseUrl: normalizedUrl,
+                request: false
+            });
+            if (permissionRes?.granted) return true;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        return false;
+    } finally {
+        if (appState.customPermissionPromptingUrl === normalizedUrl) {
+            appState.customPermissionPromptingUrl = "";
+        }
+    }
+}
+
 function bindSettingsCustomSelects(panel) {
     if (panel.dataset.customSelectCloseBound !== "1") {
         panel.dataset.customSelectCloseBound = "1";
@@ -4741,12 +5267,26 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
             ? String(panel.querySelector("#settings-provider-custom-model")?.value || "").trim()
             : providerModelValue)
         : String(panel.querySelector("#settings-model")?.value || "").trim();
+    const activeApiKey = String(panel.querySelector("#settings-api-key")?.value || "").trim();
+    const providerApiKeys = {
+        ...(appState.settings?.providerApiKeys || {}),
+        [providerValue]: activeApiKey
+    };
+    const providerModels = {
+        ...(appState.settings?.providerModels || {}),
+        [providerValue]: resolvedModelValue
+    };
 
     const payload = {
         provider: providerValue,
-        apiKey: String(panel.querySelector("#settings-api-key")?.value || "").trim(),
+        apiKey: activeApiKey,
+        providerApiKeys,
+        providerModels,
         model: resolvedModelValue,
         customBaseUrl: String(panel.querySelector("#settings-base-url")?.value || "").trim(),
+        customModel: providerValue === "custom"
+            ? resolvedModelValue
+            : String(appState.settings?.customModel || "").trim(),
         customProtocol: customProtocolValue === "claude" ? "claude" : "openai",
         asrProvider: String(panel.querySelector("#settings-asr-provider")?.value || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq",
         groqApiKey: String(panel.querySelector("#settings-groq-api-key")?.value || "").trim(),
@@ -4786,14 +5326,23 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
                 request: !!opts.requestCustomPermission
             });
             if (!permissionRes?.granted) {
-                if (isAutoSave) {
-                    if (statusEl) {
-                        statusEl.textContent = "请点击“授权当前域名”以启用自定义 API";
-                        statusEl.className = "show syncing";
+                const grantedAfterPrompt = await requestCustomOriginPermissionFromSettings(customUrl, statusEl);
+                if (!grantedAfterPrompt) {
+                    if (isAutoSave) {
+                        const saveRes = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: payload });
+                        if (saveRes?.settings) appState.settings = saveRes.settings;
+                        if (statusEl) {
+                            statusEl.textContent = "授权后才会启用自定义 API";
+                            statusEl.className = "show syncing";
+                        }
+                        return;
                     }
-                    return;
+                    throw new Error("请先授权访问该自定义 API 域名");
                 }
-                throw new Error("请先授权访问该自定义 API 域名");
+                if (statusEl) {
+                    statusEl.textContent = "域名已授权，正在保存...";
+                    statusEl.className = "show syncing pulse";
+                }
             }
         }
         const res = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: payload });
@@ -4802,7 +5351,17 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         
     if (isAutoSave) {
         const livePanel = panel;
-        livePanel.dataset.lastSignature = JSON.stringify(appState.settings);
+        livePanel.dataset.lastSignature = JSON.stringify({
+            settings: appState.settings,
+            feedback: {
+                rows: getFeedbackState().rows,
+                unreadCount: getFeedbackState().unreadCount,
+                loading: getFeedbackState().loading,
+                submitting: getFeedbackState().submitting,
+                statusText: getFeedbackState().statusText,
+                errorText: getFeedbackState().errorText
+            }
+        });
         const liveStatusEl = livePanel.querySelector("#save-status");
         if (liveStatusEl) {
             // Cancel previous timers

@@ -32,6 +32,14 @@ export const PROVIDERS = {
         tokenPrefix: "Bearer ",
         regUrl: "https://platform.openai.com/api-keys"
     },
+    openrouter: {
+        name: "OpenRouter",
+        baseUrl: "https://openrouter.ai/api/v1/",
+        model: "openrouter/auto",
+        headerKey: "Authorization",
+        tokenPrefix: "Bearer ",
+        regUrl: "https://openrouter.ai/settings/keys"
+    },
     deepseek: {
         name: "DeepSeek",
         baseUrl: "https://api.deepseek.com/",
@@ -142,14 +150,24 @@ function splitSseEvents(buffer) {
 }
 
 function getSseDataPayloads(part) {
-    const payload = String(part || "")
+    const payloads = String(part || "")
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice(5).trim())
-        .join("\n")
-        .trim();
-    return payload ? [payload] : [];
+        .filter(Boolean);
+    if (!payloads.length) return [];
+    if (payloads.length === 1) return payloads;
+    const everyLineIsStandalonePayload = payloads.every((payload) => {
+        if (payload === "[DONE]") return true;
+        try {
+            JSON.parse(payload);
+            return true;
+        } catch (_) {
+            return false;
+        }
+    });
+    return everyLineIsStandalonePayload ? payloads : [payloads.join("\n").trim()].filter(Boolean);
 }
 
 function resolveProviderRequest(providerKey, config, messages, streaming) {

@@ -41,6 +41,30 @@ describe("providerAdapter", () => {
     });
   });
 
+  it("builds OpenRouter OpenAI-compatible requests", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "OpenRouter 返回" } }],
+      usage: { total_tokens: 18 }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAI("openrouter", {
+      provider: "openrouter",
+      apiKey: "or-key",
+      model: "openrouter/auto"
+    }, [{ role: "user", content: "hello" }]);
+
+    expect(result.text).toBe("OpenRouter 返回");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(init.headers.Authorization).toBe("Bearer or-key");
+    expect(JSON.parse(init.body)).toMatchObject({
+      model: "openrouter/auto",
+      messages: [{ role: "user", content: "hello" }],
+      stream: false
+    });
+  });
+
   it("builds Gemini generateContent requests with API key in the URL", async () => {
     const fetchMock = vi.fn(async () => mockJsonResponse({
       candidates: [{ content: { parts: [{ text: "Gemini " }, { text: "返回" }] } }]
@@ -59,6 +83,32 @@ describe("providerAdapter", () => {
     expect(init.headers.Authorization).toBeUndefined();
     expect(JSON.parse(init.body)).toEqual({
       contents: [{ parts: [{ text: "字幕内容" }] }]
+    });
+  });
+
+  it("builds custom OpenAI-compatible requests", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "自定义 OpenAI 返回" } }],
+      usage: { total_tokens: 16 }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAI("custom", {
+      provider: "custom",
+      customProtocol: "openai",
+      customBaseUrl: "https://api.example.com/v1",
+      apiKey: "custom-key",
+      model: "custom-model"
+    }, [{ role: "user", content: "hello" }]);
+
+    expect(result.text).toBe("自定义 OpenAI 返回");
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.example.com/v1/chat/completions");
+    expect(init.headers.Authorization).toBe("Bearer custom-key");
+    expect(JSON.parse(init.body)).toMatchObject({
+      model: "custom-model",
+      messages: [{ role: "user", content: "hello" }],
+      stream: false
     });
   });
 
@@ -320,6 +370,40 @@ describe("providerAdapter", () => {
 
     expect(result.text).toBe("最后一段");
     expect(onDelta).toHaveBeenCalledWith("最后一段");
+  });
+
+  it("parses newline-only custom OpenAI-compatible stream events", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode([
+          'data: {"choices":[{"delta":{"content":"Mistral "}}]}',
+          'data: {"choices":[{"delta":{"content":"返回"}}]}',
+          "data: [DONE]"
+        ].join("\n")));
+        controller.close();
+      }
+    });
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: stream
+    }));
+    const onDelta = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAIStream("custom", {
+      provider: "custom",
+      customProtocol: "openai",
+      customBaseUrl: "https://api.mistral.ai/v1",
+      apiKey: "mistral-key",
+      model: "mistral-small-latest"
+    }, [{ role: "user", content: "hello" }], undefined, onDelta);
+
+    expect(result.text).toBe("Mistral 返回");
+    expect(onDelta).toHaveBeenNthCalledWith(1, "Mistral ");
+    expect(onDelta).toHaveBeenNthCalledWith(2, "返回");
   });
 
   it("throws coded http errors", async () => {

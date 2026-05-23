@@ -58,6 +58,17 @@ describe("supabaseClient", () => {
     expect(JSON.parse(init.body)).toEqual({ bvid: "BV1" });
   });
 
+  it("passes request scoped headers", async () => {
+    globalThis.fetch = vi.fn(async () => new Response(JSON.stringify([]), { status: 200 }));
+
+    await supabaseSelect(settings, "feedback", { select: "id" }, {
+      headers: { "x-feedback-client-id": "client-1234567890" }
+    });
+
+    const [, init] = globalThis.fetch.mock.calls[0];
+    expect(init.headers["x-feedback-client-id"]).toBe("client-1234567890");
+  });
+
   it("calls rpc endpoints", async () => {
     globalThis.fetch = vi.fn(async () => new Response(null, { status: 204 }));
 

@@ -214,6 +214,20 @@ body::-webkit-scrollbar {
     background: #fb7299;
 }
 
+.nav-red-dot {
+    position: absolute;
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: #ff4d6d;
+    box-shadow: 0 0 0 2px #fff;
+}
+
+.nav-red-dot {
+    top: 8px;
+    right: 10px;
+}
+
 .side-nav-item[data-id="real"] img {
     transform: scale(0.9);
 }
@@ -1575,7 +1589,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 
 .settings-action-row {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 8px;
 }
 
@@ -1583,6 +1597,163 @@ input[type="range"]:active::-webkit-slider-thumb {
     width: 100%;
     min-width: 0;
     padding: 0 6px;
+}
+
+.feedback-card {
+    margin-top: 4px;
+    border: 1px solid #edf1f5;
+    border-radius: 8px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: #fff;
+}
+
+.feedback-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.feedback-title {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #2f3542;
+}
+
+.feedback-subtitle,
+.feedback-empty {
+    font-size: 11px;
+    line-height: 1.5;
+    color: #8a94a6;
+}
+
+#feedback-content {
+    min-height: 72px;
+    resize: vertical;
+}
+
+.feedback-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #5b6474;
+}
+
+.feedback-check input {
+    width: 14px;
+    height: 14px;
+    accent-color: #fb7299;
+}
+
+.feedback-actions {
+    display: flex;
+}
+
+.feedback-submit-btn {
+    width: 100%;
+}
+
+.feedback-status-line {
+    border-radius: 7px;
+    padding: 7px 8px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: #2f7d52;
+    background: #effaf4;
+}
+
+.feedback-status-line.error {
+    color: #d64545;
+    background: #fff1f1;
+}
+
+.feedback-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.feedback-item {
+    border-top: 1px solid #f1f3f6;
+    padding-top: 8px;
+}
+
+.feedback-item-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.feedback-item-title {
+    min-width: 0;
+    font-size: 12px;
+    font-weight: 600;
+    color: #2f3542;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.feedback-item-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: #ff4d6d;
+    box-shadow: 0 0 0 2px #fff0f5;
+}
+
+.feedback-status {
+    flex: 0 0 auto;
+    border-radius: 999px;
+    padding: 2px 7px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #fb7299;
+    background: #fff0f5;
+}
+
+.feedback-item-meta {
+    margin-top: 3px;
+    font-size: 11px;
+    color: #9aa3b2;
+}
+
+.feedback-item-content {
+    margin-top: 6px;
+    border-radius: 7px;
+    padding: 7px 8px;
+    font-size: 11px;
+    line-height: 1.55;
+    color: #4c5566;
+    background: #f7f9fc;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.feedback-reply {
+    margin-top: 6px;
+    border-radius: 7px;
+    padding: 8px 9px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #7a3249;
+    background: #fff0f5;
+    border: 1px solid #ffd2e1;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .settings-grid input[type="range"] {
@@ -1866,6 +2037,51 @@ input[type="range"]:active::-webkit-slider-thumb {
     transition: background 0.15s ease, color 0.15s ease;
 }
 
+.provider-option-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.provider-free-badge {
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: #ffe6ef;
+    color: #fb7299;
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    position: relative;
+}
+
+.custom-option.selected .provider-free-badge {
+    background: #ffd7e6;
+    color: #f04f86;
+}
+
+.provider-quota-tooltip {
+    position: fixed;
+    z-index: 2147483647;
+    width: 220px;
+    max-width: 220px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: rgba(30, 34, 42, 0.96);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 1.55;
+    white-space: pre-line;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+    pointer-events: none;
+    box-sizing: border-box;
+}
+
 .custom-option-note {
     display: block;
     margin-top: 2px;
@@ -1987,6 +2203,7 @@ input[type="range"]:active::-webkit-slider-thumb {
     display: none !important;
 }
 
+.panel-btn:disabled,
 .panel-btn.ghost:disabled {
     opacity: 0.45;
     cursor: default;
@@ -3202,6 +3419,32 @@ input[type="range"]:active::-webkit-slider-thumb {
     gap: 8px;
 }
 
+.release-notice-section-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.release-notice-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.release-notice-section-tag {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    height: 18px;
+    padding: 0 7px;
+    border-radius: 999px;
+    background: #fff0f5;
+    color: #fb7299;
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1;
+}
+
 .release-notice-item {
     display: flex;
     flex-direction: column;
@@ -3213,6 +3456,22 @@ input[type="range"]:active::-webkit-slider-thumb {
 .release-notice-item:first-child {
     padding-top: 0;
     border-top: 0;
+}
+
+.release-notice-item-highlight {
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 8px;
+    background: linear-gradient(135deg, rgba(251, 114, 153, 0.14), rgba(255, 236, 243, 0.82));
+    box-shadow: inset 0 0 0 1px rgba(251, 114, 153, 0.18);
+}
+
+.release-notice-item-highlight:first-child {
+    padding-top: 8px;
+}
+
+.release-notice-item-highlight .release-notice-item-title {
+    color: #d94f82;
 }
 
 .release-notice-item-tag {

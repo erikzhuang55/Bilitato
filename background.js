@@ -59,6 +59,142 @@ async function getSentryRuntimeContext() {
     };
 }
 
+function createFeedbackClientId() {
+    if (crypto?.randomUUID) return crypto.randomUUID();
+    return `fb_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
+async function getFeedbackClientId() {
+    const key = "feedbackClientId";
+    const stored = await chrome.storage.local.get([key]);
+    const existing = String(stored?.[key] || "").trim();
+    if (existing.length >= 16) return existing;
+    const next = createFeedbackClientId();
+    await chrome.storage.local.set({ [key]: next });
+    return next;
+}
+
+function getFeedbackHeaders(clientId) {
+    return { "x-feedback-client-id": String(clientId || "") };
+}
+
+function sanitizeFeedbackText(value, maxLength) {
+    return String(value || "").trim().slice(0, maxLength);
+}
+
+function normalizeFeedbackRow(row = {}) {
+    return {
+        id: String(row.id || ""),
+        type: String(row.type || "bug"),
+        title: String(row.title || ""),
+        content: String(row.content || ""),
+        status: String(row.status || "open"),
+        reply: String(row.reply || ""),
+        bvid: String(row.bvid || ""),
+        createdAt: String(row.created_at || ""),
+        updatedAt: String(row.updated_at || ""),
+        seenAt: String(row.seen_at || "")
+    };
+}
+
+function isFeedbackDiagnosticLog(entry = {}) {
+    const level = String(entry.level || "").toLowerCase();
+    if (level === "warn" || level === "error") return true;
+    const event = String(entry.event || "").toLowerCase();
+    const code = String(entry.code || "").toLowerCase();
+    return /error|failed|fail|timeout|exception|abort|denied|invalid/.test(event)
+        || /error|failed|fail|timeout|exception|abort|denied|invalid/.test(code);
+}
+
+function getFeedbackUnreadCount(rows = []) {
+    return rows.filter((row) => {
+        const updatedAt = Date.parse(row.updatedAt || "");
+        const seenAt = Date.parse(row.seenAt || "");
+        if (!Number.isFinite(updatedAt)) return false;
+        return !Number.isFinite(seenAt) || updatedAt > seenAt + 1000;
+    }).length;
+}
+
+async function fetchFeedbackState(settings, { markSeen = false } = {}) {
+    if (!isSupabaseEnabled(settings)) {
+        return { rows: [], unreadCount: 0, clientId: "", enabled: false };
+    }
+    const clientId = await getFeedbackClientId();
+    const table = settings.supabaseFeedbackTable || SUPABASE_DEFAULT_FEEDBACK_TABLE;
+    const rows = await supabaseSelect(settings, table, {
+        select: "id,type,title,content,status,reply,bvid,created_at,updated_at,seen_at",
+        client_id: `eq.${clientId}`,
+        order: "updated_at.desc",
+        limit: 20
+    }, {
+        headers: getFeedbackHeaders(clientId),
+        requestName: "feedback_select",
+        errorMessage: "读取反馈失败"
+    });
+    const normalizedRows = rows.map(normalizeFeedbackRow);
+    if (markSeen && normalizedRows.length) {
+        const seenAt = new Date().toISOString();
+        await supabaseWrite(settings, table, { seen_at: seenAt }, {
+            method: "PATCH",
+            params: { client_id: `eq.${clientId}` },
+            headers: getFeedbackHeaders(clientId),
+            requestName: "feedback_mark_seen",
+            errorMessage: "标记反馈已读失败"
+        });
+        normalizedRows.forEach((row) => {
+            row.seenAt = seenAt;
+        });
+    }
+    return {
+        rows: normalizedRows,
+        unreadCount: getFeedbackUnreadCount(normalizedRows),
+        clientId,
+        enabled: true
+    };
+}
+
+async function submitFeedbackFromContent(msg, sender) {
+    const settings = await getResolvedSettings();
+    if (!isSupabaseEnabled(settings)) throw new Error("反馈服务暂不可用，请稍后重试");
+    const clientId = await getFeedbackClientId();
+    const tabId = msg.tabId || sender?.tab?.id || 0;
+    const tabState = tabId ? await getTabState(tabId).catch(() => null) : null;
+    const manifest = chrome.runtime.getManifest();
+    const type = ["bug", "suggestion", "question"].includes(String(msg.type || "bug")) ? String(msg.type || "bug") : "bug";
+    const title = sanitizeFeedbackText(msg.title, 120);
+    const content = sanitizeFeedbackText(msg.content, 3000);
+    if (!title) throw new Error("请填写反馈标题");
+    if (!content) throw new Error("请填写反馈内容");
+    const includeLogs = msg.includeLogs !== false;
+    const contentLogs = Array.isArray(msg.logs) ? msg.logs.filter(isFeedbackDiagnosticLog).slice(-80) : [];
+    const backgroundLogs = globalLogs.filter(isFeedbackDiagnosticLog).slice(-120);
+    const logs = includeLogs ? [...backgroundLogs, ...contentLogs].slice(-160) : null;
+    const now = new Date().toISOString();
+    const table = settings.supabaseFeedbackTable || SUPABASE_DEFAULT_FEEDBACK_TABLE;
+    await supabaseWrite(settings, table, {
+        client_id: clientId,
+        extension_version: manifest.version || "",
+        provider: String(settings.provider || ""),
+        model: getTaskModelName(settings),
+        bvid: normalizeBvid(msg.bvid || tabState?.activeBvid || ""),
+        type,
+        title,
+        content,
+        logs,
+        metadata: {
+            tab_id: tabId || 0,
+            url: sender?.tab?.url || "",
+            user_agent: navigator.userAgent || ""
+        },
+        seen_at: now
+    }, {
+        headers: getFeedbackHeaders(clientId),
+        requestName: "feedback_submit",
+        errorMessage: "提交反馈失败"
+    });
+    return fetchFeedbackState(settings);
+}
+
 const MAX_GLOBAL_CONCURRENCY = 1;
 const TASK_TIMEOUT_MS = 60000;
 const EFFICIENCY_TASK_TIMEOUT_MS = 120000;
@@ -71,6 +207,7 @@ const SILICONFLOW_MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 const DOWNLOAD_HEADER_RULE_ID = 910001;
 const BILI_PLAYURL_API = "https://api.bilibili.com/x/player/playurl";
 const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
+const SUPABASE_DEFAULT_FEEDBACK_TABLE = "feedback";
 const SUPABASE_DEFAULT_USAGE_DAILY_RPC = "increment_feature_usage_daily";
 const DEFAULT_SENTRY_DSN = "https://04879b2bd5fc72eba741a402e26c4790@o4511384082055168.ingest.de.sentry.io/4511384299634768";
 const TASK_KEYS = ["summary", "segments", "rumors"];
@@ -84,7 +221,10 @@ const DEFAULT_SETTINGS = {
     provider: "modelscope",
     model: "moonshotai/Kimi-K2.5",
     apiKey: "",
+    providerApiKeys: {},
+    providerModels: {},
     customBaseUrl: "",
+    customModel: "",
     customProtocol: "openai",
     asrProvider: "groq",
     groqApiKey: "",
@@ -94,6 +234,7 @@ const DEFAULT_SETTINGS = {
     supabaseUrl: "https://qdksdauixnbgrgkilgac.supabase.co",
     supabaseAnonKey: "sb_publishable_55zwbZc_sQ0k4EDJBgpxsQ_1F86l1vT",
     supabaseVideoCacheTable: SUPABASE_DEFAULT_VIDEO_CACHE_TABLE,
+    supabaseFeedbackTable: SUPABASE_DEFAULT_FEEDBACK_TABLE,
     supabaseUsageDailyRpcName: SUPABASE_DEFAULT_USAGE_DAILY_RPC,
     prefMode: "quality",
     segmentPromptVariant: "test",
@@ -165,6 +306,10 @@ const logSubtitle = loggerFactory.create("subtitle", {
 
 function isSegmentPromptTestEnabled(settings = {}) {
     return String(settings?.segmentPromptVariant || DEFAULT_SETTINGS.segmentPromptVariant || "test").toLowerCase() !== "original";
+}
+
+function createMissingSubtitleError(message = "无字幕可供分析") {
+    return createAppError("MISSING_SUBTITLE", message);
 }
 
 function registerTabAbortController(tabId, controller) {
@@ -441,6 +586,17 @@ async function handleMessage(msg, sender) {
         globalLogs.length = 0;
         return { cleared: true };
     }
+    if (msg.action === "GET_FEEDBACK") {
+        const settings = await getResolvedSettings();
+        return { feedback: await fetchFeedbackState(settings, { markSeen: !!msg.markSeen }) };
+    }
+    if (msg.action === "SUBMIT_FEEDBACK") {
+        return { feedback: await submitFeedbackFromContent(msg, sender) };
+    }
+    if (msg.action === "MARK_FEEDBACK_SEEN") {
+        const settings = await getResolvedSettings();
+        return { feedback: await fetchFeedbackState(settings, { markSeen: true }) };
+    }
     if (msg.action === "SET_RUNTIME_DEBUG") {
         currentDebugMode = !!msg.enabled;
         syncRuntimeDebugFlag(currentDebugMode);
@@ -498,7 +654,8 @@ async function handleMessage(msg, sender) {
             await hydrateCloudCacheIfNeeded(tabState.activeBvid, CLOUD_CACHE_KEYS, settings);
         }
         const cache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
-        return { tabId, tabState, cache, settings, providers: PROVIDERS };
+        const feedback = await fetchFeedbackState(settings).catch(() => ({ rows: [], unreadCount: 0, enabled: false }));
+        return { tabId, tabState, cache, settings, providers: PROVIDERS, feedback };
     }
     if (msg.action === "GET_CACHE") {
         const expected = normalizeBvid(msg.bvid);
@@ -2048,7 +2205,7 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
         let lastMetrics = null;
         const answer = await runWithDedup(key, async () => {
             const subtitleText = getSubtitlePayload(cache);
-            if (!subtitleText) throw new Error("无字幕可供分析");
+            if (!subtitleText) throw createMissingSubtitleError();
             const recent = history.slice(-8);
             const conversation = recent.map((item) => `${item.role === "assistant" ? "助手" : "用户"}：${item.content}`).join("\n");
             const prompt = `你是 B 站视频助手。基于字幕回答用户的问题，回答要准确、简洁。\n字幕：\n${subtitleText}\n历史：\n${conversation}\n用户问题：${text}`;
@@ -2115,7 +2272,7 @@ async function runChatForPort(port, msg) {
         let lastMetrics = null;
         const answer = await runWithDedup(key, async () => {
             const subtitleText = getSubtitlePayload(cache);
-            if (!subtitleText) throw new Error("无字幕可供分析");
+            if (!subtitleText) throw createMissingSubtitleError();
             const recent = history.slice(-8);
             const conversation = recent.map((item) => `${item.role === "assistant" ? "助手" : "用户"}：${item.content}`).join("\n");
             const prompt = `你是 B 站视频助手。基于字幕回答用户的问题，回答要准确、简洁。\n字幕：\n${subtitleText}\n历史：\n${conversation}\n用户问题：${text}`;
@@ -2183,7 +2340,7 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
         ? { purpose: "segments", mode: "quality" }
         : { purpose: "general" };
     const subtitleText = getSubtitlePayload(cache, subtitlePayloadOptions);
-    if (!subtitleText) throw new Error("无字幕可供分析");
+    if (!subtitleText) throw createMissingSubtitleError();
     const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
     logSubtitlePayloadSelection(bvid, task, cache, subtitleText, subtitlePayloadOptions);
     const prompt = task === "segments" && isSegmentPromptTestEnabled(settings)
@@ -2341,7 +2498,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
     const segmentsSubtitleOptions = { purpose: "segments", mode: "quality" };
     const summarySubtitleText = getSubtitlePayload(cache, summarySubtitleOptions);
     const segmentsSubtitleText = getSubtitlePayload(cache, segmentsSubtitleOptions);
-    if (!summarySubtitleText && !segmentsSubtitleText) throw new Error("无字幕可供分析");
+    if (!summarySubtitleText && !segmentsSubtitleText) throw createMissingSubtitleError();
     const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
     logSubtitlePayloadSelection(bvid, "summary", cache, summarySubtitleText, summarySubtitleOptions);
     logSubtitlePayloadSelection(bvid, "segments", cache, segmentsSubtitleText, segmentsSubtitleOptions);
@@ -2575,7 +2732,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
     const cache = await getCache(bvid);
     const subtitlePayloadOptions = { purpose: "segments", mode: "efficiency" };
     const subtitleText = getSubtitlePayload(cache, subtitlePayloadOptions);
-    if (!subtitleText) throw new Error("无字幕可供分析");
+    if (!subtitleText) throw createMissingSubtitleError();
     const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
     logSubtitlePayloadSelection(bvid, "summary_segments_merged", cache, subtitleText, subtitlePayloadOptions);
     if (!force && String(cache?.summary || "").trim() && Array.isArray(cache?.segments) && cache.segments.length) {
@@ -3767,8 +3924,21 @@ function isEqualJSON(a, b) {
 function normalizeSettings(settings) {
     const base = settings && typeof settings === "object" ? settings : {};
     const customProtocol = String(base.customProtocol || "openai").toLowerCase() === "claude" ? "claude" : "openai";
+    const customModel = String(base.customModel || "").trim();
+    const provider = String(base.provider || DEFAULT_SETTINGS.provider || "modelscope").trim() || "modelscope";
+    const providerApiKeysRaw = base.providerApiKeys && typeof base.providerApiKeys === "object" ? base.providerApiKeys : {};
+    const providerApiKeys = Object.fromEntries(Object.entries(providerApiKeysRaw).map(([key, value]) => [
+        String(key || "").trim(),
+        String(value || "").trim()
+    ]).filter(([key]) => key));
+    const providerModelsRaw = base.providerModels && typeof base.providerModels === "object" ? base.providerModels : {};
+    const providerModels = Object.fromEntries(Object.entries(providerModelsRaw).map(([key, value]) => [
+        String(key || "").trim(),
+        String(value || "").trim()
+    ]).filter(([key]) => key));
     const asrProvider = String(base.asrProvider || DEFAULT_SETTINGS.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
-    const apiKey = String(base.apiKey || "").trim();
+    const apiKey = String(providerApiKeys[provider] || base.apiKey || "").trim();
+    if (apiKey) providerApiKeys[provider] = apiKey;
     const groqApiKey = String(base.groqApiKey || "").trim();
     const groqModel = String(base.groqModel || DEFAULT_SETTINGS.groqModel || "whisper-large-v3-turbo").trim() || "whisper-large-v3-turbo";
     const siliconFlowApiKey = String(base.siliconFlowApiKey || "").trim();
@@ -3776,6 +3946,7 @@ function normalizeSettings(settings) {
     const supabaseUrl = String(base.supabaseUrl || DEFAULT_SETTINGS.supabaseUrl || "").trim().replace(/\/+$/, "");
     const supabaseAnonKey = String(base.supabaseAnonKey || DEFAULT_SETTINGS.supabaseAnonKey || "").trim();
     const supabaseVideoCacheTable = String(base.supabaseVideoCacheTable || DEFAULT_SETTINGS.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE).trim() || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE;
+    const supabaseFeedbackTable = String(base.supabaseFeedbackTable || DEFAULT_SETTINGS.supabaseFeedbackTable || SUPABASE_DEFAULT_FEEDBACK_TABLE).trim() || SUPABASE_DEFAULT_FEEDBACK_TABLE;
     const supabaseUsageDailyRpcName = String(base.supabaseUsageDailyRpcName || DEFAULT_SETTINGS.supabaseUsageDailyRpcName || SUPABASE_DEFAULT_USAGE_DAILY_RPC).trim() || SUPABASE_DEFAULT_USAGE_DAILY_RPC;
     const prefModeRaw = String(base.prefMode || DEFAULT_SETTINGS.prefMode || "quality").toLowerCase();
     const prefMode = prefModeRaw === "efficiency" ? "efficiency" : "quality";
@@ -3788,11 +3959,15 @@ function normalizeSettings(settings) {
     return {
         ...DEFAULT_SETTINGS,
         ...base,
+        provider,
         debugMode: !!base.debugMode,
         apiKey,
+        providerApiKeys,
+        providerModels,
         sentryEnabled,
         sentryDsn,
         customProtocol,
+        customModel,
         asrProvider,
         groqApiKey,
         groqModel,
@@ -3801,6 +3976,7 @@ function normalizeSettings(settings) {
         supabaseUrl,
         supabaseAnonKey,
         supabaseVideoCacheTable,
+        supabaseFeedbackTable,
         supabaseUsageDailyRpcName,
         prefMode,
         segmentPromptVariant

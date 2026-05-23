@@ -7,6 +7,7 @@ const IGNORED_ERROR_PATTERNS = [
   /未配置/i,
   /配置.*(缺失|不完整|失败)/i,
   /当前视频暂无字幕/i,
+  /无字幕可供分析/i,
   /暂无\s*raw\s*字幕/i,
   /用户取消/i,
   /user\s*cancel/i,

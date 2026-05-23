@@ -4,6 +4,188 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.3.0": {
+      title: "Bilitato 已更新至 v1.3.0",
+      displayVersion: "v1.3.0",
+      subtitle: "本次重点升级模型接入、反馈中心、Provider 设置体验，并继续优化字幕缓存、聊天、总结和转录稳定性。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "反馈中心",
+              desc: "现在可以在插件内提交问题与建议，并查看处理状态和回复提醒。",
+            },
+            {
+              title: "更多 Provider 支持",
+              desc: "新增 OpenRouter 和 Claude 支持，完善 Gemini、OpenAI、DeepSeek、Kimi、智谱等模型候选项。",
+              highlight: true,
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "模型设置更好用",
+              desc: "不同 Provider 会分别记忆 API Key 和模型选择，自定义 Provider 支持自动授权域名。",
+            },
+            {
+              title: "免费额度提示",
+              desc: "ModelScope、Gemini、OpenRouter 增加免费额度标记，悬停即可查看 RPM、RPD 等限额信息。",
+            },
+            {
+              title: "多模型兼容更稳定",
+              desc: "优化 OpenRouter、Gemini、Claude、自定义 API 等流式返回解析，减少总结为空和生成失败。",
+              highlight: true,
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "修复字幕缓存读取",
+              desc: "修复本地/云端字幕已存在时，聊天、总结、验真偶发提示暂无字幕的问题。",
+            },
+            {
+              title: "修复转录状态异常",
+              desc: "修复在线转录按钮闪烁、进度回退、下载后短暂误显示无字幕等问题。",
+            },
+            {
+              title: "修复聊天体验问题",
+              desc: "修复聊天报错后页面置底、无字幕状态误上报异常、输入空格和输入法异常等问题。",
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。反馈中心仅在您主动提交时上传问题内容和必要异常日志。",
+    },
+    "1.2.x": {
+      title: "Bilitato v1.2 系列更新回顾",
+      displayVersion: "v1.2.3 - v1.2.0",
+      subtitle: "v1.2 系列的更新总结。",
+      groups: [
+        {
+          tag: "v1.2.3",
+          sections: [
+            {
+              tag: "优化",
+              items: [
+                {
+                  title: "字幕缓存更稳定",
+                  desc: "CC、总结、聊天、验真都会主动读取云端字幕；云端已有字幕时会直接加载，减少重复转录。",
+                },
+                {
+                  title: "分段和广告识别更准确",
+                  desc: "优化分段边界和广告识别逻辑，减少错分、漏分和时间点偏移，长视频结构更清晰。",
+                },
+              ],
+            },
+            {
+              tag: "修复",
+              items: [
+                {
+                  title: "修复字幕状态不同步",
+                  desc: "修复转录完成后总结仍显示暂无字幕、刷新无反应，以及页面未及时刷新字幕的问题。",
+                },
+                {
+                  title: "修复总结与验真异常",
+                  desc: "修复无 API Key 时总结页空白、验真读取转录字幕报错、已有字幕却提示无字幕等问题。",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          tag: "v1.2.2",
+          sections: [
+            {
+              tag: "新增",
+              items: [
+                {
+                  title: "新手引导预览",
+                  desc: "新增第三步预览效果，无需先配置 API Key，也能查看已有云端缓存的视频总结。",
+                },
+              ],
+            },
+            {
+              tag: "优化",
+              items: [
+                {
+                  title: "高速/省流模式",
+                  desc: "默认使用高速模式，总结支持流式展示；省流模式保留 1 次调用生成总结和分段。",
+                },
+                {
+                  title: "设置与缓存提示",
+                  desc: "设置页改为自动保存提示，API Key 可显示明文并自动清理首尾空格，云端缓存会提示不消耗调用次数。",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          tag: "v1.2.1",
+          sections: [
+            {
+              tag: "优化",
+              items: [
+                {
+                  title: "转录与按钮反馈",
+                  desc: "点击转录后会立即进入检查/转录状态，按钮同步禁用，减少卡顿感和重复点击。",
+                },
+              ],
+            },
+            {
+              tag: "修复",
+              items: [
+                {
+                  title: "修复聊天输入问题",
+                  desc: "修复聊天框无法输入空格、中文输入法可能被打断，以及报错后页面强制滚到底部的问题。",
+                },
+                {
+                  title: "修复转录状态异常",
+                  desc: "修复在线转录按钮闪烁、进度回退、下载后短暂误显示无字幕等问题。",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          tag: "v1.2.0",
+          sections: [
+            {
+              tag: "新增",
+              items: [
+                {
+                  title: "SiliconFlow 转录支持",
+                  desc: "支持无需翻墙的 FunAudioLLM/SenseVoiceSmall 大模型（无法生成时间戳，但不影响总结）。",
+                },
+              ],
+            },
+            {
+              tag: "优化",
+              items: [
+                {
+                  title: "视频/音频下载更稳定",
+                  desc: "重做下载方式，减少 403、下载失败、下载成网页文件等问题。",
+                },
+              ],
+            },
+            {
+              tag: "修复",
+              items: [
+                {
+                  title: "音频转录修复",
+                  desc: "修复无字幕视频音频转录可能会出现字幕串线的问题。",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。",
+    },
     "1.2.3": {
       title: "Bilitato 已更新至 v1.2.3",
       displayVersion: "v1.2.1 - v1.2.3",
@@ -151,7 +333,7 @@
 
     const note = RELEASE_NOTES[version];
     if (!note) return false;
-    const pageVersions = [version, "1.2.0"].filter((item, index, arr) => item && RELEASE_NOTES[item] && arr.indexOf(item) === index);
+    const pageVersions = [version, "1.2.x"].filter((item, index, arr) => item && RELEASE_NOTES[item] && arr.indexOf(item) === index);
 
     const box = root.querySelector(".ai-summary-plugin-box");
     if (!box) return false;
@@ -219,18 +401,44 @@
                 (group) => `
                   <section class="release-notice-group">
                     <div class="release-notice-group-tag">${escapeHtml(group.tag)}</div>
-                    <div class="release-notice-group-items">
-                      ${(Array.isArray(group.items) ? group.items : [])
+                    ${Array.isArray(group.sections) ? `
+                      <div class="release-notice-section-list">
+                        ${group.sections
+                          .map(
+                            (section) => `
+                              <div class="release-notice-section">
+                                <div class="release-notice-section-tag">${escapeHtml(section.tag)}</div>
+                                <div class="release-notice-group-items">
+                                  ${(Array.isArray(section.items) ? section.items : [])
+                                    .map(
+                                      (item) => `
+                                        <div class="release-notice-item${item.highlight ? " release-notice-item-highlight" : ""}">
+                                          <div class="release-notice-item-title">${escapeHtml(item.title)}</div>
+                                          <div class="release-notice-item-desc">${escapeHtml(item.desc)}</div>
+                                        </div>
+                                      `
+                                    )
+                                    .join("")}
+                                </div>
+                              </div>
+                            `
+                          )
+                          .join("")}
+                      </div>
+                    ` : `
+                      <div class="release-notice-group-items">
+                        ${(Array.isArray(group.items) ? group.items : [])
                         .map(
                           (item) => `
-                            <div class="release-notice-item">
+                            <div class="release-notice-item${item.highlight ? " release-notice-item-highlight" : ""}">
                               <div class="release-notice-item-title">${escapeHtml(item.title)}</div>
                               <div class="release-notice-item-desc">${escapeHtml(item.desc)}</div>
                             </div>
                           `
                         )
                         .join("")}
-                    </div>
+                      </div>
+                    `}
                   </section>
                 `
               )

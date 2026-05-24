@@ -63,6 +63,78 @@
             action: "retry",
             presentation: "panel"
         },
+        SEGMENTS_EMPTY_RESPONSE: {
+            title: "模型没有返回分段内容",
+            message: "服务商返回成功，但没有返回可用正文。免费路由或推理模型可能把输出额度用于思考内容，请重试或切换非 Thinking 模型。",
+            actionText: "重试分段",
+            action: "retry",
+            secondaryActionText: "切换模型",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        SEGMENTS_JSON_PARSE_FAILED: {
+            title: "分段格式解析失败",
+            message: "模型返回了内容，但不是可解析的分段 JSON。请重试，或切换到更稳定的模型。",
+            actionText: "重试分段",
+            action: "retry",
+            secondaryActionText: "切换模型",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        SEGMENTS_EMPTY_LIST: {
+            title: "模型没有生成有效分段",
+            message: "模型返回了空分段列表。请重试；如果使用省流模式，可以切换到高速模式分开生成。",
+            actionText: "重试分段",
+            action: "retry",
+            secondaryActionText: "切换模式",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        SEGMENTS_INVALID_SCHEMA: {
+            title: "分段字段不完整",
+            message: "模型返回了 JSON，但缺少 start/end、start_line/end_line 或标题等必要字段。请重试或切换模型。",
+            actionText: "重试分段",
+            action: "retry",
+            secondaryActionText: "切换模型",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        SEGMENTS_CONTEXT_TOO_LONG: {
+            title: "字幕内容过长",
+            message: "当前字幕或提示词超过模型上下文限制。请切换长上下文模型，或换用省流/高速策略后重试。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            secondaryActionText: "重试",
+            secondaryAction: "retry",
+            presentation: "panel"
+        },
+        SEGMENTS_OUTPUT_TRUNCATED: {
+            title: "分段输出被截断",
+            message: "模型输出到长度上限前没有完成分段 JSON。请切换更长输出模型，或重试。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            secondaryActionText: "重试",
+            secondaryAction: "retry",
+            presentation: "panel"
+        },
+        SEGMENTS_MISSING_PROTOCOL: {
+            title: "模型漏掉了分段部分",
+            message: "省流模式要求同时返回总结和分段，但模型没有返回分段区块。请重试，或切换到高速模式。",
+            actionText: "重试分段",
+            action: "retry",
+            secondaryActionText: "切换模式",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        SEGMENTS_LINE_MAPPING_FAILED: {
+            title: "分段时间轴映射失败",
+            message: "模型返回的行号无法对应字幕时间轴。请重试；如果字幕本身异常，可以重新生成字幕。",
+            actionText: "重试分段",
+            action: "retry",
+            secondaryActionText: "去生成字幕",
+            secondaryAction: "goto-cc-tab",
+            presentation: "panel"
+        },
         ASR_RATE_LIMIT: {
             title: "转录请求太频繁",
             message: "Groq 返回限流，请等待提示时间后再试。",
@@ -104,7 +176,14 @@
         }
         if (/timeout|超时/i.test(message)) return "TIMEOUT";
         if (/network|failed to fetch|网络/i.test(message)) return "NETWORK_ERROR";
-        if (/JSON\s*解析失败|json_parse|JSON Parse|模型返回格式|分段输出缺失|分段.*缺失/i.test(message)) return "JSON_PARSE_ERROR";
+        if (/字幕内容过长|context length|maximum context|max context|too many tokens|prompt too long|input too long|context_length_exceeded/i.test(message)) return "SEGMENTS_CONTEXT_TOO_LONG";
+        if (/模型没有返回分段内容|返回为空|response_chars.?0|has_text.?false/i.test(message)) return "SEGMENTS_EMPTY_RESPONSE";
+        if (/分段输出被截断|输出被截断|truncated|max_tokens|finish_reason.?length/i.test(message)) return "SEGMENTS_OUTPUT_TRUNCATED";
+        if (/模型漏掉了分段部分|分段输出缺失|分段.*缺失|missing.*segments/i.test(message)) return "SEGMENTS_MISSING_PROTOCOL";
+        if (/分段字段不完整|invalid schema|schema/i.test(message)) return "SEGMENTS_INVALID_SCHEMA";
+        if (/模型没有生成有效分段|空分段|empty list/i.test(message)) return "SEGMENTS_EMPTY_LIST";
+        if (/分段.*(?:格式|JSON|解析)|segments.*(?:json|parse)|模型返回分段格式/i.test(message)) return "SEGMENTS_JSON_PARSE_FAILED";
+        if (/JSON\s*解析失败|json_parse|JSON Parse|模型返回格式/i.test(message)) return "JSON_PARSE_ERROR";
         if (/限流|rate limit|429/i.test(message) && /groq|转录/i.test(message)) return "ASR_RATE_LIMIT";
         if (/文件大小超出限制|音频过大|too large/i.test(message)) return "ASR_FILE_TOO_LARGE";
         if (/未获取到视频字幕|无字幕可供分析|当前视频暂无字幕|未检测到字幕/i.test(message)) return "SUBTITLE_MISSING";

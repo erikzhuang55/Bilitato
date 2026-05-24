@@ -2400,9 +2400,10 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
             logBackground.info("json_parse_success", { task: "segments", bvid });
         } else {
             logAI.error("json_parse_error", { task: "segments", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
+            throw createSegmentsParseError(aiRes.text, aiRes.metrics);
         }
         const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "single" });
-        if (!normalized.length) throw createAppError("JSON_PARSE_ERROR", "分段 JSON 解析失败");
+        if (!normalized.length) throw createSegmentsNormalizeError(parsed);
         logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "single", subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions) });
         return normalized;
     }
@@ -2442,6 +2443,80 @@ function sanitizeSummaryOutput(text) {
         value = value.slice(firstBoldHeading).trim();
     }
     return value;
+}
+
+function isLikelyContextTooLongError(error) {
+    const message = String(error?.message || error || "");
+    return /context length|maximum context|max context|too many tokens|prompt too long|input too long|context_length_exceeded|上下文|提示词.*长|内容.*过长/i.test(message);
+}
+
+function isLikelyTruncatedSegmentOutput(text, metrics = {}) {
+    const value = String(text || "").trim();
+    const outputTokens = Number(metrics?.outputTokens || metrics?.output_tokens || 0);
+    if (outputTokens >= 4000) return true;
+    if (!value) return false;
+    const opens = (value.match(/[\[{]/g) || []).length;
+    const closes = (value.match(/[\]}]/g) || []).length;
+    if (opens > closes) return true;
+    if (/<<<\s*SEGMENTS_START\s*>>>/i.test(value) && !/<<<\s*SEGMENTS_END\s*>>>/i.test(value)) return true;
+    if (/SEGMENTS_START/i.test(value) && !/SEGMENTS_END/i.test(value)) return true;
+    return false;
+}
+
+function getSegmentCandidateList(parsed) {
+    if (Array.isArray(parsed)) return parsed;
+    if (!parsed || typeof parsed !== "object") return null;
+    const candidates = [
+        parsed.segments,
+        parsed.chapters,
+        parsed.sections,
+        parsed.items,
+        parsed.data,
+        parsed.result,
+        parsed.分段,
+        parsed.章节
+    ];
+    for (const candidate of candidates) {
+        if (Array.isArray(candidate)) return candidate;
+        const nested = getSegmentCandidateList(candidate);
+        if (nested) return nested;
+    }
+    return null;
+}
+
+function createSegmentsParseError(text, metrics = {}) {
+    const value = String(text || "").trim();
+    if (!value) {
+        return createAppError("SEGMENTS_EMPTY_RESPONSE", "模型没有返回分段内容");
+    }
+    if (isLikelyTruncatedSegmentOutput(value, metrics)) {
+        return createAppError("SEGMENTS_OUTPUT_TRUNCATED", "分段输出被截断");
+    }
+    return createAppError("SEGMENTS_JSON_PARSE_FAILED", "分段格式解析失败");
+}
+
+function createSegmentsNormalizeError(parsed) {
+    const candidateList = getSegmentCandidateList(parsed);
+    if (Array.isArray(candidateList) && candidateList.length === 0) {
+        return createAppError("SEGMENTS_EMPTY_LIST", "模型没有生成有效分段");
+    }
+    return createAppError("SEGMENTS_INVALID_SCHEMA", "分段字段不完整");
+}
+
+function createSegmentsMissingProtocolError(fullText, metrics = {}) {
+    if (isLikelyTruncatedSegmentOutput(fullText, metrics)) {
+        return createAppError("SEGMENTS_OUTPUT_TRUNCATED", "分段输出被截断");
+    }
+    return createAppError("SEGMENTS_MISSING_PROTOCOL", "模型漏掉了分段部分");
+}
+
+function normalizeSegmentsTaskError(error) {
+    if (isLikelyContextTooLongError(error)) {
+        return createAppError("SEGMENTS_CONTEXT_TOO_LONG", "字幕内容过长，模型装不下", {
+            cause: error
+        });
+    }
+    return error;
 }
 
 function resolveStatusByError(error) {
@@ -2681,8 +2756,9 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 });
                 const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: segmentsPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
                 const parsed = robustJSONParse(aiRes.text);
+                if (!parsed) throw createSegmentsParseError(aiRes.text, aiRes.metrics);
                 const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "quality" });
-                if (!normalized.length) throw createAppError("JSON_PARSE_ERROR", "分段 JSON 解析失败");
+                if (!normalized.length) throw createSegmentsNormalizeError(parsed);
                 logSegmentQualitySummary(bvid, normalized, cache, {
                     task: "segments",
                     mode: "quality",
@@ -2709,9 +2785,10 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                     }
                 });
             } catch (error) {
-                results.segments = { ok: false, data: null, error };
+                const segmentError = normalizeSegmentsTaskError(error);
+                results.segments = { ok: false, data: null, error: segmentError };
                 await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
-                logAI.error("ai_request_failed", buildFailureLog(error, {
+                logAI.error("ai_request_failed", buildFailureLog(segmentError, {
                     task: "segments",
                     bvid,
                     provider: settings.provider,
@@ -2852,18 +2929,26 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             ["【SEGMENTS_START】", "【SEGMENTS_END】"]
         ]);
         let segmentsResolved = false;
+        let segmentsFailureError = null;
         if (segmentsSection && segmentsSection.found) {
             const parsed = robustJSONParse(segmentsSection.content);
-            const cache = await getCache(bvid);
-            const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency" });
-            if (normalized.length) {
-                results.segments = { ok: true, data: normalized, error: null };
-                segmentsResolved = true;
-                logSegmentQualitySummary(bvid, normalized, cache, {
-                    task: "segments",
-                    mode: "efficiency",
-                    subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
-                });
+            if (!parsed) {
+                segmentsFailureError = createSegmentsParseError(segmentsSection.content, aiRes.metrics);
+            } else {
+                const cache = await getCache(bvid);
+                const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency" });
+                if (normalized.length) {
+                    results.segments = { ok: true, data: normalized, error: null };
+                    segmentsResolved = true;
+                    segmentsFailureError = null;
+                    logSegmentQualitySummary(bvid, normalized, cache, {
+                        task: "segments",
+                        mode: "efficiency",
+                        subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
+                    });
+                } else {
+                    segmentsFailureError = createSegmentsNormalizeError(parsed);
+                }
             }
         }
         if (!segmentsResolved) {
@@ -2875,6 +2960,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                 if (normalized.length) {
                     results.segments = { ok: true, data: normalized, error: null };
                     segmentsResolved = true;
+                    segmentsFailureError = null;
                     logSegmentQualitySummary(bvid, normalized, cache, {
                         task: "segments",
                         mode: "efficiency",
@@ -2883,6 +2969,9 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                     });
                 }
             }
+        }
+        if (!segmentsResolved && !segmentsFailureError) {
+            segmentsFailureError = createSegmentsMissingProtocolError(fullText, aiRes.metrics);
         }
         if (!segmentsResolved) {
             try {
@@ -2902,32 +2991,40 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                 });
                 const fallbackRes = await callAIWithTimeout(settings, [{ role: "user", content: fallbackPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
                 const parsed = robustJSONParse(fallbackRes.text);
-                const cache = await getCache(bvid);
-                const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency_fallback" });
-                if (normalized.length) {
-                    results.segments = { ok: true, data: normalized, error: null };
-                    segmentsResolved = true;
-                    logSegmentQualitySummary(bvid, normalized, cache, {
-                        task: "segments",
-                        mode: "efficiency_fallback",
-                        subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
-                    });
-                    await appendMetrics(bvid, null, "segments", fallbackRes.metrics);
-                    await reportFeatureUsage("segments", bvid, settings, fallbackRes.metrics);
-                    logAI.info("segments_merged_parse_fallback_success", {
-                        bvid,
-                        task: "segments",
-                        provider: settings.provider,
-                        model: settings.model || "",
-                        duration_ms: fallbackRes.metrics?.latencyMs || 0,
-                        detail: {
+                if (!parsed) {
+                    segmentsFailureError = createSegmentsParseError(fallbackRes.text, fallbackRes.metrics);
+                } else {
+                    const cache = await getCache(bvid);
+                    const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency_fallback" });
+                    if (normalized.length) {
+                        results.segments = { ok: true, data: normalized, error: null };
+                        segmentsResolved = true;
+                        segmentsFailureError = null;
+                        logSegmentQualitySummary(bvid, normalized, cache, {
+                            task: "segments",
                             mode: "efficiency_fallback",
-                            output_chars: String(fallbackRes.text || "").length,
-                            segment_count: normalized.length
-                        }
-                    });
+                            subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
+                        });
+                        await appendMetrics(bvid, null, "segments", fallbackRes.metrics);
+                        await reportFeatureUsage("segments", bvid, settings, fallbackRes.metrics);
+                        logAI.info("segments_merged_parse_fallback_success", {
+                            bvid,
+                            task: "segments",
+                            provider: settings.provider,
+                            model: settings.model || "",
+                            duration_ms: fallbackRes.metrics?.latencyMs || 0,
+                            detail: {
+                                mode: "efficiency_fallback",
+                                output_chars: String(fallbackRes.text || "").length,
+                                segment_count: normalized.length
+                            }
+                        });
+                    } else {
+                        segmentsFailureError = createSegmentsNormalizeError(parsed);
+                    }
                 }
             } catch (fallbackError) {
+                segmentsFailureError = normalizeSegmentsTaskError(fallbackError);
                 logAI.warn("segments_merged_parse_fallback_failed", buildFailureLog(fallbackError, {
                     task: "segments",
                     bvid,
@@ -2943,7 +3040,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             logAI.error("segments_parse_failed", {
                 bvid,
                 task: "segments",
-                code: "JSON_PARSE_ERROR",
+                code: segmentsFailureError?.code || "SEGMENTS_MISSING_PROTOCOL",
                 detail: {
                     mode: "efficiency",
                     full_text_chars: fullText.length,
@@ -2951,7 +3048,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                     segments_end_index: fullText.indexOf("<<<SEGMENTS_END>>>")
                 }
             });
-            throw new Error("分段输出缺失");
+            throw (segmentsFailureError || createAppError("SEGMENTS_MISSING_PROTOCOL", "模型漏掉了分段部分"));
         }
         if (results.summary.ok) {
             logSummaryQualitySummary(bvid, String(results.summary.data || ""), {
@@ -2983,20 +3080,21 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             }
         });
     } catch (error) {
+        const finalError = normalizeSegmentsTaskError(error);
         await summaryApplyPromise.catch(() => {});
         if (!results.summary.ok) {
-            results.summary = { ok: false, data: null, error };
+            results.summary = { ok: false, data: null, error: finalError };
         }
-        results.segments = { ok: false, data: null, error };
+        results.segments = { ok: false, data: null, error: finalError };
         await applySummarySegmentsResults(tabId, bvid, results);
         await reportDailyFeatureUsage("summary_segments_merged", settings, {
             durationMs: Date.now() - requestStartedAt,
             tokens: 0
-        }, resolveUsageStatusByError(error), resolveUsageErrorCode(error, "SUMMARY_SEGMENTS_FAILED"), {
+        }, resolveUsageStatusByError(finalError), resolveUsageErrorCode(finalError, "SUMMARY_SEGMENTS_FAILED"), {
             bvid,
             title: cache?.title || ""
         });
-        logAI.error("ai_request_failed", buildFailureLog(error, {
+        logAI.error("ai_request_failed", buildFailureLog(finalError, {
             task: "summary_segments_merged",
             bvid,
             provider: settings.provider,

@@ -50,12 +50,56 @@ describe("contentErrorMessages", () => {
     const html = messages.renderErrorPanel(view, "run-summary");
 
     expect(view).toMatchObject({
-      code: "JSON_PARSE_ERROR",
+      code: "SEGMENTS_MISSING_PROTOCOL",
       action: "retry",
       presentation: "panel"
     });
-    expect(html).toContain("模型返回格式异常");
+    expect(html).toContain("模型漏掉了分段部分");
     expect(html).toContain('data-action="run-summary"');
+  });
+
+  it("maps empty segment responses to a model switching hint", () => {
+    const view = messages.mapErrorToView({ code: "SEGMENTS_EMPTY_RESPONSE", message: "模型没有返回分段内容" });
+    const html = messages.renderErrorPanel(view, "run-summary");
+
+    expect(view).toMatchObject({
+      title: "模型没有返回分段内容",
+      action: "retry",
+      secondaryAction: "goto-setup-guide",
+      presentation: "panel"
+    });
+    expect(html).toContain("切换模型");
+    expect(html).toContain('data-action="run-summary"');
+    expect(html).toContain('data-action="goto-setup-guide"');
+  });
+
+  it("maps long segment inputs to settings guidance", () => {
+    const view = messages.mapErrorToView({ message: "context length exceeded" });
+    const html = messages.renderErrorPanel(view, "run-summary");
+
+    expect(view).toMatchObject({
+      code: "SEGMENTS_CONTEXT_TOO_LONG",
+      action: "goto-setup-guide",
+      secondaryAction: "retry",
+      presentation: "panel"
+    });
+    expect(html).toContain("字幕内容过长");
+    expect(html).toContain('data-action="goto-setup-guide"');
+    expect(html).toContain('data-action="run-summary"');
+  });
+
+  it("maps segment truncation to a retryable long output hint", () => {
+    const view = messages.mapErrorToView({ code: "SEGMENTS_OUTPUT_TRUNCATED" });
+    const html = messages.renderErrorPanel(view, "run-summary");
+
+    expect(view.title).toBe("分段输出被截断");
+    expect(html).toContain("切换更长输出模型");
+    expect(html).toContain('data-action="run-summary"');
+  });
+
+  it("keeps generic JSON errors separate from segment-specific errors", () => {
+    expect(messages.mapErrorToView({ message: "验真 JSON 解析失败" }).code).toBe("JSON_PARSE_ERROR");
+    expect(messages.mapErrorToView({ message: "分段 JSON 解析失败" }).code).toBe("SEGMENTS_JSON_PARSE_FAILED");
   });
 
   it("adds retry to non-toast setting-style errors", () => {

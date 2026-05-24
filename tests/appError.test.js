@@ -28,5 +28,7 @@ describe("appError", () => {
   it("infers error codes from messages", () => {
     expect(inferErrorCode(new Error("API Error 429: rate limit"))).toBe("HTTP_429");
     expect(inferErrorCode(createAppError("TIMEOUT", "任务超时"))).toBe("TIMEOUT");
+    expect(inferErrorCode(new Error("验真 JSON 解析失败"))).toBe("JSON_PARSE_ERROR");
+    expect(inferErrorCode(new Error("分段 JSON 解析失败"))).toBe("SEGMENTS_JSON_PARSE_FAILED");
   });
 });

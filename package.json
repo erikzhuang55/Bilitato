@@ -5,10 +5,15 @@
   "type": "module",
   "scripts": {
     "build:release": "node scripts/build-release.js",
+    "commitlint": "commitlint --from HEAD~1 --to HEAD --verbose",
+    "prepare": "husky",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "devDependencies": {
+    "@commitlint/cli": "^21.0.1",
+    "@commitlint/config-conventional": "^21.0.1",
+    "husky": "^9.1.7",
     "vitest": "^3.2.4"
   }
 }

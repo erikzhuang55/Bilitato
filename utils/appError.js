@@ -36,10 +36,13 @@ export function inferErrorCode(error) {
   const code = String(error?.code || "").trim();
   if (code) return code;
   const message = String(error?.message || error || "");
+  if (/(?:invalid|incorrect|wrong|bad|expired|missing)\s+(?:api\s*)?key|api\s*key\s+(?:is\s+)?(?:invalid|incorrect|wrong|expired|missing)|invalid_api_key|unauthorized api key|authentication.*(?:failed|invalid)|鉴权失败|认证失败|密钥.*(?:无效|错误|过期)|API\s*Key.*(?:无效|错误|过期|不正确)|令牌.*(?:无效|错误|过期)/i.test(message)) return "HTTP_401";
+  if (/User location is not supported for the API use|location is not supported|unsupported.*location|地区.*不支持|所在地.*不支持/i.test(message)) return "API_LOCATION_UNSUPPORTED";
   const httpMatch = message.match(/\bHTTP\s+([0-9]{3})\b|API Error\s+([0-9]{3})/i);
   if (httpMatch) return normalizeHttpErrorCode(Number(httpMatch[1] || httpMatch[2]));
   if (/timeout|超时/i.test(message)) return "TIMEOUT";
   if (/network|failed to fetch|网络/i.test(message)) return "NETWORK_ERROR";
+  if (/模型没有返回总结内容|总结生成为空|summary_empty|SUMMARY_EMPTY/i.test(message)) return "SUMMARY_EMPTY_RESPONSE";
   if (/字幕内容过长|context length|maximum context|max context|too many tokens|prompt too long|input too long|context_length_exceeded/i.test(message)) return "SEGMENTS_CONTEXT_TOO_LONG";
   if (/模型没有返回分段内容|返回为空|response_chars.?0|has_text.?false/i.test(message)) return "SEGMENTS_EMPTY_RESPONSE";
   if (/分段输出被截断|输出被截断|truncated|max_tokens|finish_reason.?length/i.test(message)) return "SEGMENTS_OUTPUT_TRUNCATED";

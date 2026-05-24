@@ -10,6 +10,7 @@ import {
 import {
     DEFAULT_PROMPT_SETTINGS,
     SEGMENTS_AD_TEST_PROMPT,
+    buildCompactSegmentsPrompt,
     buildSegmentsAdTestPrompt,
     buildMergedSummarySegmentsPrompt,
     buildPrompt,
@@ -1975,6 +1976,7 @@ async function handleSubtitleCaptured(tabId, payload) {
             rumors: "idle",
             chat: "idle"
         },
+        taskErrors: {},
         updatedAt: Date.now()
     });
     const latestCache = await getCache(bvid);
@@ -2172,7 +2174,7 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
     const summaryOk = !!results?.summary?.ok;
     const segmentsOk = !!results?.segments?.ok;
     if (!summaryOk && !segmentsOk) {
-        const error = results?.summary?.error || results?.segments?.error || new Error("生成失败");
+        const error = pickSummarySegmentsFailureError(results);
         await reportDailyFeatureUsage("summary_segments_merged", settings, {
             durationMs: Date.now() - startedAt,
             tokens: 0
@@ -2343,9 +2345,19 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
     if (!subtitleText) throw createMissingSubtitleError();
     const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
     logSubtitlePayloadSelection(bvid, task, cache, subtitleText, subtitlePayloadOptions);
-    const prompt = task === "segments" && isSegmentPromptTestEnabled(settings)
-        ? buildSegmentsAdTestPrompt({ subtitle: subtitleText, taskContext: promptTaskContext })
-        : buildPrompt({
+    const segmentPromptPlan = task === "segments"
+        ? buildPrimarySegmentsPrompt({
+            settings,
+            cache,
+            subtitleText,
+            mode: settings.promptSettings?.mode || "guided",
+            guided: settings.promptSettings?.guided || {},
+            customPrompts: settings.promptSettings?.custom || {},
+            taskContext,
+            promptTaskContext
+        })
+        : null;
+    const prompt = segmentPromptPlan?.prompt || buildPrompt({
             type: task,
             subtitle: subtitleText,
             mode: settings.promptSettings?.mode || "guided",
@@ -2367,10 +2379,11 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
         provider: settings.provider,
         model: settings.model || "",
         detail: {
-            subtitle_chars: subtitleText.length,
+            subtitle_chars: (segmentPromptPlan?.subtitleText || subtitleText).length,
             prompt_chars: prompt.length,
             prompt_mode: settings.promptSettings?.mode || "guided",
-            pref_mode: settings.prefMode || ""
+            pref_mode: settings.prefMode || "",
+            compact_segments: !!segmentPromptPlan?.compact
         }
     });
     const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, { tabId: taskContext.tabId });
@@ -2392,17 +2405,34 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
     await appendMetrics(bvid, null, task, aiRes.metrics);
     await reportFeatureUsage(task, bvid, settings, aiRes.metrics);
     if (task === "summary") {
-        return sanitizeSummaryOutput(aiRes.text);
+        const summaryText = sanitizeSummaryOutput(aiRes.text);
+        if (!summaryText) throw createSummaryEmptyError();
+        return summaryText;
     }
     if (task === "segments") {
         const parsed = robustJSONParse(aiRes.text);
-        if (parsed) {
+        let finalParsed = parsed;
+        let compactRetryNormalized = null;
+        if (finalParsed) {
             logBackground.info("json_parse_success", { task: "segments", bvid });
         } else {
             logAI.error("json_parse_error", { task: "segments", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
-            throw createSegmentsParseError(aiRes.text, aiRes.metrics);
+            const parseError = createSegmentsParseError(aiRes.text, aiRes.metrics);
+            if (parseError?.code === "SEGMENTS_OUTPUT_TRUNCATED") {
+                compactRetryNormalized = await retrySegmentsWithCompactPrompt({
+                    tabId: taskContext?.tabId || null,
+                    bvid,
+                    cache,
+                    settings,
+                    taskContext,
+                    mode: "single",
+                    originalError: parseError
+                });
+            } else {
+                throw parseError;
+            }
         }
-        const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "single" });
+        const normalized = compactRetryNormalized || normalizeSegments(finalParsed, cache, { bvid, task: "segments", mode: "single", allowLineOnly: shouldUseCompactSegmentsFirst(settings) });
         if (!normalized.length) throw createSegmentsNormalizeError(parsed);
         logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "single", subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions) });
         return normalized;
@@ -2519,6 +2549,94 @@ function normalizeSegmentsTaskError(error) {
     return error;
 }
 
+function createSummaryEmptyError() {
+    return createAppError("SUMMARY_EMPTY_RESPONSE", "模型没有返回总结内容");
+}
+
+function pickSummarySegmentsFailureError(results) {
+    const summaryError = results?.summary?.error || null;
+    const segmentsError = results?.segments?.error || null;
+    const segmentsCode = String(segmentsError?.code || "");
+    if (segmentsCode.startsWith("SEGMENTS_")) return segmentsError;
+    return summaryError || segmentsError || new Error("生成失败");
+}
+
+function shouldUseCompactSegmentsFirst(settings = {}) {
+    return String(settings?.provider || "").toLowerCase() === "openrouter"
+        && String(settings?.model || "").toLowerCase() === "openrouter/free";
+}
+
+function buildPrimarySegmentsPrompt({ settings, cache, subtitleText, mode, guided, customPrompts, taskContext, promptTaskContext }) {
+    if (shouldUseCompactSegmentsFirst(settings)) {
+        const compactSubtitle = buildCompactSegmentsSubtitlePayload(cache, 40000) || subtitleText;
+        return {
+            prompt: buildCompactSegmentsPrompt({ subtitle: compactSubtitle, taskContext: promptTaskContext }),
+            subtitleText: compactSubtitle,
+            compact: true
+        };
+    }
+    return {
+        prompt: isSegmentPromptTestEnabled(settings)
+            ? buildSegmentsAdTestPrompt({ subtitle: subtitleText, taskContext: promptTaskContext })
+            : buildPrompt({ type: "segments", subtitle: subtitleText, mode, guided, customPrompts, taskContext: promptTaskContext }),
+        subtitleText,
+        compact: false
+    };
+}
+
+async function retrySegmentsWithCompactPrompt({ tabId, bvid, cache, settings, taskContext, mode, originalError }) {
+    const compactSubtitle = buildCompactSegmentsSubtitlePayload(cache, 40000);
+    if (!compactSubtitle) throw originalError || createSegmentsParseError("");
+    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
+    const compactPrompt = buildCompactSegmentsPrompt({ subtitle: compactSubtitle, taskContext: promptTaskContext });
+    logAI.warn("segments_compact_retry_start", {
+        bvid,
+        task: "segments",
+        provider: settings.provider,
+        model: settings.model || "",
+        code: originalError?.code || "",
+        detail: {
+            mode,
+            subtitle_chars: compactSubtitle.length,
+            prompt_chars: compactPrompt.length
+        }
+    });
+    const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: compactPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
+    const parsed = robustJSONParse(aiRes.text);
+    if (!parsed) throw createSegmentsParseError(aiRes.text, aiRes.metrics);
+    const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: `${mode}_compact_retry`, allowLineOnly: true });
+    if (!normalized.length) throw createSegmentsNormalizeError(parsed);
+    logSegmentQualitySummary(bvid, normalized, cache, {
+        task: "segments",
+        mode: `${mode}_compact_retry`,
+        subtitlePayload: {
+            source: "raw_indexed_compact_retry",
+            purpose: "segments",
+            mode,
+            payload_chars: compactSubtitle.length,
+            max_chars: 40000,
+            no_timestamp: isNoTimestampSubtitleCache(cache),
+            raw_count: Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0,
+            processed_count: Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle.length : 0
+        }
+    });
+    await appendMetrics(bvid, null, "segments", aiRes.metrics);
+    await reportFeatureUsage("segments", bvid, settings, aiRes.metrics);
+    logAI.info("segments_compact_retry_success", {
+        bvid,
+        task: "segments",
+        provider: settings.provider,
+        model: settings.model || "",
+        duration_ms: aiRes.metrics?.latencyMs || 0,
+        detail: {
+            mode,
+            output_chars: String(aiRes.text || "").length,
+            segment_count: normalized.length
+        }
+    });
+    return normalized;
+}
+
 function resolveStatusByError(error) {
     return error?.code === "TIMEOUT" ? "timeout" : "error";
 }
@@ -2533,15 +2651,27 @@ function resolveUsageErrorCode(error, fallback = "UNKNOWN") {
     return String(error?.code || fallback || "UNKNOWN").trim() || "UNKNOWN";
 }
 
-async function setTaskStatusMap(tabId, statusMap, lastError = "") {
+async function setTaskStatusMap(tabId, statusMap, lastError = "", errorMap = {}) {
     const current = await getTabState(tabId);
     const taskStatus = { ...(current?.taskStatus || {}) };
+    const taskErrors = { ...(current?.taskErrors || {}) };
     Object.keys(statusMap || {}).forEach((task) => {
         const status = statusMap[task];
         if (!status) return;
         taskStatus[task] = status;
+        if (status === "error" || status === "timeout") {
+            const taskError = errorMap?.[task];
+            taskErrors[task] = taskError ? serializeAppError(taskError) : {
+                message: String(lastError || "任务失败"),
+                code: "",
+                status: undefined,
+                retryAfterSec: undefined
+            };
+        } else {
+            delete taskErrors[task];
+        }
     });
-    await updateTabState(tabId, { taskStatus, lastError, updatedAt: Date.now() });
+    await updateTabState(tabId, { taskStatus, taskErrors, lastError, updatedAt: Date.now() });
 }
 
 async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
@@ -2549,6 +2679,7 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
     const segmentsResult = results?.segments;
     const keepProcessingTasks = new Set(Array.isArray(options.keepProcessingTasks) ? options.keepProcessingTasks : []);
     const statusMap = {};
+    const errorMap = {};
     const cachePatch = {};
     let lastError = "";
 
@@ -2561,6 +2692,7 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
             statusMap.summary = "processing";
         } else if (summaryResult.error) {
             statusMap.summary = resolveStatusByError(summaryResult.error);
+            errorMap.summary = summaryResult.error;
             lastError = lastError || summaryResult.error.message || "任务失败";
         }
     }
@@ -2574,6 +2706,7 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
             statusMap.segments = "processing";
         } else if (segmentsResult.error) {
             statusMap.segments = resolveStatusByError(segmentsResult.error);
+            errorMap.segments = segmentsResult.error;
             lastError = lastError || segmentsResult.error.message || "任务失败";
         }
     }
@@ -2582,7 +2715,7 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
         await mergeCacheByBvid(bvid, { ...cachePatch, updatedAt: Date.now() });
     }
     if (Object.keys(statusMap).length) {
-        await setTaskStatusMap(tabId, statusMap, lastError);
+        await setTaskStatusMap(tabId, statusMap, lastError, errorMap);
     }
 }
 
@@ -2673,7 +2806,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                     logAI.error("summary_empty", {
                         bvid,
                         task: "summary",
-                        code: "SUMMARY_EMPTY",
+                        code: "SUMMARY_EMPTY_RESPONSE",
                         provider: settings.provider,
                         model: settings.model || "",
                         detail: {
@@ -2684,7 +2817,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                             prompt_chars: summaryPrompt.length
                         }
                     });
-                    throw new Error("总结生成为空");
+                    throw createSummaryEmptyError();
                 }
                 await writeStreamingSummaryPartial(summaryText, partialState, true);
                 logSummaryQualitySummary(bvid, summaryText, {
@@ -2735,9 +2868,18 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
     if (segmentsExists) {
         results.segments = { ok: true, data: cache.segments, error: null };
     } else {
-        const segmentsPrompt = isSegmentPromptTestEnabled(settings)
-            ? buildSegmentsAdTestPrompt({ subtitle: segmentsSubtitleText || summarySubtitleText, taskContext: promptTaskContext })
-            : buildPrompt({ type: "segments", subtitle: segmentsSubtitleText || summarySubtitleText, mode, guided, customPrompts, taskContext: promptTaskContext });
+        const segmentPromptPlan = buildPrimarySegmentsPrompt({
+            settings,
+            cache,
+            subtitleText: segmentsSubtitleText || summarySubtitleText,
+            mode,
+            guided,
+            customPrompts,
+            taskContext,
+            promptTaskContext
+        });
+        const segmentsPrompt = segmentPromptPlan.prompt;
+        const effectiveSegmentsSubtitleText = segmentPromptPlan.subtitleText || segmentsSubtitleText || summarySubtitleText;
         logAIPromptBuilt({ bvid, task: "segments", provider: settings.provider, mode: "quality", prompt: segmentsPrompt, promptSettings: settings.promptSettings });
         tasks.push((async () => {
             try {
@@ -2748,21 +2890,33 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                     model: settings.model || "",
                     detail: {
                         mode: "quality",
-                        subtitle_chars: (segmentsSubtitleText || summarySubtitleText).length,
+                        subtitle_chars: effectiveSegmentsSubtitleText.length,
                         prompt_chars: segmentsPrompt.length,
                         prompt_mode: mode,
-                        pref_mode: settings.prefMode || ""
+                        pref_mode: settings.prefMode || "",
+                        compact_segments: !!segmentPromptPlan.compact
                     }
                 });
                 const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: segmentsPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
                 const parsed = robustJSONParse(aiRes.text);
                 if (!parsed) throw createSegmentsParseError(aiRes.text, aiRes.metrics);
-                const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "quality" });
+                const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "quality", allowLineOnly: !!segmentPromptPlan.compact });
                 if (!normalized.length) throw createSegmentsNormalizeError(parsed);
                 logSegmentQualitySummary(bvid, normalized, cache, {
                     task: "segments",
-                    mode: "quality",
-                    subtitlePayload: getSubtitlePayloadMeta(cache, segmentsSubtitleText || summarySubtitleText, segmentsSubtitleOptions)
+                    mode: segmentPromptPlan.compact ? "quality_compact_primary" : "quality",
+                    subtitlePayload: segmentPromptPlan.compact
+                        ? {
+                            source: "raw_indexed_compact_primary",
+                            purpose: "segments",
+                            mode: "quality",
+                            payload_chars: effectiveSegmentsSubtitleText.length,
+                            max_chars: 40000,
+                            no_timestamp: isNoTimestampSubtitleCache(cache),
+                            raw_count: Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0,
+                            processed_count: Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle.length : 0
+                        }
+                        : getSubtitlePayloadMeta(cache, segmentsSubtitleText || summarySubtitleText, segmentsSubtitleOptions)
                 });
                 await appendMetrics(bvid, null, "segments", aiRes.metrics);
                 await reportFeatureUsage("segments", bvid, settings, aiRes.metrics);
@@ -2779,13 +2933,41 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                         tokens: aiRes.metrics?.tokens || 0,
                         input_tokens: aiRes.metrics?.inputTokens || 0,
                         output_tokens: aiRes.metrics?.outputTokens || 0,
-                        subtitle_chars: (segmentsSubtitleText || summarySubtitleText).length,
+                        subtitle_chars: effectiveSegmentsSubtitleText.length,
                         prompt_chars: segmentsPrompt.length,
-                        output_chars: String(aiRes.text || "").length
+                        output_chars: String(aiRes.text || "").length,
+                        compact_segments: !!segmentPromptPlan.compact
                     }
                 });
             } catch (error) {
-                const segmentError = normalizeSegmentsTaskError(error);
+                let segmentError = normalizeSegmentsTaskError(error);
+                if (segmentError?.code === "SEGMENTS_OUTPUT_TRUNCATED") {
+                    try {
+                        const normalized = await retrySegmentsWithCompactPrompt({
+                            tabId,
+                            bvid,
+                            cache,
+                            settings,
+                            taskContext,
+                            mode: "quality",
+                            originalError: segmentError
+                        });
+                        results.segments = { ok: true, data: normalized, error: null };
+                        await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
+                        return;
+                    } catch (retryError) {
+                        segmentError = normalizeSegmentsTaskError(retryError);
+                        logAI.warn("segments_compact_retry_failed", buildFailureLog(segmentError, {
+                            task: "segments",
+                            bvid,
+                            provider: settings.provider,
+                            model: settings.model || "",
+                            detail: {
+                                mode: "quality"
+                            }
+                        }));
+                    }
+                }
                 results.segments = { ok: false, data: null, error: segmentError };
                 await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
                 logAI.error("ai_request_failed", buildFailureLog(segmentError, {
@@ -3207,6 +3389,35 @@ function buildRawAdEvidencePayload(cache, maxChars = 8000) {
     return lines.join("\n").slice(0, maxChars);
 }
 
+function buildCompactSegmentsSubtitlePayload(cache, maxChars = 40000) {
+    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+    if (!raw.length) return "";
+    const lines = [];
+    let usedChars = 0;
+    for (let index = 0; index < raw.length; index += 1) {
+        const item = raw[index] || {};
+        const content = String(item.content ?? item.text ?? "").trim().replace(/\s+/g, " ").slice(0, 56);
+        if (!content) continue;
+        const line = `#${index} ${content}`;
+        if (usedChars + line.length + 1 > maxChars) {
+            const lastIndex = raw.length - 1;
+            if (index < lastIndex) {
+                const last = raw[lastIndex] || {};
+                const lastContent = String(last.content ?? last.text ?? "").trim().replace(/\s+/g, " ").slice(0, 56);
+                if (lastContent) lines.push(`#${lastIndex} ${lastContent}`);
+            }
+            break;
+        }
+        lines.push(line);
+        usedChars += line.length + 1;
+    }
+    return [
+        "【分段与广告逐句字幕（极简）】",
+        "说明：每行开头 #数字 是 line_id。请只用这些 line_id 输出 start_line/end_line；不要逐句分段。",
+        lines.join("\n")
+    ].filter(Boolean).join("\n");
+}
+
 function getSegmentsSubtitlePayload(cache, options = {}) {
     const mode = String(options?.mode || "efficiency");
     const indexedRawText = buildIndexedRawSubtitlePayload(cache, MAX_SEGMENTS_SUBTITLE_CHARS);
@@ -3279,7 +3490,7 @@ function logSubtitlePayloadSelection(bvid, task, cache, subtitleText, options = 
 function normalizeSegments(value, cache = {}, context = {}) {
     const noTimestamp = isNoTimestampSubtitleCache(cache);
     const normalized = normalizeSegmentsResult(value, {
-        allowLineOnly: noTimestamp,
+        allowLineOnly: noTimestamp || context?.allowLineOnly === true,
         onFuzzyHit(fuzzyHits, totalCount) {
             logBackground.debug("segments_normalize_fuzzy_hit", {
                 hit_count: fuzzyHits.length,
@@ -3402,6 +3613,8 @@ function applyLineRangesToSegments(segments, cache = {}, context = {}) {
         } else {
             next.ad_line_mapped = true;
         }
+        delete next.no_timestamp;
+        delete next.virtual_time;
         logAI.info(seg?.type === "ad" ? "ad_line_range_mapped" : "segment_line_range_mapped", {
             bvid: context.bvid || "",
             task: context.task || "segments",
@@ -3953,10 +4166,21 @@ function runWithDedup(key, runner) {
 async function setTaskStatus(tabId, tasks, status, lastError = "") {
     const current = await getTabState(tabId);
     const taskStatus = { ...(current?.taskStatus || {}) };
+    const taskErrors = { ...(current?.taskErrors || {}) };
     tasks.forEach((task) => {
         taskStatus[task] = status;
+        if (status === "error" || status === "timeout") {
+            taskErrors[task] = {
+                message: String(lastError || "任务失败"),
+                code: "",
+                status: undefined,
+                retryAfterSec: undefined
+            };
+        } else {
+            delete taskErrors[task];
+        }
     });
-    await updateTabState(tabId, { taskStatus, lastError, updatedAt: Date.now() });
+    await updateTabState(tabId, { taskStatus, taskErrors, lastError, updatedAt: Date.now() });
 }
 
 async function appendMetrics(bvid, tabId, task, metrics) {

@@ -45,6 +45,31 @@ describe("contentErrorMessages", () => {
     });
   });
 
+  it("maps unsupported API user location to provider guidance", () => {
+    const view = messages.mapErrorToView({ message: "User location is not supported for the API use." });
+    const html = messages.renderErrorPanel(view, "run-summary");
+
+    expect(view).toMatchObject({
+      code: "API_LOCATION_UNSUPPORTED",
+      title: "当前地区暂不支持",
+      action: "goto-setup-guide",
+      secondaryAction: "retry",
+      presentation: "panel"
+    });
+    expect(html).toContain("当前用户所在地不支持");
+  });
+
+  it("maps unsupported location inside 400 responses before generic bad request", () => {
+    const view = messages.mapErrorToView({
+      message: 'API Error 400: {"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}'
+    });
+
+    expect(view).toMatchObject({
+      code: "API_LOCATION_UNSUPPORTED",
+      title: "当前地区暂不支持"
+    });
+  });
+
   it("maps missing segment output to a retryable format error", () => {
     const view = messages.mapErrorToView({ message: "分段输出缺失" });
     const html = messages.renderErrorPanel(view, "run-summary");
@@ -97,6 +122,20 @@ describe("contentErrorMessages", () => {
     expect(html).toContain('data-action="run-summary"');
   });
 
+  it("maps empty summary responses to model guidance", () => {
+    const view = messages.mapErrorToView({ message: "总结生成为空" });
+    const html = messages.renderErrorPanel(view, "run-summary");
+
+    expect(view).toMatchObject({
+      code: "SUMMARY_EMPTY_RESPONSE",
+      action: "retry",
+      secondaryAction: "goto-setup-guide",
+      presentation: "panel"
+    });
+    expect(html).toContain("模型没有返回总结内容");
+    expect(html).toContain('data-action="run-summary"');
+  });
+
   it("keeps generic JSON errors separate from segment-specific errors", () => {
     expect(messages.mapErrorToView({ message: "验真 JSON 解析失败" }).code).toBe("JSON_PARSE_ERROR");
     expect(messages.mapErrorToView({ message: "分段 JSON 解析失败" }).code).toBe("SEGMENTS_JSON_PARSE_FAILED");
@@ -125,6 +164,19 @@ describe("contentErrorMessages", () => {
     expect(html).toContain("模型 ID");
     expect(html).toContain('data-action="goto-setup-guide"');
     expect(html).toContain('data-action="run-summary"');
+  });
+
+  it("maps API key failures inside 400 responses to auth guidance", () => {
+    const view = messages.mapErrorToView({ message: 'API Error 400: {"error":{"message":"Invalid API key"}}' });
+    const html = messages.renderErrorPanel(view, "run-summary");
+
+    expect(view).toMatchObject({
+      code: "HTTP_401",
+      title: "API Key 无效",
+      action: "goto-setup-guide"
+    });
+    expect(html).toContain("API Key 无效");
+    expect(html).toContain('data-action="goto-setup-guide"');
   });
 
   it("keeps unknown errors retryable when rendered in a task panel", () => {

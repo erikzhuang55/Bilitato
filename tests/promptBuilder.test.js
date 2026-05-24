@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildCompactSegmentsPrompt,
   buildMergedSummarySegmentsPrompt,
   buildPrompt,
   extractFirstProtocolSection,
@@ -44,6 +45,18 @@ describe("promptBuilder", () => {
     expect(prompt).toContain("<<<SEGMENTS_START>>>");
     expect(prompt).toContain("【任务1：视频总结】");
     expect(prompt).toContain("【任务2：视频分段】");
+  });
+
+  it("builds compact segment retry prompt without start/end seconds", () => {
+    const prompt = buildCompactSegmentsPrompt({
+      subtitle: "#0 开场\n#9 结尾",
+      taskContext: { videoDuration: { totalSeconds: 560, formattedTime: "09:20" } }
+    });
+
+    expect(prompt).toContain("极简格式");
+    expect(prompt).toContain("禁止输出 start/end 秒数");
+    expect(prompt).toContain("\"start_line\"");
+    expect(prompt).toContain("#9 结尾");
   });
 
   it("extracts protocol sections", () => {

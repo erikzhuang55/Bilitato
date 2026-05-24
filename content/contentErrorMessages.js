@@ -14,6 +14,15 @@
             action: "goto-setup-guide",
             presentation: "modal"
         },
+        API_LOCATION_UNSUPPORTED: {
+            title: "当前地区暂不支持",
+            message: "服务商提示当前用户所在地不支持使用该 API。请切换支持当前地区的 Provider，或检查服务商账号地区限制。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            secondaryActionText: "重试",
+            secondaryAction: "retry",
+            presentation: "panel"
+        },
         HTTP_400: {
             title: "请求参数有误",
             message: "服务商返回参数错误，常见原因是模型 ID 填写不正确、模型已下线，或当前接口不支持该模型。",
@@ -61,6 +70,15 @@
             message: "模型没有按预期格式返回结果，请重试，或切换到高速模式/其他模型。",
             actionText: "重试",
             action: "retry",
+            presentation: "panel"
+        },
+        SUMMARY_EMPTY_RESPONSE: {
+            title: "模型没有返回总结内容",
+            message: "服务商返回成功，但没有返回可用总结。免费路由或推理模型可能把输出额度用于思考内容，请重试或切换模型。",
+            actionText: "重试总结",
+            action: "retry",
+            secondaryActionText: "切换模型",
+            secondaryAction: "goto-setup-guide",
             presentation: "panel"
         },
         SEGMENTS_EMPTY_RESPONSE: {
@@ -168,6 +186,8 @@
         const code = String(errorInput?.code || "").trim();
         if (code) return code;
         const message = String(errorInput?.message || errorInput || "");
+        if (/(?:invalid|incorrect|wrong|bad|expired|missing)\s+(?:api\s*)?key|api\s*key\s+(?:is\s+)?(?:invalid|incorrect|wrong|expired|missing)|invalid_api_key|unauthorized api key|authentication.*(?:failed|invalid)|鉴权失败|认证失败|密钥.*(?:无效|错误|过期)|API\s*Key.*(?:无效|错误|过期|不正确)|令牌.*(?:无效|错误|过期)/i.test(message)) return "HTTP_401";
+        if (/User location is not supported for the API use|location is not supported|unsupported.*location|地区.*不支持|所在地.*不支持/i.test(message)) return "API_LOCATION_UNSUPPORTED";
         const httpMatch = message.match(/\bHTTP\s+([0-9]{3})\b|API Error\s+([0-9]{3})/i);
         if (httpMatch) {
             const status = Number(httpMatch[1] || httpMatch[2] || 0);
@@ -176,6 +196,7 @@
         }
         if (/timeout|超时/i.test(message)) return "TIMEOUT";
         if (/network|failed to fetch|网络/i.test(message)) return "NETWORK_ERROR";
+        if (/模型没有返回总结内容|总结生成为空|summary_empty|SUMMARY_EMPTY/i.test(message)) return "SUMMARY_EMPTY_RESPONSE";
         if (/字幕内容过长|context length|maximum context|max context|too many tokens|prompt too long|input too long|context_length_exceeded/i.test(message)) return "SEGMENTS_CONTEXT_TOO_LONG";
         if (/模型没有返回分段内容|返回为空|response_chars.?0|has_text.?false/i.test(message)) return "SEGMENTS_EMPTY_RESPONSE";
         if (/分段输出被截断|输出被截断|truncated|max_tokens|finish_reason.?length/i.test(message)) return "SEGMENTS_OUTPUT_TRUNCATED";

@@ -2124,6 +2124,16 @@ input[type="range"]:active::-webkit-slider-thumb {
     word-break: break-all;
 }
 
+.settings-model-hint {
+    font-size: 12px;
+    line-height: 1.45;
+    color: #9b4b68;
+    background: #fff1f6;
+    border: 1px solid #ffd2e2;
+    border-radius: 8px;
+    padding: 8px 10px;
+}
+
 .settings-asr-provider-fields {
     display: grid;
     grid-template-columns: 1fr;

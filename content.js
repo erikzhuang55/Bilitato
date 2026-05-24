@@ -1683,6 +1683,11 @@ function bindPanelDelegatedEvents() {
             runTasks(["summary", "segments"]);
             return;
         }
+        if (action === "run-segments") {
+            logUI.info("ui_generate_segments", { tab_id: appState.tabId || null });
+            runTasks(["segments"]);
+            return;
+        }
         if (action === "run-rumors") {
             logUI.info("ui_generate_rumor", { tab_id: appState.tabId || null });
             runTasks(["rumors"]);
@@ -2424,6 +2429,12 @@ function renderSummary(panel) {
     const segments = Array.isArray(appState.cache?.segments) ? appState.cache.segments : [];
     const summaryStatus = getCurrentVideoTaskStatus("summary");
     const segmentsStatus = getCurrentVideoTaskStatus("segments");
+    const summaryTaskErrorView = (summaryStatus === "error" || summaryStatus === "timeout")
+        ? getCurrentVideoTaskErrorView("summary")
+        : null;
+    const segmentsTaskErrorView = (segmentsStatus === "error" || segmentsStatus === "timeout")
+        ? getCurrentVideoTaskErrorView("segments")
+        : null;
     const isLoading = summaryStatus === "processing" || segmentsStatus === "processing";
     const hasContent = !!String(summary || "").trim() || segments.length > 0;
     const apiKey = String(appState.settings?.apiKey || "").trim();
@@ -2452,6 +2463,10 @@ function renderSummary(panel) {
         segmentsLength: segments.length,
         summaryStatus,
         segmentsStatus,
+        summaryErrorCode: summaryTaskErrorView?.code || "",
+        summaryErrorMessage: summaryTaskErrorView?.rawMessage || "",
+        segmentsErrorCode: segmentsTaskErrorView?.code || "",
+        segmentsErrorMessage: segmentsTaskErrorView?.rawMessage || "",
         cacheBvid: normalizeBvidCase(appState.cache?.bvid || ""),
         rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
         processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
@@ -2540,7 +2555,11 @@ function renderSummary(panel) {
     const segmentsIsLoading = segmentsStatus === "processing";
     const summaryBody = summary
         ? `<div class="result-text summary-result-text">${renderRichContent(summary)}</div>`
-        : (summaryIsLoading ? summarySkeleton : `<div class="empty-text">尚未生成总结</div>`);
+        : (summaryIsLoading
+            ? summarySkeleton
+            : (summaryTaskErrorView && renderErrorPanel
+                ? renderErrorPanel(summaryTaskErrorView, "run-summary")
+                : `<div class="empty-text">尚未生成总结</div>`));
     
     const copyIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/copy2.png`);
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
@@ -2587,7 +2606,9 @@ function renderSummary(panel) {
               </div>`
         : (segmentsIsLoading
         ? segmentsSkeleton
-        : `<div class="empty-text">尚未生成分段</div>`);
+        : (segmentsTaskErrorView && renderErrorPanel
+            ? renderErrorPanel(segmentsTaskErrorView, "run-segments")
+            : `<div class="empty-text">尚未生成分段</div>`));
 
     panel.innerHTML = `
         <div class="page-header">
@@ -3656,6 +3677,7 @@ function renderSettings(panel) {
     const providerModelWrapVisible = hasProviderModelSelect ? "" : "settings-hidden";
     const providerCustomModelVisible = hasProviderModelSelect && providerModelSelectValue === "custom" ? "" : "settings-hidden";
     const plainModelVisible = hasProviderModelSelect ? "settings-hidden" : "";
+    const showOpenRouterFreeHint = providerKey === "openrouter" && currentModel === "openrouter/free";
     const asrProviderKey = String(settings.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
     const asrProviders = {
         groq: {
@@ -3717,6 +3739,7 @@ function renderSettings(panel) {
                     <input id="settings-provider-custom-model" class="${providerCustomModelVisible}" type="text" value="${escapeHtml(currentModel)}" placeholder="请输入模型名">
                 </div>
                 <input id="settings-model" class="${plainModelVisible}" type="text" value="${escapeHtml(currentModel)}" placeholder="示例：gpt-4o-mini / deepseek-chat / glm-4-flash">
+                <div id="settings-openrouter-free-hint" class="settings-model-hint ${showOpenRouterFreeHint ? "" : "settings-hidden"}">免费路由输出上限较低，分段可能失败，如无法正常生成重试即可。</div>
                 <div class="settings-custom-only ${customVisible}">
                     <label>自定义地址协议</label>
                     <select id="settings-custom-protocol">
@@ -3978,6 +4001,7 @@ function renderSettings(panel) {
         if (providerCustomModelInput) {
             providerCustomModelInput.classList.toggle("settings-hidden", String(providerModelSelect?.value || "") !== "custom");
         }
+        updateSettingsProviderHint(panel);
     };
     if (providerModelSelect) {
         providerModelSelect.addEventListener("change", () => {
@@ -4334,7 +4358,13 @@ async function runTasks(tasks) {
             bvid: normalizeBvidCase(resolveCurrentBvid() || ""),
             taskContext
         });
-        if (!res?.ok) throw new Error(res?.error || "任务失败");
+        if (!res?.ok) {
+            const runtimeError = new Error(res?.error || "任务失败");
+            runtimeError.code = res?.code || "";
+            runtimeError.status = res?.status;
+            runtimeError.retryAfterSec = res?.retryAfterSec;
+            throw runtimeError;
+        }
         finishAsymptoticPseudoProgress(taskId, false);
     } catch (error) {
         finishAsymptoticPseudoProgress(taskId, true);
@@ -5043,14 +5073,21 @@ function updateSettingsProviderHint(panel) {
     const plainModelInput = panel?.querySelector("#settings-model");
     const providerModelSelect = panel?.querySelector("#settings-provider-model");
     const providerCustomModelInput = panel?.querySelector("#settings-provider-custom-model");
+    const openRouterFreeHint = panel?.querySelector("#settings-openrouter-free-hint");
     const customBase = String(panel?.querySelector("#settings-base-url")?.value || "").trim();
     const isCustom = key === "custom";
     const hasProviderModelSelect = !isCustom && getProviderModelOptions(key).length > 0;
+    const currentModel = hasProviderModelSelect
+        ? String(providerModelSelect?.value || "").trim()
+        : String(plainModelInput?.value || "").trim();
     if (customWrap) customWrap.classList.toggle("settings-hidden", !isCustom);
     if (providerModelWrap) providerModelWrap.classList.toggle("settings-hidden", !hasProviderModelSelect);
     if (plainModelInput) plainModelInput.classList.toggle("settings-hidden", hasProviderModelSelect);
     if (providerCustomModelInput) {
         providerCustomModelInput.classList.toggle("settings-hidden", !hasProviderModelSelect || String(providerModelSelect?.value || "") !== "custom");
+    }
+    if (openRouterFreeHint) {
+        openRouterFreeHint.classList.toggle("settings-hidden", !(key === "openrouter" && currentModel === "openrouter/free"));
     }
     if (urlNode) {
         urlNode.textContent = isCustom ? (customBase || "请填写自定义 Base URL") : (provider.baseUrl || "-");
@@ -6257,6 +6294,21 @@ function getCurrentVideoTaskStatus(task) {
     if (hasLocalPendingTask(task)) return "processing";
     if (!isTabStateForCurrentVideo()) return "idle";
     return appState.tabState?.taskStatus?.[task] || "idle";
+}
+
+function getCurrentVideoTaskErrorView(task) {
+    if (!isTabStateForCurrentVideo()) return null;
+    const taskStatus = appState.tabState?.taskStatus?.[task] || "";
+    const rawError = appState.tabState?.taskErrors?.[task]
+        || ((taskStatus === "error" || taskStatus === "timeout") ? {
+            message: appState.tabState?.lastError || (taskStatus === "timeout" ? "任务超时，请重试~" : "任务失败"),
+            code: taskStatus === "timeout" ? "TIMEOUT" : ""
+        } : null);
+    if (!rawError || !mapErrorToView) return null;
+    return mapErrorToView(toErrorInput(rawError, "任务失败"), "任务失败", {
+        provider: appState.settings?.provider || "",
+        surface: "panel"
+    });
 }
 
 function hasUsableSubtitleCache(cache, targetBvid = "") {

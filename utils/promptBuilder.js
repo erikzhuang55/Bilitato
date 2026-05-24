@@ -477,6 +477,34 @@ export function buildSegmentsAdTestPrompt({
     ].filter(Boolean).join("\n\n");
 }
 
+export function buildCompactSegmentsPrompt({
+    subtitle,
+    taskContext = {}
+}) {
+    const videoMetaBlock = buildVideoMetaBlock(taskContext);
+    const durationHardRule = buildDurationHardRule(taskContext);
+    const noTimestampRule = buildNoTimestampTaskRule("segments", taskContext);
+    const subtitleBlock = `【字幕内容】\n${subtitle}`.trim();
+    return [
+        "你是一个 B 站视频章节分段助手。现在必须使用极简格式重新生成。",
+        "【核心要求】",
+        "- 严禁逐句分段，必须按章节级内容分段。",
+        "- 10 分钟以内输出 4-7 段；10-25 分钟输出 6-10 段；25-45 分钟输出 8-12 段；45 分钟以上输出 10-16 段。",
+        "- 每个 label 控制在 8-16 个中文字，必须概括本段核心事件或观点，不要只写泛化词。",
+        "- 必须覆盖从第一行到最后一行字幕，最后一段 end_line 必须接近最后一个 #编号。",
+        "- 如果有广告，type 写 \"ad\"；普通内容 type 写 \"content\"。",
+        "【极简输出格式】",
+        "只输出 JSON 数组，不要 Markdown，不要解释，不要代码块。",
+        "普通段只允许字段：{\"start_line\":0,\"end_line\":50,\"label\":\"背景铺垫\",\"type\":\"content\"}",
+        "广告段只允许字段：{\"start_line\":120,\"end_line\":145,\"label\":\"广告推广\",\"type\":\"ad\",\"ad_start_line\":120,\"ad_end_line\":145}",
+        "禁止输出 start/end 秒数，系统会用 line_id 自动映射时间。",
+        noTimestampRule,
+        durationHardRule,
+        videoMetaBlock,
+        subtitleBlock
+    ].filter(Boolean).join("\n\n");
+}
+
 export function buildMergedSummarySegmentsPrompt({
     subtitle,
     mode = "guided",

@@ -2441,12 +2441,50 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
     if (parsed) {
         logBackground.info("json_parse_success", { task: "rumors", bvid });
     } else {
-        logAI.error("json_parse_error", { task: "rumors", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
+        logAI.error("json_parse_error", {
+            task: "rumors",
+            bvid,
+            code: "JSON_PARSE_ERROR",
+            detail: buildRumorsParseFailureDiagnostic(aiRes.text, { reason: "parse_failed" })
+        });
     }
     const normalized = normalizeRumors(parsed, cache);
-    if (!normalized) throw createAppError("JSON_PARSE_ERROR", "验真 JSON 解析失败");
+    if (!normalized) {
+        logAI.error("rumors_normalize_failed", {
+            task: "rumors",
+            bvid,
+            code: "JSON_PARSE_ERROR",
+            detail: buildRumorsParseFailureDiagnostic(aiRes.text, {
+                reason: "normalize_failed",
+                parsed_type: Array.isArray(parsed) ? "array" : typeof parsed,
+                parsed_keys: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed).slice(0, 12) : []
+            })
+        });
+        throw createAppError("JSON_PARSE_ERROR", "验真 JSON 解析失败");
+    }
     logRumorsQualitySummary(bvid, normalized, { mode: "single", outputChars: String(aiRes.text || "").length });
     return normalized;
+}
+
+function buildRumorsParseFailureDiagnostic(text, extra = {}) {
+    const raw = String(text || "");
+    const trimmed = raw.trim();
+    const firstChar = trimmed[0] || "";
+    return {
+        ...extra,
+        response_chars: raw.length,
+        trimmed_chars: trimmed.length,
+        first_char: firstChar,
+        starts_with_json_object: firstChar === "{",
+        starts_with_json_array: firstChar === "[",
+        has_json_object_marker: trimmed.includes("{") && trimmed.includes("}"),
+        has_json_array_marker: trimmed.includes("[") && trimmed.includes("]"),
+        has_code_fence: /```/.test(trimmed),
+        has_markdown_heading: /^#{1,6}\s/m.test(trimmed),
+        has_bullet_list: /^\s*[-*]\s/m.test(trimmed),
+        response_prefix: trimmed.slice(0, 500),
+        response_suffix: trimmed.length > 500 ? trimmed.slice(-500) : ""
+    };
 }
 
 function createSummarySegmentsResult() {

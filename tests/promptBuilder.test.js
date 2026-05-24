@@ -59,6 +59,18 @@ describe("promptBuilder", () => {
     expect(prompt).toContain("#9 结尾");
   });
 
+  it("asks rumor checks to return timestamp_sec as integer seconds", () => {
+    const prompt = buildPrompt({
+      type: "rumors",
+      subtitle: "[15:27] 关键说法",
+      guided: { tone: "balanced", detail: "normal" }
+    });
+
+    expect(prompt).toContain("\"timestamp_sec\":秒数整数");
+    expect(prompt).toContain("15:27 输出 927");
+    expect(prompt).toContain("禁止输出 15:27");
+  });
+
   it("extracts protocol sections", () => {
     const text = "x<<<A>>> hello <<<B>>>y";
 

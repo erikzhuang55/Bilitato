@@ -1,6 +1,6 @@
 export const TASK_PROMPT_FORMAT_RULES = {
     segments: "【技术规范】只输出 JSON 数组，严禁包含任何 Markdown 代码块或解释性文字。格式严格遵守：普通章节为 {\"start\":数字,\"end\":数字,\"start_line\":数字,\"end_line\":数字,\"label\":\"字符串\",\"type\":\"content\"}；广告章节为 {\"start\":数字,\"end\":数字,\"start_line\":数字,\"end_line\":数字,\"label\":\"字符串\",\"type\":\"ad\",\"ad_start_line\":数字,\"ad_end_line\":数字}。所有 line 值必须来自逐句字幕前的 #编号，系统会优先用 line_id 映射最终时间。",
-    rumors: "【技术规范】只输出 JSON 对象，严禁 Markdown。结构必须包含：{ \"overall_score\": 数字, \"overview\": \"字符串\", \"claims\": [{\"text\":\"内容\",\"timestamp\":数字,\"verdict\":布尔值,\"analysis\":\"原因\"}] }。",
+    rumors: "【技术规范】只输出 JSON 对象，严禁 Markdown。结构必须包含：{ \"overall_score\": 数字, \"overview\": \"字符串\", \"claims\": [{\"text\":\"内容\",\"timestamp_sec\":秒数整数,\"verdict\":布尔值,\"analysis\":\"原因\"}] }。timestamp_sec 必须是秒数整数，例如 15:27 输出 927；禁止输出 15:27、\"15:27\" 或 \"15分27秒\"。",
     summary:  "【技术规范】输出 Markdown 正文，严禁输出 JSON。必须使用 3-5 个加粗小标题（格式：**小标题**）；禁止使用一级标题；禁止整段纯文本输出。只输出最终总结，禁止输出思考过程、任务复述、写作计划、草稿说明或“让我分析/我将/需要输出”等前置文字。"
 };
 
@@ -409,7 +409,7 @@ export function buildNoTimestampTaskRule(type, taskContext) {
         return "【无时间轴处理规则】本次字幕没有真实开始/结束秒数。分段和广告识别以 line_id 为准，必须输出 start_line/end_line；广告还必须输出 ad_start_line/ad_end_line。start/end 可填写对应行号作为兼容字段，系统会按 line_id 生成无时间轴分段。";
     }
     if (type === "rumors") {
-        return "【无时间轴处理规则】本次字幕没有真实时间轴。验真仍需正常输出 claims；每条 claim 的 timestamp 可填 0，系统会隐藏跳转时间。不要因为没有时间戳拒绝验真。";
+        return "【无时间轴处理规则】本次字幕没有真实时间轴。验真仍需正常输出 claims；每条 claim 的 timestamp_sec 填 0，系统会隐藏跳转时间。不要因为没有时间戳拒绝验真。";
     }
     return "";
 }

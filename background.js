@@ -414,9 +414,11 @@ const EFFICIENCY_TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
 const MAX_SEGMENTS_SUBTITLE_CHARS = 120000;
 const GROQ_AUDIO_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
+const GROQ_CONNECTIVITY_CHECK_URL = "https://api.groq.com/openai/v1/models";
 const SILICONFLOW_AUDIO_TRANSCRIBE_URL = "https://api.siliconflow.cn/v1/audio/transcriptions";
 const GROQ_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
 const SILICONFLOW_MAX_AUDIO_BYTES = 50 * 1024 * 1024;
+const GROQ_CONNECTIVITY_TIMEOUT_MS = 6000;
 const DOWNLOAD_HEADER_RULE_ID = 910001;
 const BILI_PLAYURL_API = "https://api.bilibili.com/x/player/playurl";
 const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
@@ -1555,6 +1557,11 @@ class ContentProvider {
                 updatedAt: Date.now()
             });
             await notifyTranscribeStatus(tabId, { stage: "start", level: "info", text: "检测到无字幕，正在转录音轨...", progress: 5, bvid });
+            if (asrProvider === "groq") {
+                await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 12, updatedAt: Date.now() });
+                await notifyTranscribeStatus(tabId, { stage: "connectivity_check", level: "info", text: "正在检查 Groq 服务器连接...", progress: 12, bvid });
+                await this.ensureGroqConnectivity(asrApiKey, tabId, bvid, operationController.signal);
+            }
             const media = await this.extractAudioSourceFromTab(tabId, { ...payload, asrProvider });
             if (!media?.url) throw new Error("未提取到音轨地址，可能是付费视频、CDN 限制或页面未完成加载");
             const mediaSummary = await summarizeMediaLocator(media.url);
@@ -1885,6 +1892,83 @@ class ContentProvider {
         const blob = new Blob(chunks, { type: response.headers.get("content-type") || "application/octet-stream" });
         if (!skipSizeCheck) await notifyTranscribeStatus(tabId, { stage: "download", level: "info", text: "下载进度：100%", progress: 55, bvid });
         return blob;
+    }
+
+    static async ensureGroqConnectivity(groqApiKey, tabId, bvid = "", externalSignal = null) {
+        const controller = new AbortController();
+        const forwardAbort = () => controller.abort(externalSignal?.reason || "aborted");
+        if (externalSignal) {
+            if (externalSignal.aborted) forwardAbort();
+            else externalSignal.addEventListener("abort", forwardAbort, { once: true });
+        }
+        const timeoutId = setTimeout(() => controller.abort("timeout"), GROQ_CONNECTIVITY_TIMEOUT_MS);
+        const startedAt = Date.now();
+        try {
+            const response = await fetch(GROQ_CONNECTIVITY_CHECK_URL, {
+                method: "GET",
+                headers: { Authorization: `Bearer ${groqApiKey}` },
+                signal: controller.signal
+            });
+            if (!response.ok) {
+                const detail = await response.text().catch(() => "");
+                if (response.status === 401) {
+                    throw createAppError("HTTP_401", "Groq API Key 无效，请检查设置中的 Groq API Key。", { status: response.status });
+                }
+                if (response.status === 403) {
+                    throw createAppError(
+                        "ASR_GROQ_ACCESS_BLOCKED",
+                        "Groq 服务器拒绝了当前网络请求（Forbidden），请检查代理或设备是否能正常访问国际互联网后重试。",
+                        { status: response.status, detail: detail.slice(0, 180) }
+                    );
+                }
+                throw createHttpError(response.status, `Groq 连接预检失败（HTTP ${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
+            }
+            logASR.info("groq_connectivity_check_success", {
+                bvid,
+                task: "asr",
+                provider: "groq",
+                status: response.status,
+                duration_ms: Date.now() - startedAt
+            });
+            return response.status;
+        } catch (error) {
+            if (error?.code && error.code !== "ASR_GROQ_UNREACHABLE") throw error;
+            if (controller.signal.aborted && controller.signal.reason !== "timeout") throw createUserAbortedError();
+            const appError = createAppError(
+                "ASR_GROQ_UNREACHABLE",
+                "无法连接 Groq 服务器，请检查设备是否能正常访问国际互联网。"
+            );
+            attachSentryContext(appError, {
+                provider: "groq_asr",
+                request_name: "groq_connectivity_check",
+                timeout_ms: GROQ_CONNECTIVITY_TIMEOUT_MS,
+                elapsed_ms: Date.now() - startedAt,
+                network_error: String(error?.message || error || "")
+            });
+            logASR.warn("groq_connectivity_check_failed", {
+                bvid,
+                task: "asr",
+                provider: "groq",
+                code: appError.code,
+                duration_ms: Date.now() - startedAt,
+                detail: {
+                    reason: error?.message || "connectivity check failed",
+                    aborted: !!controller.signal.aborted,
+                    abort_reason: String(controller.signal.reason || "")
+                }
+            });
+            await notifyTranscribeStatus(tabId, {
+                stage: "error",
+                level: "error",
+                text: appError.message,
+                progress: 0,
+                bvid
+            });
+            throw appError;
+        } finally {
+            if (externalSignal) externalSignal.removeEventListener("abort", forwardAbort);
+            clearTimeout(timeoutId);
+        }
     }
 
     static async requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid = "", videoTitle = "", externalSignal = null) {
@@ -4012,7 +4096,11 @@ function applyLineRangesToSegments(segments, cache = {}, context = {}) {
     const list = Array.isArray(segments) ? segments : [];
     const rawRows = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
     const noTimestamp = isNoTimestampSubtitleCache(cache);
-    if (!list.length || !rawRows.length) return removeAdOverlapFromContentSegments(list, context);
+    if (!list.length) return removeAdOverlapFromContentSegments(list, context);
+    if (!rawRows.length) {
+        const safeList = noTimestamp ? list : list.filter((seg) => !seg?.no_timestamp && !seg?.virtual_time);
+        return removeAdOverlapFromContentSegments(dedupeRepeatedLineOnlyContentSegments(safeList, context), context);
+    }
     const mapped = list.map((seg) => {
         const startLineId = Number(seg?.type === "ad" ? (seg.ad_start_line ?? seg.start_line) : seg.start_line);
         const endLineId = Number(seg?.type === "ad" ? (seg.ad_end_line ?? seg.end_line) : seg.end_line);
@@ -4035,7 +4123,7 @@ function applyLineRangesToSegments(segments, cache = {}, context = {}) {
                     ai_end: Number(seg.end || 0)
                 }
             });
-            return seg;
+            return noTimestamp || (!seg?.no_timestamp && !seg?.virtual_time) ? seg : null;
         }
         if (noTimestamp) {
             const virtualStart = Math.max(0, startLine.index);
@@ -4078,7 +4166,9 @@ function applyLineRangesToSegments(segments, cache = {}, context = {}) {
         const start = Number(startLine.row?.from ?? startLine.row?.start ?? 0);
         const endBase = Number(endLine.row?.from ?? endLine.row?.start ?? start);
         const end = getSubtitleEndTime(endLine.row, endBase);
-        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return seg;
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+            return !seg?.no_timestamp && !seg?.virtual_time ? seg : null;
+        }
         const next = {
             ...seg,
             start,
@@ -4116,8 +4206,8 @@ function applyLineRangesToSegments(segments, cache = {}, context = {}) {
             }
         });
         return next;
-    });
-    return removeAdOverlapFromContentSegments(mapped, context);
+    }).filter(Boolean);
+    return removeAdOverlapFromContentSegments(dedupeRepeatedLineOnlyContentSegments(mapped, context), context);
 }
 
 function cloneContentSegmentWithRange(seg, start, end, suffix = "") {
@@ -4130,6 +4220,41 @@ function cloneContentSegmentWithRange(seg, start, end, suffix = "") {
         label: suffix ? `${String(seg.label || "内容").trim()}${suffix}` : String(seg.label || "内容").trim(),
         type: "content"
     };
+}
+
+function normalizeSegmentLabelForDedupe(label) {
+    return String(label || "").replace(/\s+/g, "").trim().toLowerCase();
+}
+
+function dedupeRepeatedLineOnlyContentSegments(segments, context = {}) {
+    const list = Array.isArray(segments) ? segments : [];
+    const seen = new Set();
+    const output = [];
+    let droppedCount = 0;
+    for (const seg of list) {
+        const isLineOnlyContent = seg?.type !== "ad" && (seg?.no_timestamp || seg?.virtual_time);
+        const key = isLineOnlyContent ? normalizeSegmentLabelForDedupe(seg?.label) : "";
+        if (isLineOnlyContent && key && seen.has(key)) {
+            droppedCount += 1;
+            continue;
+        }
+        if (isLineOnlyContent && key) seen.add(key);
+        output.push(seg);
+    }
+    if (droppedCount > 0) {
+        logAI.warn("segments_duplicate_line_labels_removed", {
+            bvid: context.bvid || "",
+            task: context.task || "segments",
+            code: "SEGMENTS_DUPLICATE_LINE_LABELS_REMOVED",
+            detail: {
+                mode: context.mode || "",
+                dropped_count: droppedCount,
+                segment_count_before: list.length,
+                segment_count_after: output.length
+            }
+        });
+    }
+    return output;
 }
 
 function removeAdOverlapFromContentSegments(segments, context = {}) {

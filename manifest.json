@@ -83,6 +83,7 @@
         "logger.js",
         "html2canvas.min.js",
         "markdownRenderer.js",
+        "storeConfig.js",
         "content/contentUtils.js",
         "content/contentDownload.js",
         "content/contentSettings.js",

@@ -113,7 +113,23 @@
         },
         ASR_REQUEST_TIMEOUT: {
             title: "转录请求超时",
-            message: "音频已经开始上传或转录，但服务长时间没有完成。请稍后重试，或切换转录 Provider。",
+            message: "音频已经开始上传或转录，但服务长时间没有完成。请确认设备能正常访问国际互联网，稍后重试，或切换转录 Provider。",
+            actionText: "重试",
+            action: "retry",
+            secondaryActionText: "去设置",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        ASR_GROQ_UNREACHABLE: {
+            title: "无法连接 Groq 服务器",
+            message: "无法连接 Groq 服务器，请检查设备是否能正常访问国际互联网。",
+            actionText: "重试",
+            action: "retry",
+            presentation: "panel"
+        },
+        ASR_GROQ_ACCESS_BLOCKED: {
+            title: "Groq 拒绝了当前网络请求",
+            message: "Groq 返回 Forbidden，当前网络或 IP 可能无法正常使用 Groq。请检查代理，或确认设备是否能正常访问国际互联网。",
             actionText: "重试",
             action: "retry",
             secondaryActionText: "去设置",
@@ -285,6 +301,7 @@
         if (/real-name verified|实名认证|实名.*验证|Please make sure your associated Aliyun account is real-name verified/i.test(message)) return "ALIYUN_REALNAME_REQUIRED";
         if (/Invalid model id|模型 ID.*(?:无效|不存在|不支持)|模型名称.*(?:无效|不存在|不支持)/i.test(message)) return "INVALID_MODEL_ID";
         if (/Model is private|private model|没有权限使用这个模型|无权访问该模型|model.*forbidden|model.*denied/i.test(message)) return "MODEL_ACCESS_DENIED";
+        if (/Groq.*(?:Forbidden|拒绝了当前网络请求)|ASR_GROQ_ACCESS_BLOCKED/i.test(message)) return "ASR_GROQ_ACCESS_BLOCKED";
         if (/(?:Groq|硅基流动|transcription|转录).*(?:403|forbidden|Illegal operation)|(?:403|forbidden|Illegal operation).*(?:Groq|硅基流动|transcription|转录)/i.test(message)) return "ASR_FORBIDDEN";
         const httpMatch = message.match(/\bHTTP\s+([0-9]{3})\b|API Error\s+([0-9]{3})/i);
         if (httpMatch) {
@@ -295,6 +312,7 @@
         if (/模型长时间没有开始返回内容|stream timeout|first token timeout/i.test(message)) return "AI_STREAM_TIMEOUT";
         if (/模型请求超时|ai request timeout|provider timeout/i.test(message)) return "AI_RESPONSE_TIMEOUT";
         if (/转录请求超时|asr timeout|transcription timeout/i.test(message)) return "ASR_REQUEST_TIMEOUT";
+        if (/无法连接\s*Groq\s*服务器|Groq.*(?:unreachable|connectivity)|ASR_GROQ_UNREACHABLE/i.test(message)) return "ASR_GROQ_UNREACHABLE";
         if (/网络请求超时|request timeout/i.test(message)) return "NETWORK_REQUEST_TIMEOUT";
         if (/timeout|超时/i.test(message)) return "TIMEOUT";
         if (/feedback.*(?:failed to fetch|network|timeout|unavailable)|反馈服务暂时不可用|feedback_(?:select|mark_seen)_unavailable/i.test(message)) return "FEEDBACK_SERVICE_UNAVAILABLE";

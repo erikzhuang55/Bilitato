@@ -218,6 +218,8 @@ function inferCodeFromMessage(message) {
   if (/模型长时间没有开始返回内容|stream timeout|first token timeout/i.test(text)) return "AI_STREAM_TIMEOUT";
   if (/模型请求超时|ai request timeout|provider timeout/i.test(text)) return "AI_RESPONSE_TIMEOUT";
   if (/转录请求超时|asr timeout|transcription timeout/i.test(text)) return "ASR_REQUEST_TIMEOUT";
+  if (/Groq.*(?:Forbidden|拒绝了当前网络请求)|ASR_GROQ_ACCESS_BLOCKED/i.test(text)) return "ASR_GROQ_ACCESS_BLOCKED";
+  if (/无法连接\s*Groq\s*服务器|Groq.*(?:unreachable|connectivity)|ASR_GROQ_UNREACHABLE/i.test(text)) return "ASR_GROQ_UNREACHABLE";
   if (/网络请求超时|request timeout/i.test(text)) return "NETWORK_REQUEST_TIMEOUT";
   if (/timeout|超时/i.test(text)) return "TIMEOUT";
   if (/反馈服务暂时不可用|feedback_(?:select|mark_seen)_unavailable/i.test(text)) return "FEEDBACK_SERVICE_UNAVAILABLE";

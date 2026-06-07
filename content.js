@@ -41,6 +41,61 @@ function isNoTimestampSubtitleCache(cache = {}) {
     return raw.some((item) => item?.noTimestamp === true);
 }
 
+function resolveSubtitleLineForSegment(rawRows, lineId) {
+    const id = Number(lineId);
+    if (!Array.isArray(rawRows) || !rawRows.length || !Number.isInteger(id)) return null;
+    if (id >= 0 && id < rawRows.length) return rawRows[id];
+    const fallback = id - 1;
+    if (fallback >= 0 && fallback < rawRows.length) return rawRows[fallback];
+    return null;
+}
+
+function getSegmentSubtitleEndTime(row, fallbackStart = 0) {
+    const end = Number(row?.to ?? row?.end ?? NaN);
+    if (Number.isFinite(end) && end > fallbackStart) return end;
+    const start = Number(row?.from ?? row?.start ?? fallbackStart);
+    if (Number.isFinite(start) && start > fallbackStart) return start;
+    return fallbackStart;
+}
+
+function resolveSegmentTimelineRange(item, cache = {}) {
+    if (isNoTimestampSubtitleCache(cache)) return null;
+    const start = Number(item?.start);
+    const end = Number(item?.end);
+    if (!item?.no_timestamp && !item?.virtual_time && Number.isFinite(start) && Number.isFinite(end) && end > start) {
+        return { start, end };
+    }
+    const rawRows = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+    const startLineId = Number(item?.type === "ad" ? (item?.ad_start_line ?? item?.start_line) : item?.start_line);
+    const endLineId = Number(item?.type === "ad" ? (item?.ad_end_line ?? item?.end_line) : item?.end_line);
+    const startLine = resolveSubtitleLineForSegment(rawRows, startLineId);
+    const endLine = resolveSubtitleLineForSegment(rawRows, endLineId);
+    if (!startLine || !endLine) return null;
+    const mappedStart = Number(startLine.from ?? startLine.start ?? NaN);
+    const endBase = Number(endLine.from ?? endLine.start ?? mappedStart);
+    const mappedEnd = getSegmentSubtitleEndTime(endLine, endBase);
+    if (!Number.isFinite(mappedStart) || !Number.isFinite(mappedEnd) || mappedEnd <= mappedStart) return null;
+    return { start: mappedStart, end: mappedEnd };
+}
+
+function normalizeSegmentLabelForDedupe(label) {
+    return String(label || "").replace(/\s+/g, "").trim().toLowerCase();
+}
+
+function dedupeDisplayedLineOnlyContentSegments(segments, cache = {}) {
+    const list = Array.isArray(segments) ? segments : [];
+    if (!isNoTimestampSubtitleCache(cache)) return list;
+    const seen = new Set();
+    return list.filter((item) => {
+        if (item?.type === "ad") return true;
+        const key = normalizeSegmentLabelForDedupe(item?.label);
+        if (!key) return true;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
 function getProviderModelOptions(providerKey) {
     const key = String(providerKey || "").toLowerCase();
     const options = {
@@ -49,7 +104,7 @@ function getProviderModelOptions(providerKey) {
             "MiniMax/MiniMax-M2.5",
             "ZhipuAI/GLM-5.1",
             "deepseek-ai/DeepSeek-V3.2",
-            "Qwen3.5-27B"
+            "Qwen/Qwen3.5-27B"
         ],
         zhipu: [
             "glm-5.1",
@@ -1815,7 +1870,8 @@ function bindPanelDelegatedEvents() {
             return;
         }
         if (action === "open-review") {
-            window.open("https://chromewebstore.google.com/detail/bilitato-ai%E9%99%AA%E4%BD%A0%E7%9C%8Bb%E7%AB%99/ggddcgdafeeoijoaohcffinbefcbpcga/reviews", "_blank", "noopener,noreferrer");
+            const reviewUrl = globalThis.BILITATO_STORE_CONFIG?.reviewUrl || "https://chromewebstore.google.com/detail/bilitato-ai%E9%99%AA%E4%BD%A0%E7%9C%8Bb%E7%AB%99/ggddcgdafeeoijoaohcffinbefcbpcga/reviews";
+            window.open(reviewUrl, "_blank", "noopener,noreferrer");
             return;
         }
         if (action === "settings-authorize-custom-origin") {
@@ -2428,7 +2484,7 @@ function renderSummary(panel) {
         return;
     }
     const summary = appState.cache?.summary || "";
-    const segments = Array.isArray(appState.cache?.segments) ? appState.cache.segments : [];
+    const segments = dedupeDisplayedLineOnlyContentSegments(appState.cache?.segments, appState.cache);
     const summaryStatus = getCurrentVideoTaskStatus("summary");
     const segmentsStatus = getCurrentVideoTaskStatus("segments");
     const summaryTaskErrorView = (summaryStatus === "error" || summaryStatus === "timeout")
@@ -2483,7 +2539,7 @@ function renderSummary(panel) {
     panel.dataset.lastSignature = signature;
 
     const isFresh = appState.sessionGeneratedTasks.has("summary") || appState.sessionGeneratedTasks.has("segments");
-    const segmentsNoTimestamp = isNoTimestampSubtitleCache(appState.cache) || segments.some((item) => item?.no_timestamp || item?.virtual_time);
+    const segmentsNoTimestamp = isNoTimestampSubtitleCache(appState.cache);
     const cacheTag = buildCacheTagHtml(appState.cache, ["summary", "segments"], hasContent, isLoading, isFresh);
     const showModeNotice = !appState.settings?.summaryModeNoticeSeen && !isFresh;
     const isFastMode = (appState.settings?.prefMode || "quality") === "quality";
@@ -2596,15 +2652,16 @@ function renderSummary(panel) {
 
     const segmentListHtml = segments.length
         ? `<div class="segment-list">${segments.map((item) => {
-                const itemNoTimestamp = segmentsNoTimestamp || item?.no_timestamp || item?.virtual_time;
+                const timelineRange = resolveSegmentTimelineRange(item, appState.cache);
+                const itemNoTimestamp = segmentsNoTimestamp || !timelineRange;
                 const lineStart = Number(item.start_line ?? item.ad_start_line);
                 const lineEnd = Number(item.end_line ?? item.ad_end_line);
                 const timeText = itemNoTimestamp
                     ? (Number.isInteger(lineStart) && Number.isInteger(lineEnd) ? `行 ${lineStart}-${lineEnd}` : "无时间轴")
-                    : `${formatTime(item.start)}-${formatTime(item.end)}`;
+                    : `${formatTime(timelineRange.start)}-${formatTime(timelineRange.end)}`;
                 const actionAttrs = itemNoTimestamp
                     ? `disabled title="该字幕没有真实时间轴，无法跳转到具体时间"`
-                    : `data-action="segment-jump" data-start="${item.start}"`;
+                    : `data-action="segment-jump" data-start="${timelineRange.start}"`;
                 return `
                 <button class="segment-card ${item.type === "ad" ? "ad" : ""} ${itemNoTimestamp ? "no-timestamp" : ""}"
                         ${actionAttrs}>
@@ -2906,6 +2963,17 @@ function renderCC(panel, rowsOverride) {
             appState.subtitleDetectTimeoutTimer = null;
         }
         const capsuleDisabled = (running || isDetectingSubtitle) ? "disabled" : "";
+        const asrPanelError = appState.panelErrors?.CC;
+        if (asrPanelError && !running && !isDetectingSubtitle && renderErrorPanel) {
+            panel.innerHTML = `
+            <section class="cc-panel">
+                ${controlCenterHtml}
+                ${renderErrorPanel(asrPanelError, "transcription-start")}
+            </section>
+        `;
+            bindCCSearch(panel);
+            return;
+        }
         const statusText = isDetectingSubtitle
             ? "正在读取字幕，请稍候..."
             : ((running && (appState.asrSession?.statusText || transcription.statusText))
@@ -5709,15 +5777,20 @@ function jumpTo(sec) {
 }
 
 function getSegmentsForFloatWindow() {
+    if (isNoTimestampSubtitleCache(appState.cache)) return [];
     const list = Array.isArray(appState.cache?.segments) ? appState.cache.segments : [];
     return list
-        .map((item) => ({
-            start: Math.max(0, Number(item?.start || 0)),
-            end: Math.max(0, Number(item?.end || 0)),
-            label: String(item?.label || "未命名章节").trim(),
-            type: String(item?.type || "content")
-        }))
-        .filter((item) => Number.isFinite(item.start))
+        .map((item) => {
+            const timelineRange = resolveSegmentTimelineRange(item, appState.cache);
+            if (!timelineRange) return null;
+            return {
+                start: Math.max(0, Number(timelineRange.start || 0)),
+                end: Math.max(0, Number(timelineRange.end || 0)),
+                label: String(item?.label || "未命名章节").trim(),
+                type: String(item?.type || "content")
+            };
+        })
+        .filter((item) => item && Number.isFinite(item.start))
         .sort((a, b) => a.start - b.start);
 }
 
@@ -6080,6 +6153,7 @@ async function startTranscriptionFromCapsule() {
         showToast("正在转录中，请稍候...");
         return;
     }
+    clearPanelError("CC");
     const asrRunId = `asr_${bvid}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     appState.progressTaskId = "";
     appState.progressLastPercent = 0;
@@ -6197,6 +6271,7 @@ async function startTranscriptionFromCapsule() {
         resetTranscriptionState();
         updateProgress(0, progressTaskId, { force: true });
         reportContentError?.(error, { task: "asr", source: "start_transcription" });
+        setPanelError("CC", error, error.message || "Groq 转录失败");
         notifyMappedError(error, error.message || "Groq 转录失败");
         renderContent();
         renderSubtitleTimelinePanel(document.getElementById("panel-body"));

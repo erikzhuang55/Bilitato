@@ -218,6 +218,42 @@ describe("contentErrorMessages", () => {
     });
   });
 
+  it("maps Groq connectivity failures to retryable asr guidance", () => {
+    const view = messages.mapErrorToView({
+      code: "ASR_GROQ_UNREACHABLE",
+      message: "无法连接 Groq 服务器，请检查设备是否能正常访问国际互联网。"
+    });
+    const html = messages.renderErrorPanel(view, "transcription-start");
+
+    expect(view).toMatchObject({
+      code: "ASR_GROQ_UNREACHABLE",
+      title: "无法连接 Groq 服务器",
+      action: "retry",
+      presentation: "panel"
+    });
+    expect(html).toContain("请检查设备是否能正常访问国际互联网");
+    expect(html).toContain('data-action="transcription-start"');
+  });
+
+  it("maps Groq forbidden preflight responses to network access guidance", () => {
+    const view = messages.mapErrorToView({
+      code: "ASR_GROQ_ACCESS_BLOCKED",
+      message: "Groq 服务器拒绝了当前网络请求（Forbidden），请检查代理或设备是否能正常访问国际互联网后重试。"
+    });
+    const html = messages.renderErrorPanel(view, "transcription-start");
+
+    expect(view).toMatchObject({
+      code: "ASR_GROQ_ACCESS_BLOCKED",
+      title: "Groq 拒绝了当前网络请求",
+      action: "retry",
+      secondaryAction: "goto-setup-guide",
+      presentation: "panel"
+    });
+    expect(html).toContain("Groq 返回 Forbidden");
+    expect(html).toContain('data-action="transcription-start"');
+    expect(html).toContain('data-action="goto-setup-guide"');
+  });
+
   it("maps API key failures inside 400 responses to auth guidance", () => {
     const view = messages.mapErrorToView({ message: 'API Error 400: {"error":{"message":"Invalid API key"}}' });
     const html = messages.renderErrorPanel(view, "run-summary");

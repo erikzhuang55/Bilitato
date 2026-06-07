@@ -34,6 +34,8 @@ describe("appError", () => {
     expect(inferErrorCode(new Error('API Error 403: {"error":{"message":"To use API-Inference, please make sure your associated Aliyun account is real-name verified."}}'))).toBe("ALIYUN_REALNAME_REQUIRED");
     expect(inferErrorCode(new Error('API Error 400: {"error":{"message":"Invalid model id: GLM-5.1"}}'))).toBe("INVALID_MODEL_ID");
     expect(inferErrorCode(new Error("Groq 转录失败（403）：Illegal operation"))).toBe("ASR_FORBIDDEN");
+    expect(inferErrorCode(new Error("Groq 服务器拒绝了当前网络请求（Forbidden），请检查代理或设备是否能正常访问国际互联网后重试。"))).toBe("ASR_GROQ_ACCESS_BLOCKED");
+    expect(inferErrorCode(new Error("无法连接 Groq 服务器，请检查设备是否能正常访问国际互联网。"))).toBe("ASR_GROQ_UNREACHABLE");
     expect(inferErrorCode(new Error("验真 JSON 解析失败"))).toBe("RUMORS_JSON_PARSE_FAILED");
     expect(inferErrorCode(new Error("总结生成为空"))).toBe("SUMMARY_EMPTY_RESPONSE");
     expect(inferErrorCode(new Error("分段 JSON 解析失败"))).toBe("SEGMENTS_JSON_PARSE_FAILED");

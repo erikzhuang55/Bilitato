@@ -1,4 +1,4 @@
-import { createHttpError } from "./appError.js";
+import { createAppError, createHttpError } from "./appError.js";
 
 export const PROVIDERS = {
     modelscope: {
@@ -73,6 +73,8 @@ export const PROVIDERS = {
     }
 };
 
+const DEFAULT_PROVIDER_RETRY_DELAYS_MS = [700, 1600];
+
 function isDebugEnabled() {
     return !!globalThis.AIPluginLogger?.isDebugEnabled?.();
 }
@@ -82,6 +84,59 @@ function getProviderLogger() {
         getDebugMode: isDebugEnabled,
         onEntry: () => {},
         printConsole: true
+    });
+}
+
+function getProviderRetryDelays(config = {}) {
+    if (Array.isArray(config?.providerRetryDelaysMs) && config.providerRetryDelaysMs.length) {
+        return config.providerRetryDelaysMs
+            .map((value) => Number(value))
+            .filter((value) => Number.isFinite(value) && value >= 0);
+    }
+    return [...DEFAULT_PROVIDER_RETRY_DELAYS_MS];
+}
+
+function shouldRetryProviderRequest(error, attempt, maxAttempts) {
+    return String(error?.code || "") === "PROVIDER_NETWORK_ERROR" && attempt < maxAttempts;
+}
+
+function decorateRetryMetadata(error, attempt, maxAttempts, retryDelaysMs = []) {
+    if (!error || typeof error !== "object") return error;
+    error.requestAttempt = Number(attempt || 0);
+    error.requestMaxAttempts = Number(maxAttempts || 0);
+    error.retryDelaysMs = Array.isArray(retryDelaysMs) ? [...retryDelaysMs] : [];
+    error.retryStrategy = "provider_network_backoff";
+    return error;
+}
+
+function createRetryAbortError(signal) {
+    const error = new Error("provider retry aborted");
+    if (signal?.reason === "aborted") error.code = "ABORTED";
+    return error;
+}
+
+function sleepWithSignal(delayMs, signal) {
+    if (!delayMs) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        let timeoutId = 0;
+        let cleanup = () => {};
+        const handleAbort = () => {
+            cleanup();
+            reject(createRetryAbortError(signal));
+        };
+        cleanup = () => {
+            clearTimeout(timeoutId);
+            signal?.removeEventListener?.("abort", handleAbort);
+        };
+        timeoutId = setTimeout(() => {
+            cleanup();
+            resolve();
+        }, delayMs);
+        if (signal?.aborted) {
+            handleAbort();
+            return;
+        }
+        signal?.addEventListener?.("abort", handleAbort, { once: true });
     });
 }
 
@@ -299,6 +354,8 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
 export async function callAI(providerKey, config, messages, signal) {
     const req = resolveProviderRequest(providerKey, config, messages, false);
     const requestBody = req.body || {};
+    const retryDelaysMs = getProviderRetryDelays(config);
+    const maxAttempts = retryDelaysMs.length + 1;
     getProviderLogger()?.debug("provider_request_body_built", {
         task: "ai",
         provider: providerKey,
@@ -309,15 +366,64 @@ export async function callAI(providerKey, config, messages, signal) {
             stream: !!requestBody.stream
         }
     });
-    const res = await fetch(req.finalUrl, {
-        method: "POST",
-        headers: req.headers,
-        body: JSON.stringify(req.body),
-        signal
-    });
+    let res;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        try {
+            res = await fetch(req.finalUrl, {
+                method: "POST",
+                headers: req.headers,
+                body: JSON.stringify(req.body),
+                signal
+            });
+            break;
+        } catch (error) {
+            const wrappedError = error?.code ? error : createAppError("PROVIDER_NETWORK_ERROR", "模型服务连接失败，请稍后重试", {
+                cause: error,
+                provider: providerKey,
+                model: req.model || "",
+                requestEndpoint: req.finalUrl,
+                requestHost: safeUrlHost(req.finalUrl),
+                requestProtocol: req.protocol,
+                isCustomProvider: !!req.isCustom,
+                requestStream: false,
+                requestMethod: "POST",
+                requestEntry: "callAI",
+                requestPhase: "initial_fetch"
+            });
+            decorateRetryMetadata(wrappedError, attempt, maxAttempts, retryDelaysMs);
+            if (!shouldRetryProviderRequest(wrappedError, attempt, maxAttempts)) throw wrappedError;
+            const delayMs = retryDelaysMs[attempt - 1] || 0;
+            getProviderLogger()?.warn("provider_request_retry", {
+                task: "ai",
+                provider: providerKey,
+                model: req.model || "",
+                code: wrappedError.code || "",
+                detail: {
+                    attempt,
+                    max_attempts: maxAttempts,
+                    next_delay_ms: delayMs,
+                    request_entry: "callAI",
+                    request_phase: "initial_fetch",
+                    url_host: safeUrlHost(req.finalUrl)
+                }
+            });
+            await sleepWithSignal(delayMs, signal);
+        }
+    }
     if (!res.ok) {
         const errText = await res.text();
-        throw createHttpError(res.status, `API Error ${res.status}: ${errText}`, { provider: providerKey });
+        throw createHttpError(res.status, `API Error ${res.status}: ${errText}`, {
+            provider: providerKey,
+            model: req.model || "",
+            requestEndpoint: req.finalUrl,
+            requestHost: safeUrlHost(req.finalUrl),
+            requestProtocol: req.protocol,
+            isCustomProvider: !!req.isCustom,
+            requestStream: false,
+            requestMethod: "POST",
+            requestEntry: "callAI",
+            requestPhase: "initial_fetch"
+        });
     }
     const data = await res.json();
     if (req.provider.type === "google") {
@@ -356,15 +462,44 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
             stream: !!requestBody.stream
         }
     });
-    const res = await fetch(req.finalUrl, {
-        method: "POST",
-        headers: req.headers,
-        body: JSON.stringify(req.body),
-        signal
-    });
+    let res;
+    try {
+        res = await fetch(req.finalUrl, {
+            method: "POST",
+            headers: req.headers,
+            body: JSON.stringify(req.body),
+            signal
+        });
+    } catch (error) {
+        if (error?.code) throw error;
+        throw createAppError("PROVIDER_NETWORK_ERROR", "模型服务连接失败，请稍后重试", {
+            cause: error,
+            provider: providerKey,
+            model: req.model || "",
+            requestEndpoint: req.finalUrl,
+            requestHost: safeUrlHost(req.finalUrl),
+            requestProtocol: req.protocol,
+            isCustomProvider: !!req.isCustom,
+            requestStream: true,
+            requestMethod: "POST",
+            requestEntry: "callAIStream",
+            requestPhase: "initial_fetch"
+        });
+    }
     if (!res.ok) {
         const errText = await res.text();
-        throw createHttpError(res.status, `API Error ${res.status}: ${errText}`, { provider: providerKey });
+        throw createHttpError(res.status, `API Error ${res.status}: ${errText}`, {
+            provider: providerKey,
+            model: req.model || "",
+            requestEndpoint: req.finalUrl,
+            requestHost: safeUrlHost(req.finalUrl),
+            requestProtocol: req.protocol,
+            isCustomProvider: !!req.isCustom,
+            requestStream: true,
+            requestMethod: "POST",
+            requestEntry: "callAIStream",
+            requestPhase: "initial_fetch"
+        });
     }
     const reader = res.body?.getReader?.();
     if (!reader) {

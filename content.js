@@ -1,4 +1,5 @@
 let IS_DEBUG_MODE = false;
+const DEBUG_PANEL_BUILD_STAMP = "2026-06-07 03:34 Asia/Shanghai";
 const {
     escapeHtml,
     escapeHtmlAttr,
@@ -1859,9 +1860,10 @@ function bindPanelDelegatedEvents() {
             } else {
                 const toneSelect = settingsPanel?.querySelector("#settings-prompt-tone");
                 const detailSelect = settingsPanel?.querySelector("#settings-prompt-detail");
-                if (toneSelect) toneSelect.value = "balanced";
-                if (detailSelect) detailSelect.value = "normal";
+                if (toneSelect) toneSelect.value = "1";
+                if (detailSelect) detailSelect.value = "1";
             }
+            syncPromptSettingsDraft(settingsPanel);
             saveSettingsFromPanel(true);
             return;
         }
@@ -1879,7 +1881,7 @@ function bindPanelDelegatedEvents() {
         if (action === "debug-show-release-notice") {
             globalThis.BilitatoReleaseNotice?.renderReleaseNotice?.({
                 root: panelShadowRoot,
-                version: "1.3.0"
+                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.3.1"
             });
             return;
         }
@@ -2179,8 +2181,8 @@ async function refreshFeedbackState({ markSeen = false, silent = false } = {}) {
             ...(res.feedback || {}),
             loading: false,
             loadedAt: Date.now(),
-            statusText: "",
-            errorText: ""
+            statusText: String(res.feedback?.statusText || ""),
+            errorText: String(res.feedback?.errorText || "")
         });
         renderNav();
         renderContent();
@@ -2553,6 +2555,14 @@ function renderSummary(panel) {
     const segmentsSkeleton = renderSkeletonLines(5, "segments-skeleton");
     const summaryIsLoading = summaryStatus === "processing";
     const segmentsIsLoading = segmentsStatus === "processing";
+    const shouldHoldSegmentsLoading = !segments.length
+        && !segmentsTaskErrorView
+        && (
+            segmentsIsLoading
+            || summaryIsLoading
+            || isFresh
+            || !!String(summary || "").trim()
+        );
     const summaryBody = summary
         ? `<div class="result-text summary-result-text">${renderRichContent(summary)}</div>`
         : (summaryIsLoading
@@ -2604,7 +2614,7 @@ function renderSummary(panel) {
                 </button>`;
             }).join("")}
               </div>`
-        : (segmentsIsLoading
+        : (shouldHoldSegmentsLoading
         ? segmentsSkeleton
         : (segmentsTaskErrorView && renderErrorPanel
             ? renderErrorPanel(segmentsTaskErrorView, "run-segments")
@@ -3660,7 +3670,8 @@ function renderSettings(panel) {
         </div>
         <div class="error-message" id="${escapeHtmlAttr(id)}-error">${escapeHtml(errorText)}</div>
     `;
-    const promptSettings = normalizePromptSettingsState(settings.promptSettings);
+    const promptSettings = normalizePromptSettingsState(appState.settingsPromptDraft || settings.promptSettings);
+    appState.settingsPromptDraft = promptSettings;
     const promptMode = promptSettings.mode === "custom" ? "custom" : "guided";
     const promptSummary = String(promptSettings.custom.summary || "");
     const promptSegments = String(promptSettings.custom.segments || "");
@@ -3887,6 +3898,7 @@ function renderSettings(panel) {
                 e.stopPropagation();
                 const val = option.dataset.value;
                 if(val && val !== providerKey) {
+                    syncPromptSettingsDraft(panel);
                     // Update UI immediately for responsiveness
                     selectContainer.querySelector(".current-value").textContent = option.textContent;
                     selectContainer.classList.remove("open");
@@ -3927,7 +3939,7 @@ function renderSettings(panel) {
                     // Trigger save
                     saveSettingsFromPanel(true);
                 } else {
-                     selectContainer.classList.remove("open");
+                    selectContainer.classList.remove("open");
                 }
             });
         });
@@ -3958,7 +3970,10 @@ function renderSettings(panel) {
     updateSettingsProviderHint(panel);
     const asrProviderSelect = panel.querySelector("#settings-asr-provider");
     if (asrProviderSelect) {
-        asrProviderSelect.addEventListener("change", () => updateSettingsAsrProviderHint(panel));
+        asrProviderSelect.addEventListener("change", () => {
+            syncPromptSettingsDraft(panel);
+            updateSettingsAsrProviderHint(panel);
+        });
     }
     updateSettingsAsrProviderHint(panel);
 
@@ -3988,6 +4003,7 @@ function renderSettings(panel) {
         updateSliderFill(slider);
         slider.addEventListener("input", () => {
             updateSliderFill(slider);
+            syncPromptSettingsDraft(panel);
             debouncedSave();
         });
     });
@@ -4017,6 +4033,7 @@ function renderSettings(panel) {
     };
     if (promptModeSelect) {
         promptModeSelect.addEventListener("change", () => {
+            syncPromptSettingsDraft(panel);
             applyPromptModeVisibility();
             triggerAutoSave();
         });
@@ -4074,6 +4091,7 @@ function renderSettings(panel) {
         updateCount();
         textarea.addEventListener("input", () => {
             updateCount();
+            syncPromptSettingsDraft(panel);
         });
     });
 
@@ -4116,13 +4134,25 @@ function renderSettings(panel) {
 }
 
 function renderErrorDemoControls() {
+    const currentVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "1.3.1";
     const panelErrors = [
         ["HTTP_401", "401 Key 无效", "summary"],
+        ["ALIYUN_REALNAME_REQUIRED", "阿里云未实名", "summary"],
         ["HTTP_403", "403 无权限", "summary"],
+        ["MODEL_ACCESS_DENIED", "模型无权限", "summary"],
+        ["ASR_FORBIDDEN", "转录 403", "summary"],
+        ["INVALID_MODEL_ID", "模型 ID 无效", "summary"],
         ["HTTP_404", "404 模型/接口", "summary"],
         ["TIMEOUT", "超时", "summary"],
+        ["AI_RESPONSE_TIMEOUT", "模型请求超时", "summary"],
+        ["AI_STREAM_TIMEOUT", "模型流超时", "summary"],
+        ["NETWORK_REQUEST_TIMEOUT", "网络请求超时", "summary"],
+        ["ASR_REQUEST_TIMEOUT", "转录请求超时", "summary"],
         ["NETWORK_ERROR", "网络失败", "summary"],
+        ["PROVIDER_NETWORK_ERROR", "模型服务网络失败", "summary"],
+        ["FEEDBACK_SERVICE_UNAVAILABLE", "反馈服务不可用", "summary"],
         ["JSON_PARSE_ERROR", "JSON 格式", "summary"],
+        ["RUMORS_JSON_PARSE_FAILED", "验真 JSON 坏", "real"],
         ["SEGMENTS_EMPTY_RESPONSE", "分段返回为空", "summary"],
         ["SEGMENTS_JSON_PARSE_FAILED", "分段 JSON 坏", "summary"],
         ["SEGMENTS_EMPTY_LIST", "分段空数组", "summary"],
@@ -4154,7 +4184,7 @@ function renderErrorDemoControls() {
             <div class="error-demo-label">Toast 提示</div>
             <div class="error-demo-grid">${toastErrors.map(renderButton).join("")}</div>
             <div class="error-demo-label">更新导览</div>
-            <button type="button" class="panel-btn ghost" data-action="debug-show-release-notice">显示 v1.3.0 更新导览</button>
+            <button type="button" class="panel-btn ghost" data-action="debug-show-release-notice">显示 v${escapeHtml(currentVersion)} 更新导览</button>
             <button type="button" class="panel-btn ghost error-demo-clear" data-action="debug-clear-errors">清空测试状态</button>
         </div>
     `;
@@ -4196,9 +4226,16 @@ function renderSegmentPromptDebugControls() {
 
 function renderDebugPanel(panel) {
     panel.dataset.lastSignature = "debug";
+    const manifestVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "";
+    const buildText = manifestVersion
+        ? `调试面板构建时间：${DEBUG_PANEL_BUILD_STAMP} · v${manifestVersion}`
+        : `调试面板构建时间：${DEBUG_PANEL_BUILD_STAMP}`;
     panel.innerHTML = `
         <div class="page-header">
-            <h3>测试</h3>
+            <div>
+                <h3>测试</h3>
+                <div class="empty-text" style="margin-top:4px;">${escapeHtml(buildText)}</div>
+            </div>
         </div>
         <div class="page-body debug-page-body">
             ${renderSegmentPromptDebugControls()}
@@ -5255,6 +5292,35 @@ function bindSettingsCustomSelects(panel) {
     });
 }
 
+function getPromptSettingsDraftFromPanel(panel) {
+    const fallback = normalizePromptSettingsState(appState.settingsPromptDraft || appState.settings?.promptSettings);
+    const promptMode = String(panel?.querySelector("#settings-prompt-mode")?.value || fallback.mode || "guided") === "custom" ? "custom" : "guided";
+    const toneVal = Number(panel?.querySelector("#settings-prompt-tone")?.value ?? (fallback.guided.tone === "casual" ? 0 : (fallback.guided.tone === "professional" ? 2 : 1)));
+    const detailVal = Number(panel?.querySelector("#settings-prompt-detail")?.value ?? (fallback.guided.detail === "brief" ? 0 : (fallback.guided.detail === "detailed" ? 2 : 1)));
+    const promptTone = toneVal === 0 ? "casual" : (toneVal === 2 ? "professional" : "balanced");
+    const promptDetail = detailVal === 0 ? "brief" : (detailVal === 2 ? "detailed" : "normal");
+    return normalizePromptSettingsState({
+        mode: promptMode,
+        guided: {
+            tone: promptTone,
+            detail: promptDetail
+        },
+        custom: {
+            summary: String(panel?.querySelector("#settings-prompt-summary")?.value ?? fallback.custom.summary ?? ""),
+            segments: String(panel?.querySelector("#settings-prompt-segments")?.value ?? fallback.custom.segments ?? ""),
+            rumors: String(panel?.querySelector("#settings-prompt-rumors")?.value ?? fallback.custom.rumors ?? "")
+        }
+    });
+}
+
+function syncPromptSettingsDraft(panel) {
+    const nextDraft = getPromptSettingsDraftFromPanel(panel);
+    appState.settingsPromptDraft = nextDraft;
+    if (!appState.settings) appState.settings = {};
+    appState.settings.promptSettings = nextDraft;
+    return nextDraft;
+}
+
 async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
     const panel = panelShadowRoot ? panelShadowRoot.getElementById("page-settings") : null;
     if (!panel) return;
@@ -5300,13 +5366,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
 
     const customProtocolValue = panel.querySelector("#settings-custom-protocol")?.value || "openai";
     const defaultOpenPage = resolveDefaultOpenPage(panel.querySelector("#settings-default-open-page")?.value || appState.settings?.defaultOpenPage);
-    const promptMode = String(panel.querySelector("#settings-prompt-mode")?.value || "guided") === "custom" ? "custom" : "guided";
-    
-    // Map slider values (0, 1, 2) back to string keys
-    const toneVal = Number(panel.querySelector("#settings-prompt-tone")?.value ?? 1);
-    const detailVal = Number(panel.querySelector("#settings-prompt-detail")?.value ?? 1);
-    const promptTone = toneVal === 0 ? "casual" : (toneVal === 2 ? "professional" : "balanced");
-    const promptDetail = detailVal === 0 ? "brief" : (detailVal === 2 ? "detailed" : "normal");
+    const promptSettingsDraft = syncPromptSettingsDraft(panel);
     const providerModelValue = String(panel.querySelector("#settings-provider-model")?.value || "").trim();
     const hasProviderModelSelect = providerValue !== "custom" && getProviderModelOptions(providerValue).length > 0;
     const resolvedModelValue = hasProviderModelSelect
@@ -5346,15 +5406,15 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         sentryDsn: String(appState.settings?.sentryDsn || "").trim(),
         debugMode: panel.querySelector("#settings-debug-mode")?.value === "true",
         promptSettings: {
-            mode: promptMode,
+            mode: promptSettingsDraft.mode,
             guided: {
-                tone: promptTone,
-                detail: promptDetail
+                tone: promptSettingsDraft.guided.tone,
+                detail: promptSettingsDraft.guided.detail
             },
             custom: {
-                summary: String(panel.querySelector("#settings-prompt-summary")?.value || "").trim(),
-                segments: String(panel.querySelector("#settings-prompt-segments")?.value || "").trim(),
-                rumors: String(panel.querySelector("#settings-prompt-rumors")?.value || "").trim()
+                summary: String(promptSettingsDraft.custom.summary || "").trim(),
+                segments: String(promptSettingsDraft.custom.segments || "").trim(),
+                rumors: String(promptSettingsDraft.custom.rumors || "").trim()
             }
         }
     };
@@ -5395,6 +5455,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         const res = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: payload });
         if (!res?.ok) throw new Error(res?.error || "保存失败");
         appState.settings = res.settings || payload;
+        appState.settingsPromptDraft = normalizePromptSettingsState(appState.settings?.promptSettings || payload.promptSettings);
         
     if (isAutoSave) {
         const livePanel = panel;

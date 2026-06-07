@@ -11,7 +11,8 @@
         /未授权访问该自定义\s*api\s*域名/i,
         /缺少自定义\s*api\s*地址/i,
         /自定义\s*provider\s*需要填写\s*base\s*url/i,
-        /sentry\s*dsn/i
+        /sentry\s*dsn/i,
+        /ResizeObserver loop completed with undelivered notifications/i
     ];
 
     function normalizeError(errorInput) {
@@ -53,16 +54,39 @@
         const state = globalThis.BilitatoAppState || {};
         const cache = state.cache || {};
         const path = String(globalThis.location?.pathname || "");
+        const rawSubtitle = Array.isArray(cache.rawSubtitle) ? cache.rawSubtitle : [];
+        const subtitleTotalChars = rawSubtitle.reduce((sum, row) => sum + String(row?.text || "").length, 0);
+        const videoDurationSec = resolveVideoDurationSeconds(cache);
         return {
             source: "content",
             pageType: path.includes("/list/") ? "list" : "video",
             bvid: state.injectBvid || state.tabState?.activeBvid || "",
             provider: state.settings?.provider || "",
-            hasSubtitle: Array.isArray(cache.rawSubtitle) && cache.rawSubtitle.length > 0,
-            subtitleCount: Array.isArray(cache.rawSubtitle) ? cache.rawSubtitle.length : 0,
+            model: state.settings?.model || "",
+            hasSubtitle: rawSubtitle.length > 0,
+            subtitleCount: rawSubtitle.length,
+            subtitle_total_chars: subtitleTotalChars || undefined,
+            video_duration_sec: videoDurationSec || undefined,
             asrEnabled: !!String(state.settings?.groqApiKey || "").trim(),
             ...extra
         };
+    }
+
+    function resolveVideoDurationSeconds(cache = {}) {
+        const video = globalThis.document?.querySelector?.("video");
+        const fromVideo = Number(video?.duration || 0);
+        if (Number.isFinite(fromVideo) && fromVideo > 0) return Math.floor(fromVideo);
+        const rows = Array.isArray(cache.rawSubtitle) ? cache.rawSubtitle : [];
+        let maxSec = 0;
+        rows.forEach((row) => {
+            const end = Number(row?.end);
+            const start = Number(row?.start);
+            const candidate = Number.isFinite(end) && end > 0
+                ? end
+                : (Number.isFinite(start) && start > 0 ? start : 0);
+            if (candidate > maxSec) maxSec = candidate;
+        });
+        return maxSec;
     }
 
     function reportContentError(errorInput, context = {}) {

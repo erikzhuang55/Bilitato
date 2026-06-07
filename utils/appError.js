@@ -34,13 +34,33 @@ export function serializeAppError(error) {
 
 export function inferErrorCode(error) {
   const code = String(error?.code || "").trim();
-  if (code) return code;
   const message = String(error?.message || error || "");
+  const genericCodes = new Set([
+    "HTTP_400",
+    "HTTP_401",
+    "HTTP_403",
+    "TIMEOUT",
+    "NETWORK_ERROR",
+    "JSON_PARSE_ERROR",
+    "UNKNOWN"
+  ]);
+  if (code && !genericCodes.has(code)) return code;
   if (/(?:invalid|incorrect|wrong|bad|expired|missing)\s+(?:api\s*)?key|api\s*key\s+(?:is\s+)?(?:invalid|incorrect|wrong|expired|missing)|invalid_api_key|unauthorized api key|authentication.*(?:failed|invalid)|鉴权失败|认证失败|密钥.*(?:无效|错误|过期)|API\s*Key.*(?:无效|错误|过期|不正确)|令牌.*(?:无效|错误|过期)/i.test(message)) return "HTTP_401";
   if (/User location is not supported for the API use|location is not supported|unsupported.*location|地区.*不支持|所在地.*不支持/i.test(message)) return "API_LOCATION_UNSUPPORTED";
+  if (/real-name verified|实名认证|实名.*验证|Please make sure your associated Aliyun account is real-name verified/i.test(message)) return "ALIYUN_REALNAME_REQUIRED";
+  if (/Invalid model id|模型 ID.*(?:无效|不存在|不支持)|模型名称.*(?:无效|不存在|不支持)/i.test(message)) return "INVALID_MODEL_ID";
+  if (/Model is private|private model|没有权限使用这个模型|无权访问该模型|model.*forbidden|model.*denied/i.test(message)) return "MODEL_ACCESS_DENIED";
+  if (/(?:Groq|硅基流动|transcription|转录).*(?:403|forbidden|Illegal operation)|(?:403|forbidden|Illegal operation).*(?:Groq|硅基流动|transcription|转录)/i.test(message)) return "ASR_FORBIDDEN";
   const httpMatch = message.match(/\bHTTP\s+([0-9]{3})\b|API Error\s+([0-9]{3})/i);
   if (httpMatch) return normalizeHttpErrorCode(Number(httpMatch[1] || httpMatch[2]));
+  if (/模型长时间没有开始返回内容|stream timeout|first token timeout/i.test(message)) return "AI_STREAM_TIMEOUT";
+  if (/模型请求超时|ai request timeout|provider timeout/i.test(message)) return "AI_RESPONSE_TIMEOUT";
+  if (/转录请求超时|asr timeout|transcription timeout/i.test(message)) return "ASR_REQUEST_TIMEOUT";
+  if (/网络请求超时|request timeout/i.test(message)) return "NETWORK_REQUEST_TIMEOUT";
   if (/timeout|超时/i.test(message)) return "TIMEOUT";
+  if (/feedback.*(?:failed to fetch|network|timeout|unavailable)|反馈服务暂时不可用|feedback_(?:select|mark_seen)_unavailable/i.test(message)) return "FEEDBACK_SERVICE_UNAVAILABLE";
+  if (/模型服务连接失败|provider network error/i.test(message)) return "PROVIDER_NETWORK_ERROR";
+  if (/(?:provider|模型服务|上游|inference|chat_stream|summary|segments).*(?:failed to fetch|network error|网络请求失败)|(?:failed to fetch|network error).*(?:provider|模型服务|上游|inference|chat_stream|summary|segments)/i.test(message)) return "PROVIDER_NETWORK_ERROR";
   if (/network|failed to fetch|网络/i.test(message)) return "NETWORK_ERROR";
   if (/模型没有返回总结内容|总结生成为空|summary_empty|SUMMARY_EMPTY/i.test(message)) return "SUMMARY_EMPTY_RESPONSE";
   if (/字幕内容过长|context length|maximum context|max context|too many tokens|prompt too long|input too long|context_length_exceeded/i.test(message)) return "SEGMENTS_CONTEXT_TOO_LONG";
@@ -50,7 +70,8 @@ export function inferErrorCode(error) {
   if (/分段字段不完整|invalid schema|schema/i.test(message)) return "SEGMENTS_INVALID_SCHEMA";
   if (/模型没有生成有效分段|空分段|empty list/i.test(message)) return "SEGMENTS_EMPTY_LIST";
   if (/分段.*(?:格式|JSON|解析)|segments.*(?:json|parse)|模型返回分段格式/i.test(message)) return "SEGMENTS_JSON_PARSE_FAILED";
+  if (/验真 JSON 解析失败|rumors.*(?:json|parse)|验真.*(?:格式|JSON|解析)/i.test(message)) return "RUMORS_JSON_PARSE_FAILED";
   if (/JSON\s*解析失败|json_parse|JSON Parse/i.test(message)) return "JSON_PARSE_ERROR";
   if (/文件大小超出限制|音频过大|too large/i.test(message)) return "ASR_FILE_TOO_LARGE";
-  return "";
+  return code || "";
 }

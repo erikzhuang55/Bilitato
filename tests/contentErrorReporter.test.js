@@ -9,6 +9,7 @@ describe("contentErrorReporter", () => {
       injectBvid: "BV1",
       settings: {
         provider: "deepseek",
+        model: "deepseek-chat",
         groqApiKey: "gsk-secret"
       },
       cache: {
@@ -25,11 +26,14 @@ describe("contentErrorReporter", () => {
       pageType: "video",
       bvid: "BV1",
       provider: "deepseek",
+      model: "deepseek-chat",
       hasSubtitle: true,
       subtitleCount: 2,
+      subtitle_total_chars: 5,
       asrEnabled: true,
       task: "summary"
     });
+    expect(context.video_duration_sec).toBeUndefined();
   });
 
   it("forwards normalized errors to background", async () => {

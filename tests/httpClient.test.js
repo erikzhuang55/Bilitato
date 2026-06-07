@@ -33,4 +33,26 @@ describe("httpClient", () => {
       .rejects
       .toMatchObject({ code: "JSON_PARSE_ERROR" });
   });
+
+  it("marks feedback network failures with a dedicated code", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      throw new TypeError("Failed to fetch");
+    });
+
+    await expect(requestJson("https://example.com/api", { requestName: "feedback_select" }))
+      .rejects
+      .toMatchObject({ code: "FEEDBACK_SERVICE_UNAVAILABLE", requestName: "feedback_select" });
+  });
+
+  it("marks aborted requests as network request timeout", async () => {
+    globalThis.fetch = vi.fn(async () => {
+      const error = new Error("The operation was aborted");
+      error.name = "AbortError";
+      throw error;
+    });
+
+    await expect(requestJson("https://example.com/api", { requestName: "supabase_select:feedback", timeoutMs: 1 }))
+      .rejects
+      .toMatchObject({ code: "NETWORK_REQUEST_TIMEOUT", requestName: "supabase_select:feedback" });
+  });
 });

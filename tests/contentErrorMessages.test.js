@@ -70,6 +70,36 @@ describe("contentErrorMessages", () => {
     });
   });
 
+  it("maps specific timeout variants to clearer retry guidance", () => {
+    expect(messages.mapErrorToView({ code: "AI_RESPONSE_TIMEOUT", message: "模型请求超时，请重试" })).toMatchObject({
+      title: "模型请求超时",
+      action: "retry",
+      secondaryAction: "goto-setup-guide"
+    });
+    expect(messages.mapErrorToView({ code: "AI_STREAM_TIMEOUT", message: "模型长时间没有开始返回内容，请重试" }).title).toBe("模型迟迟没有开始返回内容");
+    expect(messages.mapErrorToView({ code: "ASR_REQUEST_TIMEOUT", message: "转录请求超时，请稍后重试" }).title).toBe("转录请求超时");
+    expect(messages.mapErrorToView({ code: "NETWORK_REQUEST_TIMEOUT", message: "网络请求超时，请稍后重试" }).title).toBe("网络请求超时");
+  });
+
+  it("maps aliyun real-name verification errors before generic 403", () => {
+    const view = messages.mapErrorToView({
+      message: 'API Error 403: {"error":{"message":"To use API-Inference, please make sure your associated Aliyun account is real-name verified."}}'
+    });
+    const html = messages.renderErrorPanel(view, "run-summary");
+
+    expect(view).toMatchObject({
+      code: "ALIYUN_REALNAME_REQUIRED",
+      title: "阿里云账号未实名",
+      action: "goto-setup-guide",
+      presentation: "panel"
+    });
+    expect(view.helper?.type).toBe("modelscope-bind");
+    expect(view.secondaryAction).toBe("retry");
+    expect(html).toContain("查看实名引导");
+    expect(html).toContain("打开 ModelScope 账号设置");
+    expect(html).toContain('data-action="run-summary"');
+  });
+
   it("maps missing segment output to a retryable format error", () => {
     const view = messages.mapErrorToView({ message: "分段输出缺失" });
     const html = messages.renderErrorPanel(view, "run-summary");
@@ -136,8 +166,8 @@ describe("contentErrorMessages", () => {
     expect(html).toContain('data-action="run-summary"');
   });
 
-  it("keeps generic JSON errors separate from segment-specific errors", () => {
-    expect(messages.mapErrorToView({ message: "验真 JSON 解析失败" }).code).toBe("JSON_PARSE_ERROR");
+  it("keeps generic JSON errors separate from task-specific errors", () => {
+    expect(messages.mapErrorToView({ message: "验真 JSON 解析失败" }).code).toBe("RUMORS_JSON_PARSE_FAILED");
     expect(messages.mapErrorToView({ message: "分段 JSON 解析失败" }).code).toBe("SEGMENTS_JSON_PARSE_FAILED");
   });
 
@@ -155,8 +185,8 @@ describe("contentErrorMessages", () => {
     const html = messages.renderErrorPanel(view, "run-summary");
 
     expect(view).toMatchObject({
-      code: "HTTP_400",
-      title: "请求参数有误",
+      code: "INVALID_MODEL_ID",
+      title: "模型 ID 不可用",
       action: "goto-setup-guide",
       secondaryAction: "retry",
       presentation: "panel"
@@ -164,6 +194,28 @@ describe("contentErrorMessages", () => {
     expect(html).toContain("模型 ID");
     expect(html).toContain('data-action="goto-setup-guide"');
     expect(html).toContain('data-action="run-summary"');
+  });
+
+  it("maps model-private 403 errors to model-access guidance", () => {
+    const view = messages.mapErrorToView({ message: 'API Error 403: {"error":{"message":"Model is private. You can not access it"}}' });
+
+    expect(view).toMatchObject({
+      code: "MODEL_ACCESS_DENIED",
+      title: "模型没有访问权限",
+      action: "goto-setup-guide",
+      presentation: "panel"
+    });
+  });
+
+  it("maps transcription forbidden errors to asr guidance", () => {
+    const view = messages.mapErrorToView({ message: "Groq 转录失败（403）：Illegal operation" });
+
+    expect(view).toMatchObject({
+      code: "ASR_FORBIDDEN",
+      title: "当前转录服务不可用",
+      action: "goto-setup-guide",
+      presentation: "panel"
+    });
   });
 
   it("maps API key failures inside 400 responses to auth guidance", () => {
@@ -219,5 +271,44 @@ describe("contentErrorMessages", () => {
 
     expect(html).toContain("请求超时");
     expect(html).toContain('data-action="run-summary"');
+  });
+
+  it("upgrades generic HTTP_403 codes when message is more specific", () => {
+    const view = messages.mapErrorToView({
+      code: "HTTP_403",
+      message: 'API Error 403: {"error":{"message":"To use API-Inference, please make sure your associated Aliyun account is real-name verified."}}'
+    });
+
+    expect(view.code).toBe("ALIYUN_REALNAME_REQUIRED");
+  });
+
+  it("upgrades generic HTTP_400 codes when message says invalid model", () => {
+    const view = messages.mapErrorToView({
+      code: "HTTP_400",
+      message: 'API Error 400: {"error":{"message":"Invalid model id: GLM-5.1"}}'
+    });
+
+    expect(view.code).toBe("INVALID_MODEL_ID");
+  });
+
+  it("upgrades generic network and parse codes when message is more specific", () => {
+    expect(messages.mapErrorToView({
+      code: "NETWORK_ERROR",
+      message: "provider network error: failed to fetch"
+    }).code).toBe("PROVIDER_NETWORK_ERROR");
+    expect(messages.mapErrorToView({
+      code: "JSON_PARSE_ERROR",
+      message: "验真 JSON 解析失败"
+    }).code).toBe("RUMORS_JSON_PARSE_FAILED");
+    expect(messages.mapErrorToView({
+      code: "TIMEOUT",
+      message: "模型请求超时，请重试"
+    }).code).toBe("AI_RESPONSE_TIMEOUT");
+  });
+
+  it("falls back retry buttons to refresh when no task retry action is provided", () => {
+    const html = messages.renderErrorPanel(messages.mapErrorToView({ code: "TIMEOUT" }));
+
+    expect(html).toContain('data-action="refresh-page"');
   });
 });

@@ -19,6 +19,24 @@ async function readErrorText(response) {
   }
 }
 
+function resolveTimeoutCode(options = {}) {
+  const requestName = String(options.requestName || "");
+  if (/^supabase_/i.test(requestName) || /feedback/i.test(requestName)) return "NETWORK_REQUEST_TIMEOUT";
+  return "NETWORK_REQUEST_TIMEOUT";
+}
+
+function resolveNetworkCode(options = {}) {
+  const requestName = String(options.requestName || "");
+  if (/^supabase_/i.test(requestName) || /feedback/i.test(requestName)) return "FEEDBACK_SERVICE_UNAVAILABLE";
+  return "NETWORK_ERROR";
+}
+
+function resolveNetworkMessage(options = {}) {
+  const requestName = String(options.requestName || "");
+  if (/^supabase_/i.test(requestName) || /feedback/i.test(requestName)) return "反馈服务暂时不可用";
+  return "网络请求失败";
+}
+
 function buildHttpError(response, text, context) {
   const message = context?.errorMessage
     || `HTTP ${response.status}${text ? `: ${text}` : ""}`;
@@ -80,13 +98,13 @@ export async function httpRequest(url, options = {}) {
     };
   } catch (error) {
     if (error?.name === "AbortError" || error === "timeout" || signal?.aborted) {
-      throw createAppError("TIMEOUT", options.timeoutMessage || "网络请求超时", {
+      throw createAppError(resolveTimeoutCode(options), options.timeoutMessage || "网络请求超时，请稍后重试", {
         method,
         requestName: options.requestName
       });
     }
     if (error?.code) throw error;
-    throw createAppError("NETWORK_ERROR", error?.message || "网络请求失败", {
+    throw createAppError(resolveNetworkCode(options), error?.message || resolveNetworkMessage(options), {
       cause: error,
       method,
       requestName: options.requestName

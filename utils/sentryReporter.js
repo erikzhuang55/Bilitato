@@ -1,4 +1,15 @@
+import { PROVIDERS } from "./providerAdapter.js";
+
 const SENSITIVE_KEY_PATTERN = /(api[_-]?key|authorization|token|secret|password|cookie|prompt|subtitle|content|message|messages|base[_-]?url|download[_-]?url|dsn|url)/i;
+const UNFILTERED_RAW_KEYS = new Set([
+  "ai_response_raw",
+  "subtitle_chars",
+  "subtitleCount",
+  "subtitle_line_count",
+  "subtitle_total_chars",
+  "video_duration_sec",
+  "video_duration_text"
+]);
 const MAX_STRING_LENGTH = 500;
 const MAX_DEPTH = 5;
 const IGNORED_ERROR_PATTERNS = [
@@ -14,7 +25,8 @@ const IGNORED_ERROR_PATTERNS = [
   /未授权访问该自定义\s*api\s*域名/i,
   /缺少自定义\s*api\s*地址/i,
   /自定义\s*provider\s*需要填写\s*base\s*url/i,
-  /sentry\s*dsn/i
+  /sentry\s*dsn/i,
+  /ResizeObserver loop completed with undelivered notifications/i
 ];
 
 export function shouldReportToSentry(errorInput, context = {}) {
@@ -44,7 +56,9 @@ export function parseSentryDsn(dsn) {
 }
 
 export function sanitizeForSentry(value, depth = 0, key = "") {
-  if (SENSITIVE_KEY_PATTERN.test(String(key || ""))) return "[Filtered]";
+  const normalizedKey = String(key || "");
+  if (UNFILTERED_RAW_KEYS.has(normalizedKey)) return value;
+  if (SENSITIVE_KEY_PATTERN.test(normalizedKey)) return "[Filtered]";
   if (value == null) return value;
   if (depth >= MAX_DEPTH) return "[MaxDepth]";
   if (typeof value === "string") {
@@ -70,6 +84,7 @@ export function createSentryEvent(errorInput, context = {}, runtime = {}) {
   const errorMeta = resolveErrorMeta(errorInput, safeContext);
   const extensionVersion = String(runtime.extensionVersion || safeContext.extensionVersion || "").trim();
   const provider = String(safeContext.provider || "").trim();
+  const model = String(safeContext.model || "").trim();
   const task = String(safeContext.task || "").trim();
   const bvid = String(safeContext.bvid || "").trim();
   const pageType = String(safeContext.pageType || "").trim();
@@ -84,6 +99,7 @@ export function createSentryEvent(errorInput, context = {}, runtime = {}) {
     tags: removeEmpty({
       extension_version: extensionVersion,
       provider,
+      model,
       task,
       bvid,
       code: errorMeta.code,
@@ -129,7 +145,22 @@ export async function reportToSentry(settings, errorInput, context = {}, runtime
   if (!shouldReportToSentry(errorInput, context)) {
     return { sent: false, reason: "ignored" };
   }
-  const event = createSentryEvent(errorInput, context, runtime);
+  const errorDerivedContext = pickErrorContext(errorInput);
+  const providerTarget = resolveProviderTargetContext(settings, {
+    ...errorDerivedContext,
+    ...(context && typeof context === "object" ? context : {})
+  });
+  const enrichedContext = {
+    ...errorDerivedContext,
+    ...(context && typeof context === "object" ? context : {}),
+    provider: context?.provider || settings?.provider || "",
+    model: context?.model || settings?.model || "",
+    pref_mode: context?.pref_mode || settings?.prefMode || "",
+    segment_variant: context?.segment_variant || context?.segment_prompt_variant || settings?.segmentPromptVariant || "",
+    custom_protocol: context?.custom_protocol || settings?.customProtocol || "",
+    ...providerTarget
+  };
+  const event = createSentryEvent(errorInput, enrichedContext, runtime);
   const envelope = buildEnvelope(parsed.dsn, event);
   const res = await fetchImpl(parsed.endpoint, {
     method: "POST",
@@ -184,7 +215,13 @@ function inferCodeFromMessage(message) {
     if (status >= 500) return "HTTP_5XX";
     return status > 0 ? `HTTP_${status}` : "";
   }
+  if (/模型长时间没有开始返回内容|stream timeout|first token timeout/i.test(text)) return "AI_STREAM_TIMEOUT";
+  if (/模型请求超时|ai request timeout|provider timeout/i.test(text)) return "AI_RESPONSE_TIMEOUT";
+  if (/转录请求超时|asr timeout|transcription timeout/i.test(text)) return "ASR_REQUEST_TIMEOUT";
+  if (/网络请求超时|request timeout/i.test(text)) return "NETWORK_REQUEST_TIMEOUT";
   if (/timeout|超时/i.test(text)) return "TIMEOUT";
+  if (/反馈服务暂时不可用|feedback_(?:select|mark_seen)_unavailable/i.test(text)) return "FEEDBACK_SERVICE_UNAVAILABLE";
+  if (/模型服务连接失败|provider network error/i.test(text)) return "PROVIDER_NETWORK_ERROR";
   if (/network|failed to fetch|网络/i.test(text)) return "NETWORK_ERROR";
   if (/JSON\s*解析失败|json_parse|JSON Parse/i.test(text)) return "JSON_PARSE_ERROR";
   if (/限流|rate limit/i.test(text) && /groq|转录/i.test(text)) return "ASR_RATE_LIMIT";
@@ -227,4 +264,75 @@ function removeEmpty(value) {
   return Object.fromEntries(
     Object.entries(value || {}).filter(([, item]) => item !== undefined && item !== null && item !== "")
   );
+}
+
+function pickErrorContext(errorInput) {
+  if (!errorInput || typeof errorInput !== "object") return {};
+  return removeEmpty({
+    provider: String(errorInput.provider || "").trim(),
+    model: String(errorInput.model || "").trim(),
+    provider_endpoint: String(errorInput.requestEndpoint || errorInput.provider_endpoint || "").trim(),
+    provider_host: String(errorInput.requestHost || errorInput.provider_host || "").trim(),
+    provider_api_protocol: String(errorInput.requestProtocol || errorInput.provider_api_protocol || "").trim(),
+    is_custom_provider: typeof errorInput.isCustomProvider === "boolean"
+      ? errorInput.isCustomProvider
+      : errorInput.is_custom_provider,
+    request_stream: typeof errorInput.requestStream === "boolean"
+      ? errorInput.requestStream
+      : errorInput.request_stream,
+    request_method: String(errorInput.requestMethod || errorInput.request_method || "").trim(),
+    request_entry: String(errorInput.requestEntry || errorInput.request_entry || "").trim(),
+    request_phase: String(errorInput.requestPhase || errorInput.request_phase || "").trim(),
+    request_attempt: Number(errorInput.requestAttempt || errorInput.request_attempt || 0) || undefined,
+    request_max_attempts: Number(errorInput.requestMaxAttempts || errorInput.request_max_attempts || 0) || undefined,
+    retry_delays_ms: Array.isArray(errorInput.retryDelaysMs || errorInput.retry_delays_ms)
+      ? (errorInput.retryDelaysMs || errorInput.retry_delays_ms)
+      : undefined,
+    retry_strategy: String(errorInput.retryStrategy || errorInput.retry_strategy || "").trim()
+  });
+}
+
+function resolveProviderTargetContext(settings = {}, context = {}) {
+  const explicitEndpoint = String(context?.provider_endpoint || context?.requestEndpoint || "").trim();
+  const explicitHost = String(context?.provider_host || context?.requestHost || "").trim();
+  const explicitProtocol = String(context?.provider_api_protocol || context?.requestProtocol || "").trim();
+  const explicitCustom = typeof context?.is_custom_provider === "boolean" ? context.is_custom_provider : undefined;
+  if (explicitEndpoint || explicitHost || explicitProtocol || explicitCustom !== undefined) {
+    return removeEmpty({
+      provider_endpoint: explicitEndpoint,
+      provider_host: explicitHost,
+      provider_api_protocol: explicitProtocol,
+      is_custom_provider: explicitCustom
+    });
+  }
+
+  const providerKey = String(settings?.provider || "").trim().toLowerCase();
+  const isCustom = providerKey === "custom";
+  const customProtocol = String(settings?.customProtocol || "openai").trim().toLowerCase() === "claude" ? "claude" : "openai";
+  const baseUrl = isCustom
+    ? String(settings?.customBaseUrl || "").trim()
+    : String(PROVIDERS?.[providerKey]?.baseUrl || "").trim();
+  return removeEmpty({
+    provider_endpoint: baseUrl,
+    provider_host: safeHost(baseUrl),
+    provider_api_protocol: isCustom ? customProtocol : resolveProviderApiProtocol(providerKey),
+    is_custom_provider: isCustom
+  });
+}
+
+function resolveProviderApiProtocol(providerKey = "") {
+  const key = String(providerKey || "").trim().toLowerCase();
+  if (key === "claude") return "claude";
+  if (key === "gemini") return "google";
+  return "openai";
+}
+
+function safeHost(url) {
+  const text = String(url || "").trim();
+  if (!text) return "";
+  try {
+    return new URL(text).host || "";
+  } catch (_) {
+    return "";
+  }
 }

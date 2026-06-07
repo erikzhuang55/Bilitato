@@ -34,10 +34,36 @@ describe("sentryReporter", () => {
     });
   });
 
+  it("keeps raw ai response when explicitly allowed", () => {
+    const rawText = "模型原始返回 {" + "x".repeat(1200) + "}";
+    const sanitized = sanitizeForSentry({
+      ai_response_raw: rawText,
+      prompt: "完整 Prompt"
+    });
+
+    expect(sanitized.ai_response_raw).toBe(rawText);
+    expect(sanitized.prompt).toBe("[Filtered]");
+  });
+
+  it("keeps subtitle and duration stats while still filtering subtitle text", () => {
+    const sanitized = sanitizeForSentry({
+      subtitle: "完整字幕",
+      subtitle_total_chars: 12345,
+      subtitle_line_count: 321,
+      video_duration_sec: 987
+    });
+
+    expect(sanitized.subtitle).toBe("[Filtered]");
+    expect(sanitized.subtitle_total_chars).toBe(12345);
+    expect(sanitized.subtitle_line_count).toBe(321);
+    expect(sanitized.video_duration_sec).toBe(987);
+  });
+
   it("keeps useful runtime environment fields", () => {
     const event = createSentryEvent(new Error("boom"), {
       task: "summary",
       provider: "deepseek",
+      model: "deepseek-chat",
       bvid: "BV1",
       code: "HTTP_401",
       status: 401,
@@ -54,6 +80,7 @@ describe("sentryReporter", () => {
     expect(event.tags).toMatchObject({
       task: "summary",
       provider: "deepseek",
+      model: "deepseek-chat",
       bvid: "BV1",
       code: "HTTP_401",
       status: 401,
@@ -66,6 +93,113 @@ describe("sentryReporter", () => {
     });
     expect(event.contexts.runtime.userAgent).toBe("Chrome Test");
     expect(event.contexts.platform.os).toBe("win");
+  });
+
+  it("fills provider and model from settings when context is missing", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+
+    await reportToSentry(
+      {
+        sentryEnabled: true,
+        sentryDsn: "https://public123@example.ingest.sentry.io/456",
+        provider: "deepseek",
+        model: "deepseek-chat"
+      },
+      new Error("boom"),
+      { task: "summary" },
+      { extensionVersion: "1.0.0" },
+      fetchImpl
+    );
+
+    const [, options] = fetchImpl.mock.calls[0];
+    expect(options.body).toContain('"provider":"deepseek"');
+    expect(options.body).toContain('"model":"deepseek-chat"');
+  });
+
+  it("includes provider target and mode context from settings", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+
+    await reportToSentry(
+      {
+        sentryEnabled: true,
+        sentryDsn: "https://public123@example.ingest.sentry.io/456",
+        provider: "custom",
+        model: "deepseek-chat",
+        customBaseUrl: "https://api.example.com/v1",
+        customProtocol: "claude",
+        prefMode: "efficiency",
+        segmentPromptVariant: "original"
+      },
+      new Error("boom"),
+      { task: "summary" },
+      { extensionVersion: "1.0.0" },
+      fetchImpl
+    );
+
+    const [, options] = fetchImpl.mock.calls[0];
+    expect(options.body).toContain('"provider_host":"api.example.com"');
+    expect(options.body).toContain('"provider_api_protocol":"claude"');
+    expect(options.body).toContain('"pref_mode":"efficiency"');
+    expect(options.body).toContain('"segment_variant":"original"');
+  });
+
+  it("keeps provider request location from error metadata", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const error = new Error("模型服务连接失败，请稍后重试");
+    error.code = "PROVIDER_NETWORK_ERROR";
+    error.provider = "deepseek";
+    error.model = "deepseek-chat";
+    error.requestEndpoint = "https://api.deepseek.com/chat/completions";
+    error.requestHost = "api.deepseek.com";
+    error.requestProtocol = "openai";
+    error.requestStream = true;
+    error.requestMethod = "POST";
+    error.requestEntry = "callAIStream";
+    error.requestPhase = "initial_fetch";
+
+    await reportToSentry(
+      {
+        sentryEnabled: true,
+        sentryDsn: "https://public123@example.ingest.sentry.io/456"
+      },
+      error,
+      { task: "summary" },
+      { extensionVersion: "1.0.0" },
+      fetchImpl
+    );
+
+    const [, options] = fetchImpl.mock.calls[0];
+    expect(options.body).toContain('"request_entry":"callAIStream"');
+    expect(options.body).toContain('"request_phase":"initial_fetch"');
+    expect(options.body).toContain('"provider_host":"api.deepseek.com"');
+  });
+
+  it("includes retry metadata from provider request errors", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200 });
+    const error = new Error("模型服务连接失败，请稍后重试");
+    error.code = "PROVIDER_NETWORK_ERROR";
+    error.requestEntry = "callAI";
+    error.requestPhase = "initial_fetch";
+    error.requestAttempt = 3;
+    error.requestMaxAttempts = 3;
+    error.retryDelaysMs = [700, 1600];
+    error.retryStrategy = "provider_network_backoff";
+
+    await reportToSentry(
+      {
+        sentryEnabled: true,
+        sentryDsn: "https://public123@example.ingest.sentry.io/456"
+      },
+      error,
+      { task: "summary" },
+      { extensionVersion: "1.0.0" },
+      fetchImpl
+    );
+
+    const [, options] = fetchImpl.mock.calls[0];
+    expect(options.body).toContain('"request_attempt":3');
+    expect(options.body).toContain('"request_max_attempts":3');
+    expect(options.body).toContain('"retry_strategy":"provider_network_backoff"');
   });
 
   it("promotes error code and retry metadata from error objects", () => {

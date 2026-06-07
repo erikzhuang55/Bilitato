@@ -7,12 +7,33 @@
             action: "goto-setup-guide",
             presentation: "modal"
         },
+        ALIYUN_REALNAME_REQUIRED: {
+            title: "阿里云账号未实名",
+            message: "当前 Provider 要求关联的阿里云账号先完成实名认证。完成实名后再重试，或切换到其他 Provider。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            presentation: "panel"
+        },
         HTTP_403: {
             title: "没有调用权限",
             message: "当前账号可能没有模型权限、额度不足，或服务商拒绝了本次请求。",
             actionText: "去设置",
             action: "goto-setup-guide",
             presentation: "modal"
+        },
+        MODEL_ACCESS_DENIED: {
+            title: "模型没有访问权限",
+            message: "当前账号没有权限使用这个模型，或该模型是私有模型。请切换模型、检查账号权限，或更换 Provider。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            presentation: "panel"
+        },
+        ASR_FORBIDDEN: {
+            title: "当前转录服务不可用",
+            message: "转录服务拒绝了本次请求，常见原因是账号权限不足、接口受限，或当前服务不支持这个请求。请稍后重试，或切换转录 Provider。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            presentation: "panel"
         },
         API_LOCATION_UNSUPPORTED: {
             title: "当前地区暂不支持",
@@ -26,6 +47,13 @@
         HTTP_400: {
             title: "请求参数有误",
             message: "服务商返回参数错误，常见原因是模型 ID 填写不正确、模型已下线，或当前接口不支持该模型。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            presentation: "panel"
+        },
+        INVALID_MODEL_ID: {
+            title: "模型 ID 不可用",
+            message: "当前填写的模型 ID 不存在、已下线，或当前接口不支持这个模型。请修改模型后再试。",
             actionText: "去设置",
             action: "goto-setup-guide",
             presentation: "panel"
@@ -58,6 +86,40 @@
             action: "retry",
             presentation: "panel"
         },
+        AI_RESPONSE_TIMEOUT: {
+            title: "模型请求超时",
+            message: "模型在限定时间内没有完成响应。请稍后重试，或切换到更稳定的模型。",
+            actionText: "重试",
+            action: "retry",
+            secondaryActionText: "去设置",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        AI_STREAM_TIMEOUT: {
+            title: "模型迟迟没有开始返回内容",
+            message: "已发出流式请求，但模型长时间没有开始输出。请重试，或切换到非流式更稳定的模型。",
+            actionText: "重试",
+            action: "retry",
+            secondaryActionText: "去设置",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        NETWORK_REQUEST_TIMEOUT: {
+            title: "网络请求超时",
+            message: "请求已经发出，但网络层超时了。请检查网络，或稍后重试。",
+            actionText: "重试",
+            action: "retry",
+            presentation: "panel"
+        },
+        ASR_REQUEST_TIMEOUT: {
+            title: "转录请求超时",
+            message: "音频已经开始上传或转录，但服务长时间没有完成。请稍后重试，或切换转录 Provider。",
+            actionText: "重试",
+            action: "retry",
+            secondaryActionText: "去设置",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
         NETWORK_ERROR: {
             title: "网络连接失败",
             message: "请检查网络连接，或稍后重试。",
@@ -65,11 +127,34 @@
             action: "retry",
             presentation: "panel"
         },
+        PROVIDER_NETWORK_ERROR: {
+            title: "模型服务连接失败",
+            message: "请求已经发到模型服务链路，但服务端连接失败或没有返回。请稍后重试，或切换 Provider。",
+            actionText: "重试",
+            action: "retry",
+            presentation: "panel"
+        },
+        FEEDBACK_SERVICE_UNAVAILABLE: {
+            title: "反馈服务暂时不可用",
+            message: "反馈中心当前无法连接到服务端，不影响总结、分段和转录功能。请稍后刷新再试。",
+            actionText: "刷新",
+            action: "refresh-page",
+            presentation: "panel"
+        },
         JSON_PARSE_ERROR: {
             title: "模型返回格式异常",
             message: "模型没有按预期格式返回结果，请重试，或切换到高速模式/其他模型。",
             actionText: "重试",
             action: "retry",
+            presentation: "panel"
+        },
+        RUMORS_JSON_PARSE_FAILED: {
+            title: "验真结果解析失败",
+            message: "模型返回了验真内容，但格式不符合预期。请重试，或切换到更稳定的模型。",
+            actionText: "重试验真",
+            action: "retry",
+            secondaryActionText: "切换模型",
+            secondaryAction: "goto-setup-guide",
             presentation: "panel"
         },
         SUMMARY_EMPTY_RESPONSE: {
@@ -155,7 +240,7 @@
         },
         ASR_RATE_LIMIT: {
             title: "转录请求太频繁",
-            message: "Groq 返回限流，请等待提示时间后再试。",
+            message: "Groq 转录额度或频率已超限，请等待提示时间后再试，或切换到硅基流动继续生成。",
             presentation: "toast"
         },
         ASR_FILE_TOO_LARGE: {
@@ -184,17 +269,37 @@
 
     function inferErrorCode(errorInput) {
         const code = String(errorInput?.code || "").trim();
-        if (code) return code;
         const message = String(errorInput?.message || errorInput || "");
+        const genericCodes = new Set([
+            "HTTP_400",
+            "HTTP_401",
+            "HTTP_403",
+            "TIMEOUT",
+            "NETWORK_ERROR",
+            "JSON_PARSE_ERROR",
+            "UNKNOWN"
+        ]);
+        if (code && !genericCodes.has(code)) return code;
         if (/(?:invalid|incorrect|wrong|bad|expired|missing)\s+(?:api\s*)?key|api\s*key\s+(?:is\s+)?(?:invalid|incorrect|wrong|expired|missing)|invalid_api_key|unauthorized api key|authentication.*(?:failed|invalid)|鉴权失败|认证失败|密钥.*(?:无效|错误|过期)|API\s*Key.*(?:无效|错误|过期|不正确)|令牌.*(?:无效|错误|过期)/i.test(message)) return "HTTP_401";
         if (/User location is not supported for the API use|location is not supported|unsupported.*location|地区.*不支持|所在地.*不支持/i.test(message)) return "API_LOCATION_UNSUPPORTED";
+        if (/real-name verified|实名认证|实名.*验证|Please make sure your associated Aliyun account is real-name verified/i.test(message)) return "ALIYUN_REALNAME_REQUIRED";
+        if (/Invalid model id|模型 ID.*(?:无效|不存在|不支持)|模型名称.*(?:无效|不存在|不支持)/i.test(message)) return "INVALID_MODEL_ID";
+        if (/Model is private|private model|没有权限使用这个模型|无权访问该模型|model.*forbidden|model.*denied/i.test(message)) return "MODEL_ACCESS_DENIED";
+        if (/(?:Groq|硅基流动|transcription|转录).*(?:403|forbidden|Illegal operation)|(?:403|forbidden|Illegal operation).*(?:Groq|硅基流动|transcription|转录)/i.test(message)) return "ASR_FORBIDDEN";
         const httpMatch = message.match(/\bHTTP\s+([0-9]{3})\b|API Error\s+([0-9]{3})/i);
         if (httpMatch) {
             const status = Number(httpMatch[1] || httpMatch[2] || 0);
             if (status >= 500) return "HTTP_5XX";
             return `HTTP_${status}`;
         }
+        if (/模型长时间没有开始返回内容|stream timeout|first token timeout/i.test(message)) return "AI_STREAM_TIMEOUT";
+        if (/模型请求超时|ai request timeout|provider timeout/i.test(message)) return "AI_RESPONSE_TIMEOUT";
+        if (/转录请求超时|asr timeout|transcription timeout/i.test(message)) return "ASR_REQUEST_TIMEOUT";
+        if (/网络请求超时|request timeout/i.test(message)) return "NETWORK_REQUEST_TIMEOUT";
         if (/timeout|超时/i.test(message)) return "TIMEOUT";
+        if (/feedback.*(?:failed to fetch|network|timeout|unavailable)|反馈服务暂时不可用|feedback_(?:select|mark_seen)_unavailable/i.test(message)) return "FEEDBACK_SERVICE_UNAVAILABLE";
+        if (/模型服务连接失败|provider network error/i.test(message)) return "PROVIDER_NETWORK_ERROR";
+        if (/(?:provider|模型服务|上游|inference|chat_stream|summary|segments).*(?:failed to fetch|network error|网络请求失败)|(?:failed to fetch|network error).*(?:provider|模型服务|上游|inference|chat_stream|summary|segments)/i.test(message)) return "PROVIDER_NETWORK_ERROR";
         if (/network|failed to fetch|网络/i.test(message)) return "NETWORK_ERROR";
         if (/模型没有返回总结内容|总结生成为空|summary_empty|SUMMARY_EMPTY/i.test(message)) return "SUMMARY_EMPTY_RESPONSE";
         if (/字幕内容过长|context length|maximum context|max context|too many tokens|prompt too long|input too long|context_length_exceeded/i.test(message)) return "SEGMENTS_CONTEXT_TOO_LONG";
@@ -204,11 +309,12 @@
         if (/分段字段不完整|invalid schema|schema/i.test(message)) return "SEGMENTS_INVALID_SCHEMA";
         if (/模型没有生成有效分段|空分段|empty list/i.test(message)) return "SEGMENTS_EMPTY_LIST";
         if (/分段.*(?:格式|JSON|解析)|segments.*(?:json|parse)|模型返回分段格式/i.test(message)) return "SEGMENTS_JSON_PARSE_FAILED";
+        if (/验真 JSON 解析失败|rumors.*(?:json|parse)|验真.*(?:格式|JSON|解析)/i.test(message)) return "RUMORS_JSON_PARSE_FAILED";
         if (/JSON\s*解析失败|json_parse|JSON Parse|模型返回格式/i.test(message)) return "JSON_PARSE_ERROR";
         if (/限流|rate limit|429/i.test(message) && /groq|转录/i.test(message)) return "ASR_RATE_LIMIT";
         if (/文件大小超出限制|音频过大|too large/i.test(message)) return "ASR_FILE_TOO_LARGE";
         if (/未获取到视频字幕|无字幕可供分析|当前视频暂无字幕|未检测到字幕/i.test(message)) return "SUBTITLE_MISSING";
-        return "UNKNOWN";
+        return code || "UNKNOWN";
     }
 
     function mapErrorToView(errorInput, fallbackMessage = "请求失败", context = {}) {
@@ -237,6 +343,16 @@
             view.secondaryActionText = "重试";
             view.secondaryAction = "retry";
         }
+        if (code === "ALIYUN_REALNAME_REQUIRED") {
+            view.extraMessage = "如果你正在使用 ModelScope 或阿里云链路，请先完成阿里云实名认证后再试。";
+            view.helper = {
+                type: "modelscope-bind",
+                url: "https://modelscope.cn/my/settings/account"
+            };
+            view.actionText = "查看实名引导";
+            view.secondaryActionText = "重试";
+            view.secondaryAction = "retry";
+        }
         if (view.presentation !== "toast" && view.action !== "retry" && view.secondaryAction !== "retry") {
             view.secondaryActionText = "重试";
             view.secondaryAction = "retry";
@@ -246,11 +362,12 @@
 
     function renderErrorPanel(view, retryAction = "") {
         const safe = globalThis.BilitatoContentUtils?.escapeHtml || ((value) => String(value || ""));
-        const action = view.action === "retry" && retryAction ? retryAction : view.action;
+        const resolvedRetryAction = retryAction || "refresh-page";
+        const action = view.action === "retry" ? resolvedRetryAction : view.action;
         const primaryButton = action && view.actionText
             ? `<button class="action-btn" data-action="${safe(action)}">${safe(view.actionText)}</button>`
             : "";
-        const secondaryAction = view.secondaryAction === "retry" && retryAction ? retryAction : view.secondaryAction;
+        const secondaryAction = view.secondaryAction === "retry" ? resolvedRetryAction : view.secondaryAction;
         const secondaryButton = secondaryAction && view.secondaryActionText
             ? `<button class="action-btn ghost" data-action="${safe(secondaryAction)}">${safe(view.secondaryActionText)}</button>`
             : "";

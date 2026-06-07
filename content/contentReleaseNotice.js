@@ -4,6 +4,54 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.3.1": {
+      title: "Bilitato 已更新至 v1.3.1",
+      displayVersion: "v1.3.1",
+      subtitle: "本次重点补强稳定性和排障能力，集中修复生成链路里的缓存竞态、提示词重置、网络失败归因不清和 Sentry 可观测性不足的问题。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "错误提示更具体",
+              desc: "细分了超时、Provider 网络失败、模型无权限、阿里云未实名、模型 ID 无效等前端错误提示，并统一补上刷新或重试入口。",
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "修复总结与分段状态不同步",
+              desc: "修复总结已完成但分段偶发被旧缓存覆盖成空数组，导致页面误显示尚未生成分段的问题。",
+              highlight: true,
+            },
+            {
+              title: "修复提示词被切换重置",
+              desc: "修复切换 Groq、硅基流动或主 Provider 时，个性化里的自定义提示词被回填成默认值的问题。",
+            },
+            {
+              title: "修复本地缓存与配额问题",
+              desc: "增加 unlimitedStorage 和本地缓存兜底，避免字幕缓存过大时反复触发 QUOTA_BYTES 上报。",
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "Provider 网络失败无感重试",
+              desc: "普通模型请求遇到短暂网络波动时会自动短退避重试；流式请求仅在首包前失败时补重试一次，减少偶发生成失败。",
+            },
+            {
+              title: "分段空返回自动补救",
+              desc: "分段为空或格式跑偏时，会保留更完整诊断信息，并在合适场景自动尝试更紧凑的补救请求。",
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、完整 Prompt 或完整字幕原文。仅在特定 AI 解析失败场景下，会定向上报必要的模型原始返回和结构化诊断信息，用于排查问题。",
+    },
     "1.3.0": {
       title: "Bilitato 已更新至 v1.3.0",
       displayVersion: "v1.3.0",
@@ -333,7 +381,7 @@
 
     const note = RELEASE_NOTES[version];
     if (!note) return false;
-    const pageVersions = [version, "1.2.x"].filter((item, index, arr) => item && RELEASE_NOTES[item] && arr.indexOf(item) === index);
+    const pageVersions = buildReleasePageVersions(version);
 
     const box = root.querySelector(".ai-summary-plugin-box");
     if (!box) return false;
@@ -497,6 +545,18 @@
 
     box.appendChild(overlay);
     return true;
+  }
+
+  function buildReleasePageVersions(version) {
+    const majorHistory = [];
+    if (version === "1.3.1") {
+      majorHistory.push("1.3.1", "1.3.0", "1.2.x");
+    } else if (version === "1.3.0") {
+      majorHistory.push("1.3.0", "1.2.x");
+    } else {
+      majorHistory.push(version, "1.2.x");
+    }
+    return majorHistory.filter((item, index, arr) => item && RELEASE_NOTES[item] && arr.indexOf(item) === index);
   }
 
   async function maybeShowReleaseNotice({ root, version = getCurrentVersion() }) {

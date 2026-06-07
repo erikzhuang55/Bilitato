@@ -25,6 +25,15 @@ import { isSupabaseEnabled, supabaseRpc, supabaseSelect, supabaseWrite } from ".
 import "./logger.js";
 
 let IS_DEBUG_MODE = false;
+const cacheWriteLocks = new Map();
+const TIMEOUT_ERROR_CODES = new Set([
+    "TIMEOUT",
+    "AI_RESPONSE_TIMEOUT",
+    "AI_STREAM_TIMEOUT",
+    "ASR_REQUEST_TIMEOUT",
+    "NETWORK_REQUEST_TIMEOUT"
+]);
+const STREAM_INITIAL_RETRY_DELAY_MS = 700;
 
 
 
@@ -41,6 +50,178 @@ async function captureBackgroundError(errorInput, context = {}) {
     } catch (_) {
         return { sent: false, reason: "report_failed" };
     }
+}
+
+function attachSentryContext(errorInput, context = {}) {
+    if (!errorInput || typeof errorInput !== "object") return errorInput;
+    errorInput.sentryContext = {
+        ...(errorInput.sentryContext && typeof errorInput.sentryContext === "object" ? errorInput.sentryContext : {}),
+        ...(context && typeof context === "object" ? context : {})
+    };
+    return errorInput;
+}
+
+async function captureTaskFailureToSentry(errorInput, context = {}) {
+    if (!errorInput || typeof errorInput !== "object") return { sent: false, reason: "invalid_error" };
+    if (errorInput.__sentryCaptured) return { sent: false, reason: "already_captured" };
+    const baseContext = {
+        ...(errorInput.sentryContext && typeof errorInput.sentryContext === "object" ? errorInput.sentryContext : {}),
+        ...(context && typeof context === "object" ? context : {})
+    };
+    const mergedContext = await enrichTaskFailureContext(baseContext);
+    errorInput.__sentryCaptured = true;
+    return captureBackgroundError(errorInput, mergedContext);
+}
+
+function isTimeoutError(errorInput) {
+    const code = String(errorInput?.code || "").trim();
+    return TIMEOUT_ERROR_CODES.has(code);
+}
+
+function buildAIResponseSentryContext({
+    task,
+    bvid,
+    provider,
+    model,
+    mode,
+    source,
+    responseText,
+    metrics,
+    extra = {}
+} = {}) {
+    return {
+        task: String(task || ""),
+        bvid: String(bvid || ""),
+        provider: String(provider || ""),
+        model: String(model || ""),
+        source: String(source || "ai_parse_failure"),
+        ai_response_mode: String(mode || ""),
+        ai_response_raw: String(responseText || ""),
+        ...getSegmentsResponseDiagnostics(responseText, metrics),
+        ...(extra && typeof extra === "object" ? extra : {})
+    };
+}
+
+function buildProviderRequestTelemetry(settings, timeoutMs, options = {}) {
+    return {
+        provider: String(settings?.provider || ""),
+        model: String(settings?.model || ""),
+        pref_mode: String(settings?.prefMode || ""),
+        segment_variant: String(settings?.segmentPromptVariant || ""),
+        custom_protocol: String(settings?.customProtocol || ""),
+        is_custom_provider: String(settings?.provider || "").toLowerCase() === "custom",
+        timeout_ms: Number(timeoutMs || 0) || undefined,
+        request_stream: !!options.stream,
+        request_entry: options.stream ? "callAIStream" : "callAI",
+        request_phase: options.requestPhase || "provider_request",
+        bypass_queue: !!options.bypassQueue,
+        queue_size_at_start: Number(options.queueSizeAtStart || 0),
+        active_count_at_start: Number(options.activeCountAtStart || 0),
+        elapsed_ms: Number(options.elapsedMs || 0) || undefined,
+        first_response_received: options.firstResponseReceived === undefined ? undefined : !!options.firstResponseReceived
+    };
+}
+
+function shouldRetryInitialStreamFailure(error, firstResponseReceived, attempt, maxAttempts) {
+    return String(error?.code || "") === "PROVIDER_NETWORK_ERROR"
+        && !firstResponseReceived
+        && attempt < maxAttempts;
+}
+
+function decorateStreamRetryMetadata(error, attempt, maxAttempts, retryDelaysMs = []) {
+    if (!error || typeof error !== "object") return error;
+    error.requestAttempt = Number(attempt || 0);
+    error.requestMaxAttempts = Number(maxAttempts || 0);
+    error.retryDelaysMs = Array.isArray(retryDelaysMs) ? [...retryDelaysMs] : [];
+    error.retryStrategy = "stream_initial_network_backoff";
+    return error;
+}
+
+function waitForAbortableDelay(delayMs, signal) {
+    if (!delayMs) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        let timeoutId = 0;
+        let cleanup = () => {};
+        const handleAbort = () => {
+            cleanup();
+            reject(createUserAbortedError());
+        };
+        cleanup = () => {
+            clearTimeout(timeoutId);
+            signal?.removeEventListener?.("abort", handleAbort);
+        };
+        timeoutId = setTimeout(() => {
+            cleanup();
+            resolve();
+        }, delayMs);
+        if (signal?.aborted) {
+            handleAbort();
+            return;
+        }
+        signal?.addEventListener?.("abort", handleAbort, { once: true });
+    });
+}
+
+async function enrichTaskFailureContext(context = {}) {
+    const merged = context && typeof context === "object" ? { ...context } : {};
+    const taskContext = merged.taskContext && typeof merged.taskContext === "object" ? merged.taskContext : {};
+    const bvid = normalizeBvid(merged.bvid);
+    if (!bvid) {
+        return { ...merged, ...buildSubtitleStatsContext(null, taskContext) };
+    }
+    try {
+        const cache = await getCache(bvid);
+        return { ...merged, ...buildSubtitleStatsContext(cache, taskContext) };
+    } catch (_) {
+        return { ...merged, ...buildSubtitleStatsContext(null, taskContext) };
+    }
+}
+
+function buildSubtitleStatsContext(cache = {}, taskContext = {}) {
+    const rawRows = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+    const processedRows = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+    const rows = rawRows.length ? rawRows : processedRows;
+    const subtitleTotalChars = rows.reduce((sum, row) => sum + String(row?.text || "").length, 0);
+    const taskDuration = taskContext?.videoDuration && typeof taskContext.videoDuration === "object"
+        ? taskContext.videoDuration
+        : {};
+    const videoDurationSec = Number(taskDuration.totalSeconds) > 0
+        ? Math.floor(Number(taskDuration.totalSeconds))
+        : Math.floor(resolveVideoDurationFromCache(cache));
+    return removeEmptyValues({
+        video_duration_sec: videoDurationSec > 0 ? videoDurationSec : undefined,
+        video_duration_text: String(taskDuration.formattedTime || "").trim() || undefined,
+        subtitle_line_count: rows.length || undefined,
+        subtitle_total_chars: subtitleTotalChars || undefined
+    });
+}
+
+function resolveVideoDurationFromCache(cache = {}) {
+    const rows = Array.isArray(cache?.rawSubtitle) && cache.rawSubtitle.length
+        ? cache.rawSubtitle
+        : (Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : []);
+    let maxSec = 0;
+    rows.forEach((row) => {
+        const end = Number(row?.end);
+        const start = Number(row?.start);
+        const candidate = Number.isFinite(end) && end > 0
+            ? end
+            : (Number.isFinite(start) && start > 0 ? start : 0);
+        if (candidate > maxSec) maxSec = candidate;
+    });
+    return maxSec;
+}
+
+function removeEmptyValues(value = {}) {
+    return Object.fromEntries(
+        Object.entries(value || {}).filter(([, item]) => item !== undefined && item !== null && item !== "")
+    );
+}
+
+function shouldCaptureRuntimeMessageError(msg, error) {
+    const action = String(msg?.action || "").trim();
+    if (action === "RUN_TASKS") return false;
+    return true;
 }
 
 async function getSentryRuntimeContext() {
@@ -122,35 +303,66 @@ async function fetchFeedbackState(settings, { markSeen = false } = {}) {
     }
     const clientId = await getFeedbackClientId();
     const table = settings.supabaseFeedbackTable || SUPABASE_DEFAULT_FEEDBACK_TABLE;
-    const rows = await supabaseSelect(settings, table, {
-        select: "id,type,title,content,status,reply,bvid,created_at,updated_at,seen_at",
-        client_id: `eq.${clientId}`,
-        order: "updated_at.desc",
-        limit: 20
-    }, {
-        headers: getFeedbackHeaders(clientId),
-        requestName: "feedback_select",
-        errorMessage: "读取反馈失败"
-    });
+    let rows = [];
+    try {
+        rows = await supabaseSelect(settings, table, {
+            select: "id,type,title,content,status,reply,bvid,created_at,updated_at,seen_at",
+            client_id: `eq.${clientId}`,
+            order: "updated_at.desc",
+            limit: 20
+        }, {
+            headers: getFeedbackHeaders(clientId),
+            requestName: "feedback_select",
+            errorMessage: "读取反馈失败"
+        });
+    } catch (error) {
+        logBackground.warn("feedback_select_unavailable", {
+            task: "feedback",
+            code: error?.code || "",
+            detail: {
+                error_message: error?.message || "读取反馈失败"
+            }
+        });
+        return {
+            rows: [],
+            unreadCount: 0,
+            clientId,
+            enabled: false,
+            errorText: "反馈服务暂时不可用",
+            statusText: ""
+        };
+    }
     const normalizedRows = rows.map(normalizeFeedbackRow);
     if (markSeen && normalizedRows.length) {
         const seenAt = new Date().toISOString();
-        await supabaseWrite(settings, table, { seen_at: seenAt }, {
-            method: "PATCH",
-            params: { client_id: `eq.${clientId}` },
-            headers: getFeedbackHeaders(clientId),
-            requestName: "feedback_mark_seen",
-            errorMessage: "标记反馈已读失败"
-        });
-        normalizedRows.forEach((row) => {
-            row.seenAt = seenAt;
-        });
+        try {
+            await supabaseWrite(settings, table, { seen_at: seenAt }, {
+                method: "PATCH",
+                params: { client_id: `eq.${clientId}` },
+                headers: getFeedbackHeaders(clientId),
+                requestName: "feedback_mark_seen",
+                errorMessage: "标记反馈已读失败"
+            });
+            normalizedRows.forEach((row) => {
+                row.seenAt = seenAt;
+            });
+        } catch (error) {
+            logBackground.warn("feedback_mark_seen_unavailable", {
+                task: "feedback",
+                code: error?.code || "",
+                detail: {
+                    error_message: error?.message || "标记反馈已读失败"
+                }
+            });
+        }
     }
     return {
         rows: normalizedRows,
         unreadCount: getFeedbackUnreadCount(normalizedRows),
         clientId,
-        enabled: true
+        enabled: true,
+        errorText: "",
+        statusText: ""
     };
 }
 
@@ -403,11 +615,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     handleMessage(msg, sender)
         .then((result) => sendResponse({ ok: true, ...result }))
         .catch((error) => {
-            captureBackgroundError(error, {
-                source: "runtime_message",
-                action: msg?.action || "",
-                tabId: sender?.tab?.id || 0
-            });
+            if (shouldCaptureRuntimeMessageError(msg, error)) {
+                captureBackgroundError(error, {
+                    source: "runtime_message",
+                    action: msg?.action || "",
+                    tabId: sender?.tab?.id || 0
+                });
+            } else {
+                logBackground.debug("runtime_message_capture_skipped", {
+                    action: msg?.action || "",
+                    code: error?.code || "",
+                    message: error?.message || "unknown"
+                });
+            }
             sendResponse({ ok: false, error: error.message || "未知错误", ...serializeAppError(error) });
         });
     return true;
@@ -1691,7 +1911,17 @@ class ContentProvider {
             });
         } catch (error) {
             if (controller.signal.aborted) {
-                if (controller.signal.reason === "timeout") throw createTaskTimeoutError();
+                if (controller.signal.reason === "timeout") {
+                    const timeoutError = createTaskTimeoutError("ASR_REQUEST_TIMEOUT", "转录请求超时，请稍后重试");
+                    attachSentryContext(timeoutError, {
+                        provider: "groq_asr",
+                        model: String(groqModel || ""),
+                        timeout_ms: TASK_TIMEOUT_MS,
+                        request_stream: false,
+                        bypass_queue: true
+                    });
+                    throw timeoutError;
+                }
                 throw createUserAbortedError();
             }
             throw error;
@@ -1767,7 +1997,17 @@ class ContentProvider {
             });
         } catch (error) {
             if (controller.signal.aborted) {
-                if (controller.signal.reason === "timeout") throw createTaskTimeoutError();
+                if (controller.signal.reason === "timeout") {
+                    const timeoutError = createTaskTimeoutError("ASR_REQUEST_TIMEOUT", "转录请求超时，请稍后重试");
+                    attachSentryContext(timeoutError, {
+                        provider: "siliconflow_asr",
+                        model: String(model || ""),
+                        timeout_ms: TASK_TIMEOUT_MS,
+                        request_stream: false,
+                        bypass_queue: true
+                    });
+                    throw timeoutError;
+                }
                 throw createUserAbortedError();
             }
             throw error;
@@ -2120,7 +2360,16 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
         }
         return result;
     } catch (error) {
-        const status = error?.code === "TIMEOUT" ? "timeout" : "error";
+        const status = isTimeoutError(error) ? "timeout" : "error";
+        await captureTaskFailureToSentry(error, {
+            source: "task_failure",
+            task,
+            tabId,
+            bvid,
+            provider: settings?.provider || "",
+            model: settings?.model || "",
+            taskContext
+        });
         await reportDailyFeatureUsage(task, settings, {
             durationMs: Date.now() - startedAt,
             tokens: 0
@@ -2129,7 +2378,7 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
             title: cache?.title || ""
         });
         if (status === "timeout") {
-            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task, code: "TIMEOUT" }));
+            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task, code: error?.code || "TIMEOUT" }));
         } else {
             logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task }));
         }
@@ -2228,7 +2477,7 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
         logBackground.info("task_finish", { tab_id: tabId, bvid, tasks: ["chat"] });
         return { answer, metrics: lastMetrics || null };
     } catch (error) {
-        const status = error?.code === "TIMEOUT" ? "timeout" : "error";
+        const status = isTimeoutError(error) ? "timeout" : "error";
         await reportDailyFeatureUsage("chat", resolvedSettings, {
             durationMs: Date.now() - startedAt,
             tokens: 0
@@ -2237,7 +2486,7 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
             title: cache?.title || ""
         });
         if (status === "timeout") {
-            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat", code: "TIMEOUT" }));
+            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat", code: error?.code || "TIMEOUT" }));
         } else {
             logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat" }));
         }
@@ -2313,7 +2562,7 @@ async function runChatForPort(port, msg) {
             safePortPost(port, { type: "aborted", messageId });
             return;
         }
-        const status = error?.code === "TIMEOUT" ? "timeout" : "error";
+        const status = isTimeoutError(error) ? "timeout" : "error";
         await reportDailyFeatureUsage("chat", resolvedSettings, {
             durationMs: Date.now() - startedAt,
             tokens: 0
@@ -2322,7 +2571,7 @@ async function runChatForPort(port, msg) {
             title: cache?.title || ""
         });
         if (status === "timeout") {
-            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat_stream", code: "TIMEOUT" }));
+            logBackground.error("task_timeout", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat_stream", code: error?.code || "TIMEOUT" }));
         } else {
             logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat_stream" }));
         }
@@ -2416,9 +2665,29 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
         if (finalParsed) {
             logBackground.info("json_parse_success", { task: "segments", bvid });
         } else {
-            logAI.error("json_parse_error", { task: "segments", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
-            const parseError = createSegmentsParseError(aiRes.text, aiRes.metrics);
-            if (parseError?.code === "SEGMENTS_OUTPUT_TRUNCATED") {
+            const parseError = attachSentryContext(
+                createSegmentsParseError(aiRes.text, aiRes.metrics),
+                buildAIResponseSentryContext({
+                    task: "segments",
+                    bvid,
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    mode: "single",
+                    source: "segments_single_parse",
+                    responseText: aiRes.text,
+                    metrics: aiRes.metrics
+                })
+            );
+            logAI.error("json_parse_error", {
+                task: "segments",
+                bvid,
+                code: parseError?.code || "JSON_PARSE_ERROR",
+                detail: {
+                    reason: "empty_result",
+                    ...getSegmentsResponseDiagnostics(aiRes.text, aiRes.metrics)
+                }
+            });
+            if (["SEGMENTS_OUTPUT_TRUNCATED", "SEGMENTS_EMPTY_RESPONSE"].includes(parseError?.code)) {
                 compactRetryNormalized = await retrySegmentsWithCompactPrompt({
                     tabId: taskContext?.tabId || null,
                     bvid,
@@ -2433,7 +2702,21 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
             }
         }
         const normalized = compactRetryNormalized || normalizeSegments(finalParsed, cache, { bvid, task: "segments", mode: "single", allowLineOnly: shouldUseCompactSegmentsFirst(settings) });
-        if (!normalized.length) throw createSegmentsNormalizeError(parsed);
+        if (!normalized.length) {
+            throw attachSentryContext(
+                createSegmentsNormalizeError(parsed),
+                buildAIResponseSentryContext({
+                    task: "segments",
+                    bvid,
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    mode: "single",
+                    source: "segments_single_normalize",
+                    responseText: aiRes.text,
+                    metrics: aiRes.metrics
+                })
+            );
+        }
         logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "single", subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions) });
         return normalized;
     }
@@ -2441,50 +2724,26 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
     if (parsed) {
         logBackground.info("json_parse_success", { task: "rumors", bvid });
     } else {
-        logAI.error("json_parse_error", {
-            task: "rumors",
-            bvid,
-            code: "JSON_PARSE_ERROR",
-            detail: buildRumorsParseFailureDiagnostic(aiRes.text, { reason: "parse_failed" })
-        });
+        logAI.error("json_parse_error", { task: "rumors", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
     }
     const normalized = normalizeRumors(parsed, cache);
     if (!normalized) {
-        logAI.error("rumors_normalize_failed", {
-            task: "rumors",
-            bvid,
-            code: "JSON_PARSE_ERROR",
-            detail: buildRumorsParseFailureDiagnostic(aiRes.text, {
-                reason: "normalize_failed",
-                parsed_type: Array.isArray(parsed) ? "array" : typeof parsed,
-                parsed_keys: parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.keys(parsed).slice(0, 12) : []
+        throw attachSentryContext(
+            createAppError("JSON_PARSE_ERROR", "验真 JSON 解析失败"),
+            buildAIResponseSentryContext({
+                task: "rumors",
+                bvid,
+                provider: settings.provider,
+                model: settings.model || "",
+                mode: "single",
+                source: "rumors_parse",
+                responseText: aiRes.text,
+                metrics: aiRes.metrics
             })
-        });
-        throw createAppError("JSON_PARSE_ERROR", "验真 JSON 解析失败");
+        );
     }
     logRumorsQualitySummary(bvid, normalized, { mode: "single", outputChars: String(aiRes.text || "").length });
     return normalized;
-}
-
-function buildRumorsParseFailureDiagnostic(text, extra = {}) {
-    const raw = String(text || "");
-    const trimmed = raw.trim();
-    const firstChar = trimmed[0] || "";
-    return {
-        ...extra,
-        response_chars: raw.length,
-        trimmed_chars: trimmed.length,
-        first_char: firstChar,
-        starts_with_json_object: firstChar === "{",
-        starts_with_json_array: firstChar === "[",
-        has_json_object_marker: trimmed.includes("{") && trimmed.includes("}"),
-        has_json_array_marker: trimmed.includes("[") && trimmed.includes("]"),
-        has_code_fence: /```/.test(trimmed),
-        has_markdown_heading: /^#{1,6}\s/m.test(trimmed),
-        has_bullet_list: /^\s*[-*]\s/m.test(trimmed),
-        response_prefix: trimmed.slice(0, 500),
-        response_suffix: trimmed.length > 500 ? trimmed.slice(-500) : ""
-    };
 }
 
 function createSummarySegmentsResult() {
@@ -2561,6 +2820,22 @@ function createSegmentsParseError(text, metrics = {}) {
         return createAppError("SEGMENTS_OUTPUT_TRUNCATED", "分段输出被截断");
     }
     return createAppError("SEGMENTS_JSON_PARSE_FAILED", "分段格式解析失败");
+}
+
+function getSegmentsResponseDiagnostics(text, metrics = {}) {
+    const value = String(text || "");
+    const trimmed = value.trim();
+    return {
+        response_chars: value.length,
+        trimmed_chars: trimmed.length,
+        line_count: trimmed ? trimmed.split(/\r?\n/).filter(Boolean).length : 0,
+        output_tokens: Number(metrics?.outputTokens || 0) || 0,
+        has_json_array_hint: /\[\s*\{/.test(trimmed),
+        has_json_object_hint: /^\s*\{/.test(trimmed),
+        has_protocol_markers: /SEGMENTS_START|SEGMENTS_END|<<<SEGMENTS_START>>>|<<<SEGMENTS_END>>>|【SEGMENTS_START】|【SEGMENTS_END】/i.test(trimmed),
+        preview_head: trimmed.slice(0, 180),
+        preview_tail: trimmed.length > 180 ? trimmed.slice(-180) : trimmed
+    };
 }
 
 function createSegmentsNormalizeError(parsed) {
@@ -2641,9 +2916,47 @@ async function retrySegmentsWithCompactPrompt({ tabId, bvid, cache, settings, ta
     });
     const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: compactPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
     const parsed = robustJSONParse(aiRes.text);
-    if (!parsed) throw createSegmentsParseError(aiRes.text, aiRes.metrics);
+    if (!parsed) {
+        const parseError = attachSentryContext(
+            createSegmentsParseError(aiRes.text, aiRes.metrics),
+            buildAIResponseSentryContext({
+                task: "segments",
+                bvid,
+                provider: settings.provider,
+                model: settings.model || "",
+                mode: `${mode}_compact_retry`,
+                source: "segments_compact_retry_parse",
+                responseText: aiRes.text,
+                metrics: aiRes.metrics
+            })
+        );
+        logAI.error("segments_compact_retry_parse_error", {
+            bvid,
+            task: "segments",
+            code: parseError?.code || "JSON_PARSE_ERROR",
+            detail: {
+                mode,
+                ...getSegmentsResponseDiagnostics(aiRes.text, aiRes.metrics)
+            }
+        });
+        throw parseError;
+    }
     const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: `${mode}_compact_retry`, allowLineOnly: true });
-    if (!normalized.length) throw createSegmentsNormalizeError(parsed);
+    if (!normalized.length) {
+        throw attachSentryContext(
+            createSegmentsNormalizeError(parsed),
+            buildAIResponseSentryContext({
+                task: "segments",
+                bvid,
+                provider: settings.provider,
+                model: settings.model || "",
+                mode: `${mode}_compact_retry`,
+                source: "segments_compact_retry_normalize",
+                responseText: aiRes.text,
+                metrics: aiRes.metrics
+            })
+        );
+    }
     logSegmentQualitySummary(bvid, normalized, cache, {
         task: "segments",
         mode: `${mode}_compact_retry`,
@@ -2676,12 +2989,12 @@ async function retrySegmentsWithCompactPrompt({ tabId, bvid, cache, settings, ta
 }
 
 function resolveStatusByError(error) {
-    return error?.code === "TIMEOUT" ? "timeout" : "error";
+    return isTimeoutError(error) ? "timeout" : "error";
 }
 
 function resolveUsageStatusByError(error) {
     if (error?.code === "ABORTED" || error?.code === "USER_CANCELLED") return "cancelled";
-    if (error?.code === "TIMEOUT") return "timeout";
+    if (isTimeoutError(error)) return "timeout";
     return "failed";
 }
 
@@ -2693,12 +3006,19 @@ async function setTaskStatusMap(tabId, statusMap, lastError = "", errorMap = {})
     const current = await getTabState(tabId);
     const taskStatus = { ...(current?.taskStatus || {}) };
     const taskErrors = { ...(current?.taskErrors || {}) };
-    Object.keys(statusMap || {}).forEach((task) => {
+    for (const task of Object.keys(statusMap || {})) {
         const status = statusMap[task];
-        if (!status) return;
+        if (!status) continue;
         taskStatus[task] = status;
         if (status === "error" || status === "timeout") {
             const taskError = errorMap?.[task];
+            await captureTaskFailureToSentry(taskError, {
+                source: "task_status_update",
+                task,
+                tabId,
+                bvid: String(current?.activeBvid || ""),
+                status
+            });
             taskErrors[task] = taskError ? serializeAppError(taskError) : {
                 message: String(lastError || "任务失败"),
                 code: "",
@@ -2708,7 +3028,7 @@ async function setTaskStatusMap(tabId, statusMap, lastError = "", errorMap = {})
         } else {
             delete taskErrors[task];
         }
-    });
+    }
     await updateTabState(tabId, { taskStatus, taskErrors, lastError, updatedAt: Date.now() });
 }
 
@@ -2937,9 +3257,43 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 });
                 const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: segmentsPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
                 const parsed = robustJSONParse(aiRes.text);
-                if (!parsed) throw createSegmentsParseError(aiRes.text, aiRes.metrics);
+                if (!parsed) {
+                    throw attachSentryContext(
+                        createSegmentsParseError(aiRes.text, aiRes.metrics),
+                        buildAIResponseSentryContext({
+                            task: "segments",
+                            bvid,
+                            provider: settings.provider,
+                            model: settings.model || "",
+                            mode: "quality",
+                            source: segmentPromptPlan.compact ? "segments_quality_compact_primary_parse" : "segments_quality_parse",
+                            responseText: aiRes.text,
+                            metrics: aiRes.metrics,
+                            extra: {
+                                compact_segments: !!segmentPromptPlan.compact
+                            }
+                        })
+                    );
+                }
                 const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "quality", allowLineOnly: !!segmentPromptPlan.compact });
-                if (!normalized.length) throw createSegmentsNormalizeError(parsed);
+                if (!normalized.length) {
+                    throw attachSentryContext(
+                        createSegmentsNormalizeError(parsed),
+                        buildAIResponseSentryContext({
+                            task: "segments",
+                            bvid,
+                            provider: settings.provider,
+                            model: settings.model || "",
+                            mode: "quality",
+                            source: segmentPromptPlan.compact ? "segments_quality_compact_primary_normalize" : "segments_quality_normalize",
+                            responseText: aiRes.text,
+                            metrics: aiRes.metrics,
+                            extra: {
+                                compact_segments: !!segmentPromptPlan.compact
+                            }
+                        })
+                    );
+                }
                 logSegmentQualitySummary(bvid, normalized, cache, {
                     task: "segments",
                     mode: segmentPromptPlan.compact ? "quality_compact_primary" : "quality",
@@ -2979,7 +3333,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 });
             } catch (error) {
                 let segmentError = normalizeSegmentsTaskError(error);
-                if (segmentError?.code === "SEGMENTS_OUTPUT_TRUNCATED") {
+                if (["SEGMENTS_OUTPUT_TRUNCATED", "SEGMENTS_EMPTY_RESPONSE"].includes(segmentError?.code)) {
                     try {
                         const normalized = await retrySegmentsWithCompactPrompt({
                             tabId,
@@ -3153,7 +3507,29 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
         if (segmentsSection && segmentsSection.found) {
             const parsed = robustJSONParse(segmentsSection.content);
             if (!parsed) {
-                segmentsFailureError = createSegmentsParseError(segmentsSection.content, aiRes.metrics);
+                segmentsFailureError = attachSentryContext(
+                    createSegmentsParseError(segmentsSection.content, aiRes.metrics),
+                    buildAIResponseSentryContext({
+                        task: "segments",
+                        bvid,
+                        provider: settings.provider,
+                        model: settings.model || "",
+                        mode: "efficiency",
+                        source: "segments_merged_protocol_section_parse",
+                        responseText: segmentsSection.content,
+                        metrics: aiRes.metrics
+                    })
+                );
+                logAI.error("segments_merged_section_parse_error", {
+                    bvid,
+                    task: "segments",
+                    code: segmentsFailureError?.code || "JSON_PARSE_ERROR",
+                    detail: {
+                        mode: "efficiency",
+                        source: "protocol_section",
+                        ...getSegmentsResponseDiagnostics(segmentsSection.content, aiRes.metrics)
+                    }
+                });
             } else {
                 const cache = await getCache(bvid);
                 const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency" });
@@ -3167,7 +3543,19 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                         subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
                     });
                 } else {
-                    segmentsFailureError = createSegmentsNormalizeError(parsed);
+                    segmentsFailureError = attachSentryContext(
+                        createSegmentsNormalizeError(parsed),
+                        buildAIResponseSentryContext({
+                            task: "segments",
+                            bvid,
+                            provider: settings.provider,
+                            model: settings.model || "",
+                            mode: "efficiency",
+                            source: "segments_merged_protocol_section_normalize",
+                            responseText: segmentsSection.content,
+                            metrics: aiRes.metrics
+                        })
+                    );
                 }
             }
         }
@@ -3191,7 +3579,29 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             }
         }
         if (!segmentsResolved && !segmentsFailureError) {
-            segmentsFailureError = createSegmentsMissingProtocolError(fullText, aiRes.metrics);
+            segmentsFailureError = attachSentryContext(
+                createSegmentsMissingProtocolError(fullText, aiRes.metrics),
+                buildAIResponseSentryContext({
+                    task: "segments",
+                    bvid,
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    mode: "efficiency",
+                    source: "segments_merged_protocol_missing",
+                    responseText: fullText,
+                    metrics: aiRes.metrics
+                })
+            );
+            logAI.error("segments_merged_protocol_missing", {
+                bvid,
+                task: "segments",
+                code: segmentsFailureError?.code || "SEGMENTS_MISSING_PROTOCOL",
+                detail: {
+                    mode: "efficiency",
+                    source: "merged_output",
+                    ...getSegmentsResponseDiagnostics(fullText, aiRes.metrics)
+                }
+            });
         }
         if (!segmentsResolved) {
             try {
@@ -3212,7 +3622,29 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                 const fallbackRes = await callAIWithTimeout(settings, [{ role: "user", content: fallbackPrompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
                 const parsed = robustJSONParse(fallbackRes.text);
                 if (!parsed) {
-                    segmentsFailureError = createSegmentsParseError(fallbackRes.text, fallbackRes.metrics);
+                    segmentsFailureError = attachSentryContext(
+                        createSegmentsParseError(fallbackRes.text, fallbackRes.metrics),
+                        buildAIResponseSentryContext({
+                            task: "segments",
+                            bvid,
+                            provider: settings.provider,
+                            model: settings.model || "",
+                            mode: "efficiency_fallback",
+                            source: "segments_merged_fallback_parse",
+                            responseText: fallbackRes.text,
+                            metrics: fallbackRes.metrics
+                        })
+                    );
+                    logAI.error("segments_merged_fallback_parse_error", {
+                        bvid,
+                        task: "segments",
+                        code: segmentsFailureError?.code || "JSON_PARSE_ERROR",
+                        detail: {
+                            mode: "efficiency_fallback",
+                            source: "fallback_prompt",
+                            ...getSegmentsResponseDiagnostics(fallbackRes.text, fallbackRes.metrics)
+                        }
+                    });
                 } else {
                     const cache = await getCache(bvid);
                     const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency_fallback" });
@@ -3240,7 +3672,19 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                             }
                         });
                     } else {
-                        segmentsFailureError = createSegmentsNormalizeError(parsed);
+                        segmentsFailureError = attachSentryContext(
+                            createSegmentsNormalizeError(parsed),
+                            buildAIResponseSentryContext({
+                                task: "segments",
+                                bvid,
+                                provider: settings.provider,
+                                model: settings.model || "",
+                                mode: "efficiency_fallback",
+                                source: "segments_merged_fallback_normalize",
+                                responseText: fallbackRes.text,
+                                metrics: fallbackRes.metrics
+                            })
+                        );
                     }
                 }
             } catch (fallbackError) {
@@ -4027,8 +4471,8 @@ function logRumorsQualitySummary(bvid, rumors, context = {}) {
     });
 }
 
-function createTaskTimeoutError() {
-    return createAppError("TIMEOUT", "任务超时，请重试~");
+function createTaskTimeoutError(code = "AI_RESPONSE_TIMEOUT", message = "模型请求超时，请重试") {
+    return createAppError(code, message);
 }
 
 function createUserAbortedError() {
@@ -4042,6 +4486,8 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
     const unregister = registerTabAbortController(options?.tabId, controller);
     const timeoutId = setTimeout(() => controller.abort("timeout"), timeoutMs);
     const start = performance.now();
+    const queueSizeAtStart = queue.length;
+    const activeCountAtStart = activeCount;
     try {
         const requestRunner = () => callAI(settings.provider, settings, messages, controller.signal);
         const res = options?.bypassQueue ? await requestRunner() : await runQueued(requestRunner);
@@ -4071,15 +4517,29 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
             if (controller.signal.reason === "aborted") {
                 throw createUserAbortedError();
             }
-            const timeoutError = createTaskTimeoutError();
+            const timeoutError = createTaskTimeoutError("AI_RESPONSE_TIMEOUT", "模型请求超时，请重试");
+            attachSentryContext(timeoutError, buildProviderRequestTelemetry(settings, timeoutMs, {
+                stream: false,
+                bypassQueue: !!options?.bypassQueue,
+                queueSizeAtStart,
+                activeCountAtStart,
+                elapsedMs: Math.round(performance.now() - start)
+            }));
             logAI.error("ai_request_timeout", buildFailureLog(timeoutError, {
                 task: "ai",
                 provider: settings.provider,
                 model: settings.model || "",
-                code: "TIMEOUT"
+                code: timeoutError.code || "AI_RESPONSE_TIMEOUT"
             }));
             throw timeoutError;
         }
+        attachSentryContext(error, buildProviderRequestTelemetry(settings, timeoutMs, {
+            stream: false,
+            bypassQueue: !!options?.bypassQueue,
+            queueSizeAtStart,
+            activeCountAtStart,
+            elapsedMs: Math.round(performance.now() - start)
+        }));
         throw error;
     } finally {
         unregister();
@@ -4091,10 +4551,14 @@ async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, e
     const controller = externalController || new AbortController();
     const unregister = externalController ? () => {} : registerTabAbortController(options?.tabId, controller);
     let firstResponseReceived = false;
+    const retryDelaysMs = [STREAM_INITIAL_RETRY_DELAY_MS];
+    const maxAttempts = retryDelaysMs.length + 1;
     const timeoutId = setTimeout(() => {
         if (!firstResponseReceived) controller.abort("timeout");
     }, timeoutMs);
     const start = performance.now();
+    const queueSizeAtStart = queue.length;
+    const activeCountAtStart = activeCount;
     try {
         const wrappedOnDelta = (delta) => {
             if (!firstResponseReceived) {
@@ -4103,7 +4567,31 @@ async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, e
             }
             if (typeof onDelta === "function") onDelta(delta);
         };
-        const res = await runQueued(() => callAIStream(settings.provider, settings, messages, controller.signal, wrappedOnDelta));
+        let res = null;
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+            try {
+                res = await runQueued(() => callAIStream(settings.provider, settings, messages, controller.signal, wrappedOnDelta));
+                break;
+            } catch (error) {
+                decorateStreamRetryMetadata(error, attempt, maxAttempts, retryDelaysMs);
+                if (controller.signal.aborted) throw error;
+                if (!shouldRetryInitialStreamFailure(error, firstResponseReceived, attempt, maxAttempts)) throw error;
+                const delayMs = retryDelaysMs[attempt - 1] || 0;
+                logAI.warn("ai_stream_initial_retry", {
+                    task: "ai",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    code: error?.code || "",
+                    detail: {
+                        attempt,
+                        max_attempts: maxAttempts,
+                        next_delay_ms: delayMs,
+                        first_response_received: firstResponseReceived
+                    }
+                });
+                await waitForAbortableDelay(delayMs, controller.signal);
+            }
+        }
         const latencyMs = Math.round(performance.now() - start);
         const tokenInfo = resolveTokenInfo(res.usage, res.text, messages);
         const modelScopeRemaining = res.headers?.get?.("modelscope-ratelimit-model-requests-remaining") ?? null;
@@ -4119,9 +4607,25 @@ async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, e
             if (controller.signal.reason === "aborted") {
                 throw createUserAbortedError();
             }
-            const timeoutError = createTaskTimeoutError();
+            const timeoutError = createTaskTimeoutError("AI_STREAM_TIMEOUT", "模型长时间没有开始返回内容，请重试");
+            attachSentryContext(timeoutError, buildProviderRequestTelemetry(settings, timeoutMs, {
+                stream: true,
+                bypassQueue: false,
+                queueSizeAtStart,
+                activeCountAtStart,
+                elapsedMs: Math.round(performance.now() - start),
+                firstResponseReceived
+            }));
             throw timeoutError;
         }
+        attachSentryContext(error, buildProviderRequestTelemetry(settings, timeoutMs, {
+            stream: true,
+            bypassQueue: false,
+            queueSizeAtStart,
+            activeCountAtStart,
+            elapsedMs: Math.round(performance.now() - start),
+            firstResponseReceived
+        }));
         throw error;
     } finally {
         unregister();
@@ -4304,38 +4808,85 @@ async function getCache(bvid) {
     return value;
 }
 
+function isStorageQuotaError(error) {
+    const message = String(error?.message || "");
+    return /QUOTA_BYTES|quota exceeded/i.test(message);
+}
+
+function buildQuotaSafeCacheFallback(current = {}, merged = {}) {
+    const rawSubtitle = Array.isArray(merged?.rawSubtitle) ? merged.rawSubtitle : [];
+    const processedSubtitle = Array.isArray(merged?.processedSubtitle) ? merged.processedSubtitle : [];
+    if (!rawSubtitle.length || !processedSubtitle.length) return null;
+    return {
+        ...merged,
+        processedSubtitle: [],
+        processedHash: "",
+        updatedAt: Date.now()
+    };
+}
+
 async function mergeCacheByBvid(bvid, patch) {
     const normalized = normalizeBvid(bvid);
     if (!normalized) return {};
-    const key = `cache_${normalized}`;
-    const current = await getCache(normalized);
-    const merged = {
-        bvid: normalized,
-        cid: 0,
-        tid: null,
-        rawSubtitle: [],
-        processedSubtitle: [],
-        rawHash: "",
-        processedHash: "",
-        summary: "",
-        segments: [],
-        rumors: null,
-        history: [],
-        metrics: [],
-        updatedAt: Date.now(),
-        ...current,
-        ...patch
-    };
-    if (isEqualJSON(current, merged)) {
-        cacheMemory.set(normalized, cloneData(merged));
-        return merged;
+    const previous = cacheWriteLocks.get(normalized) || Promise.resolve();
+    const next = previous.catch(() => {}).then(async () => {
+        const key = `cache_${normalized}`;
+        const current = await getCache(normalized);
+        const merged = {
+            bvid: normalized,
+            cid: 0,
+            tid: null,
+            rawSubtitle: [],
+            processedSubtitle: [],
+            rawHash: "",
+            processedHash: "",
+            summary: "",
+            segments: [],
+            rumors: null,
+            history: [],
+            metrics: [],
+            updatedAt: Date.now(),
+            ...current,
+            ...patch
+        };
+        if (isEqualJSON(current, merged)) {
+            cacheMemory.set(normalized, cloneData(merged));
+            return merged;
+        }
+        try {
+            await chrome.storage.local.set({ [key]: merged });
+            cacheMemory.set(normalized, cloneData(merged));
+            logCache.debug("cache_write", { key });
+            logCache.info("cache_merge", { key, fields: Object.keys(patch || {}) });
+            logBackground.debug("storage_update", { key });
+            return merged;
+        } catch (error) {
+            if (!isStorageQuotaError(error)) throw error;
+            const fallback = buildQuotaSafeCacheFallback(current, merged);
+            if (!fallback) throw error;
+            await chrome.storage.local.set({ [key]: fallback });
+            cacheMemory.set(normalized, cloneData(fallback));
+            logCache.warn("cache_write_quota_fallback", {
+                key,
+                fields: Object.keys(patch || {}),
+                dropped_fields: ["processedSubtitle", "processedHash"],
+                raw_count: Array.isArray(fallback.rawSubtitle) ? fallback.rawSubtitle.length : 0
+            });
+            logBackground.warn("storage_quota_fallback", {
+                bvid: normalized,
+                reason: "drop_processed_subtitle"
+            });
+            return fallback;
+        }
+    });
+    cacheWriteLocks.set(normalized, next);
+    try {
+        return await next;
+    } finally {
+        if (cacheWriteLocks.get(normalized) === next) {
+            cacheWriteLocks.delete(normalized);
+        }
     }
-    await chrome.storage.local.set({ [key]: merged });
-    cacheMemory.set(normalized, cloneData(merged));
-    logCache.debug("cache_write", { key });
-    logCache.info("cache_merge", { key, fields: Object.keys(patch || {}) });
-    logBackground.debug("storage_update", { key });
-    return merged;
 }
 
 function cloneData(value) {

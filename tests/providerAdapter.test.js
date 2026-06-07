@@ -41,6 +41,56 @@ describe("providerAdapter", () => {
     });
   });
 
+  it("retries provider network failures for non-stream requests and then succeeds", async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(mockJsonResponse({
+        choices: [{ message: { content: "第三次成功" } }],
+        usage: { total_tokens: 12 }
+      }));
+    const timeoutSpy = vi.spyOn(globalThis, "setTimeout").mockImplementation((fn, delay, ...args) => {
+      fn(...args);
+      return 0;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAI("openai", {
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-test"
+    }, [{ role: "user", content: "hello" }]);
+
+    expect(result.text).toBe("第三次成功");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 700);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1600);
+  });
+
+  it("keeps retry metadata on final provider network failure", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+    vi.spyOn(globalThis, "setTimeout").mockImplementation((fn, delay, ...args) => {
+      fn(...args);
+      return 0;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(callAI("openai", {
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-test"
+    }, [{ role: "user", content: "hello" }])).rejects.toMatchObject({
+      code: "PROVIDER_NETWORK_ERROR",
+      requestEntry: "callAI",
+      requestPhase: "initial_fetch",
+      requestAttempt: 3,
+      requestMaxAttempts: 3,
+      retryStrategy: "provider_network_backoff",
+      retryDelaysMs: [700, 1600]
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("builds OpenRouter OpenAI-compatible requests", async () => {
     const fetchMock = vi.fn(async () => mockJsonResponse({
       choices: [{ message: { content: "OpenRouter 返回" } }],

@@ -22,3 +22,5 @@ Thumbs.db
 
 # Local generated assets
 social-card-bilitato-xhs/
+outputs/
+scripts/ensure-codex-mobile.ps1

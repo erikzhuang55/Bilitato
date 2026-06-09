@@ -39,6 +39,10 @@
         return "CC";
     }
 
+    function shouldIsolateChatInputKey(value) {
+        return value === "ArrowLeft" || value === "ArrowRight";
+    }
+
     function getBvidFromUrl(url) {
         const match = String(url).match(/\/video\/(BV[0-9A-Za-z]+)/i);
         return match ? match[1] : "";
@@ -110,6 +114,7 @@
         normalizeBvidCase,
         resolveDefaultOpenPage,
         serializeTimelineDetail,
+        shouldIsolateChatInputKey,
         sleep,
         toNumberOrNaN,
         toSrtTime

@@ -35,4 +35,10 @@ describe("contentUtils", () => {
     expect(utils.resolveDefaultOpenPage("chat")).toBe("chat");
     expect(utils.resolveDefaultOpenPage("settings")).toBe("CC");
   });
+
+  it("isolates horizontal cursor keys used in the chat input", () => {
+    expect(utils.shouldIsolateChatInputKey("ArrowLeft")).toBe(true);
+    expect(utils.shouldIsolateChatInputKey("ArrowRight")).toBe(true);
+    expect(utils.shouldIsolateChatInputKey("ArrowUp")).toBe(false);
+  });
 });

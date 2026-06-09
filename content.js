@@ -12,6 +12,7 @@ const {
     normalizeBvidCase,
     resolveDefaultOpenPage,
     serializeTimelineDetail,
+    shouldIsolateChatInputKey,
     sleep,
     toNumberOrNaN,
     toSrtTime
@@ -1580,8 +1581,7 @@ async function loadBootstrapData() {
             await chrome.storage.local.remove([SETUP_PREVIEW_STORAGE_KEY]);
         } catch (_) {}
     } else {
-        // 首次加载固定展示 CC，让用户先看到字幕检测状态
-        appState.activePage = "CC";
+        appState.activePage = resolveDefaultOpenPage(appState.settings?.defaultOpenPage);
     }
 }
 
@@ -6501,6 +6501,10 @@ function isolateChatInputKeyboardEvent(event) {
         event.preventDefault();
         event.stopImmediatePropagation?.();
         insertTextIntoControl(target, " ");
+        return;
+    }
+    if (shouldIsolateChatInputKey?.(key)) {
+        event.stopImmediatePropagation?.();
         return;
     }
     const isPlainTextKey = key.length === 1 || key === " " || key === "Spacebar";

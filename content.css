@@ -3150,6 +3150,7 @@ input[type="range"]:active::-webkit-slider-thumb {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    overscroll-behavior-y: contain;
     line-height: 1.6;
     color: #2f3542;
     font-size: 14px;
@@ -3237,6 +3238,7 @@ input[type="range"]:active::-webkit-slider-thumb {
     flex: 1;
     min-height: 0;
     overflow-y: auto;
+    overscroll-behavior-y: contain;
     padding-right: 2px;
 }
 

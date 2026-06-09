@@ -24,6 +24,19 @@ describe("robustJSONParse", () => {
     });
   });
 
+  it("repairs invalid bare tokens in segment numeric fields", () => {
+    expect(robustJSONParse('[{"start":0,"end":III,"start_line":0,"end_line":38,"label":"开场","type":"content"}]')).toEqual([
+      {
+        start: 0,
+        end: null,
+        start_line: 0,
+        end_line: 38,
+        label: "开场",
+        type: "content"
+      }
+    ]);
+  });
+
   it("returns null when no JSON exists", () => {
     expect(robustJSONParse("这不是 JSON")).toBeNull();
   });

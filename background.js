@@ -2771,23 +2771,23 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
                     ...getSegmentsResponseDiagnostics(aiRes.text, aiRes.metrics)
                 }
             });
-            if (["SEGMENTS_OUTPUT_TRUNCATED", "SEGMENTS_EMPTY_RESPONSE"].includes(parseError?.code)) {
-                compactRetryNormalized = await retrySegmentsWithCompactPrompt({
-                    tabId: taskContext?.tabId || null,
-                    bvid,
-                    cache,
-                    settings,
-                    taskContext,
-                    mode: "single",
-                    originalError: parseError
-                });
-            } else {
-                throw parseError;
-            }
+            compactRetryNormalized = await retrySegmentsWithAutoFallbacks({
+                tabId: taskContext?.tabId || null,
+                bvid,
+                cache,
+                settings,
+                taskContext,
+                subtitleText,
+                promptMode: settings.promptSettings?.mode || "guided",
+                guided: settings.promptSettings?.guided || {},
+                customPrompts: settings.promptSettings?.custom || {},
+                mode: "single",
+                originalError: parseError
+            });
         }
         const normalized = compactRetryNormalized || normalizeSegments(finalParsed, cache, { bvid, task: "segments", mode: "single", allowLineOnly: shouldUseCompactSegmentsFirst(settings) });
         if (!normalized.length) {
-            throw attachSentryContext(
+            const normalizeError = attachSentryContext(
                 createSegmentsNormalizeError(parsed),
                 buildAIResponseSentryContext({
                     task: "segments",
@@ -2800,6 +2800,19 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
                     metrics: aiRes.metrics
                 })
             );
+            return await retrySegmentsWithAutoFallbacks({
+                tabId: taskContext?.tabId || null,
+                bvid,
+                cache,
+                settings,
+                taskContext,
+                subtitleText,
+                promptMode: settings.promptSettings?.mode || "guided",
+                guided: settings.promptSettings?.guided || {},
+                customPrompts: settings.promptSettings?.custom || {},
+                mode: "single",
+                originalError: normalizeError
+            });
         }
         logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "single", subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions) });
         return normalized;
@@ -2963,6 +2976,19 @@ function shouldUseCompactSegmentsFirst(settings = {}) {
         && String(settings?.model || "").toLowerCase() === "openrouter/free";
 }
 
+const AUTO_RETRY_SEGMENT_ERROR_CODES = new Set([
+    "SEGMENTS_JSON_PARSE_FAILED",
+    "SEGMENTS_INVALID_SCHEMA",
+    "SEGMENTS_EMPTY_RESPONSE",
+    "SEGMENTS_OUTPUT_TRUNCATED",
+    "SEGMENTS_EMPTY_LIST",
+    "SEGMENTS_MISSING_PROTOCOL"
+]);
+
+function shouldAutoRetrySegmentsError(error) {
+    return AUTO_RETRY_SEGMENT_ERROR_CODES.has(String(error?.code || ""));
+}
+
 function buildPrimarySegmentsPrompt({ settings, cache, subtitleText, mode, guided, customPrompts, taskContext, promptTaskContext }) {
     if (shouldUseCompactSegmentsFirst(settings)) {
         const compactSubtitle = buildCompactSegmentsSubtitlePayload(cache, 40000) || subtitleText;
@@ -3070,6 +3096,193 @@ async function retrySegmentsWithCompactPrompt({ tabId, bvid, cache, settings, ta
         }
     });
     return normalized;
+}
+
+async function retrySegmentsWithPrimaryPrompt({
+    tabId,
+    bvid,
+    cache,
+    settings,
+    taskContext,
+    subtitleText,
+    promptMode,
+    guided,
+    customPrompts,
+    mode,
+    originalError
+}) {
+    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
+    const segmentPromptPlan = buildPrimarySegmentsPrompt({
+        settings,
+        cache,
+        subtitleText,
+        mode: promptMode,
+        guided,
+        customPrompts,
+        taskContext,
+        promptTaskContext
+    });
+    logAI.warn("segments_primary_retry_start", {
+        bvid,
+        task: "segments",
+        provider: settings.provider,
+        model: settings.model || "",
+        code: originalError?.code || "",
+        detail: {
+            mode,
+            subtitle_chars: (segmentPromptPlan?.subtitleText || subtitleText).length,
+            prompt_chars: segmentPromptPlan.prompt.length,
+            compact_segments: !!segmentPromptPlan.compact
+        }
+    });
+    const aiRes = await callAIWithTimeout(settings, [{ role: "user", content: segmentPromptPlan.prompt }], TASK_TIMEOUT_MS, { bypassQueue: true, tabId });
+    const parsed = robustJSONParse(aiRes.text);
+    if (!parsed) {
+        const parseError = attachSentryContext(
+            createSegmentsParseError(aiRes.text, aiRes.metrics),
+            buildAIResponseSentryContext({
+                task: "segments",
+                bvid,
+                provider: settings.provider,
+                model: settings.model || "",
+                mode: `${mode}_primary_retry`,
+                source: "segments_primary_retry_parse",
+                responseText: aiRes.text,
+                metrics: aiRes.metrics,
+                extra: {
+                    compact_segments: !!segmentPromptPlan.compact
+                }
+            })
+        );
+        throw parseError;
+    }
+    const normalized = normalizeSegments(parsed, cache, {
+        bvid,
+        task: "segments",
+        mode: `${mode}_primary_retry`,
+        allowLineOnly: !!segmentPromptPlan.compact
+    });
+    if (!normalized.length) {
+        throw attachSentryContext(
+            createSegmentsNormalizeError(parsed),
+            buildAIResponseSentryContext({
+                task: "segments",
+                bvid,
+                provider: settings.provider,
+                model: settings.model || "",
+                mode: `${mode}_primary_retry`,
+                source: "segments_primary_retry_normalize",
+                responseText: aiRes.text,
+                metrics: aiRes.metrics,
+                extra: {
+                    compact_segments: !!segmentPromptPlan.compact
+                }
+            })
+        );
+    }
+    logAI.info("segments_primary_retry_success", {
+        bvid,
+        task: "segments",
+        provider: settings.provider,
+        model: settings.model || "",
+        duration_ms: aiRes.metrics?.latencyMs || 0,
+        detail: {
+            mode,
+            output_chars: String(aiRes.text || "").length,
+            segment_count: normalized.length,
+            compact_segments: !!segmentPromptPlan.compact
+        }
+    });
+    return normalized;
+}
+
+async function retrySegmentsWithAutoFallbacks({
+    tabId,
+    bvid,
+    cache,
+    settings,
+    taskContext,
+    subtitleText,
+    promptMode,
+    guided,
+    customPrompts,
+    mode,
+    originalError
+}) {
+    async function clearRetryState() {
+        if (!tabId) return;
+        const current = await getTabState(tabId);
+        const taskRetryState = { ...(current?.taskRetryState || {}) };
+        if (!taskRetryState.segments) return;
+        delete taskRetryState.segments;
+        await updateTabState(tabId, { taskRetryState, updatedAt: Date.now() });
+    }
+
+    let latestError = normalizeSegmentsTaskError(originalError);
+    if (!shouldAutoRetrySegmentsError(latestError)) throw latestError;
+    const retrySteps = [
+        () => retrySegmentsWithPrimaryPrompt({
+            tabId,
+            bvid,
+            cache,
+            settings,
+            taskContext,
+            subtitleText,
+            promptMode,
+            guided,
+            customPrompts,
+            mode,
+            originalError: latestError
+        }),
+        () => retrySegmentsWithCompactPrompt({
+            tabId,
+            bvid,
+            cache,
+            settings,
+            taskContext,
+            mode,
+            originalError: latestError
+        })
+    ];
+    for (let index = 0; index < retrySteps.length; index += 1) {
+        if (tabId) {
+            const current = await getTabState(tabId);
+            const taskRetryState = { ...(current?.taskRetryState || {}) };
+            taskRetryState.segments = {
+                attempt: index + 1,
+                total: retrySteps.length,
+                strategy: index === 0 ? "primary" : "compact",
+                code: String(latestError?.code || ""),
+                mode,
+                startedAt: Date.now()
+            };
+            await updateTabState(tabId, { taskRetryState, updatedAt: Date.now() });
+        }
+        try {
+            const result = await retrySteps[index]();
+            await clearRetryState();
+            return result;
+        } catch (retryError) {
+            latestError = normalizeSegmentsTaskError(retryError);
+            logAI.warn("segments_auto_retry_failed", buildFailureLog(latestError, {
+                task: "segments",
+                bvid,
+                provider: settings.provider,
+                model: settings.model || "",
+                detail: {
+                    mode,
+                    retry_attempt: index + 1,
+                    retry_total: retrySteps.length
+                }
+            }));
+            if (!shouldAutoRetrySegmentsError(latestError) || index === retrySteps.length - 1) {
+                await clearRetryState();
+                throw latestError;
+            }
+        }
+    }
+    await clearRetryState();
+    throw latestError;
 }
 
 function resolveStatusByError(error) {
@@ -3417,14 +3630,18 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 });
             } catch (error) {
                 let segmentError = normalizeSegmentsTaskError(error);
-                if (["SEGMENTS_OUTPUT_TRUNCATED", "SEGMENTS_EMPTY_RESPONSE"].includes(segmentError?.code)) {
+                if (shouldAutoRetrySegmentsError(segmentError)) {
                     try {
-                        const normalized = await retrySegmentsWithCompactPrompt({
+                        const normalized = await retrySegmentsWithAutoFallbacks({
                             tabId,
                             bvid,
                             cache,
                             settings,
                             taskContext,
+                            subtitleText: effectiveSegmentsSubtitleText,
+                            promptMode: mode,
+                            guided,
+                            customPrompts,
                             mode: "quality",
                             originalError: segmentError
                         });
@@ -3782,6 +3999,26 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                         mode: "efficiency_fallback"
                     }
                 }));
+            }
+        }
+        if (!segmentsResolved) {
+            if (shouldAutoRetrySegmentsError(segmentsFailureError)) {
+                const retriedSegments = await retrySegmentsWithAutoFallbacks({
+                    tabId,
+                    bvid,
+                    cache,
+                    settings,
+                    taskContext,
+                    subtitleText,
+                    promptMode: mode,
+                    guided,
+                    customPrompts,
+                    mode: "efficiency",
+                    originalError: segmentsFailureError
+                });
+                results.segments = { ok: true, data: retriedSegments, error: null };
+                segmentsResolved = true;
+                segmentsFailureError = null;
             }
         }
         if (!segmentsResolved) {
@@ -4834,6 +5071,7 @@ async function setTaskStatus(tabId, tasks, status, lastError = "") {
     const current = await getTabState(tabId);
     const taskStatus = { ...(current?.taskStatus || {}) };
     const taskErrors = { ...(current?.taskErrors || {}) };
+    const taskRetryState = { ...(current?.taskRetryState || {}) };
     tasks.forEach((task) => {
         taskStatus[task] = status;
         if (status === "error" || status === "timeout") {
@@ -4846,8 +5084,11 @@ async function setTaskStatus(tabId, tasks, status, lastError = "") {
         } else {
             delete taskErrors[task];
         }
+        if (status === "error" || status === "timeout" || status === "done" || status === "idle") {
+            delete taskRetryState[task];
+        }
     });
-    await updateTabState(tabId, { taskStatus, taskErrors, lastError, updatedAt: Date.now() });
+    await updateTabState(tabId, { taskStatus, taskErrors, taskRetryState, lastError, updatedAt: Date.now() });
 }
 
 async function appendMetrics(bvid, tabId, task, metrics) {
@@ -4884,6 +5125,7 @@ async function updateTabState(tabId, patch) {
         activeCid: 0,
         activeTid: null,
         taskStatus: { summary: "idle", segments: "idle", rumors: "idle", chat: "idle" },
+        taskRetryState: {},
         lastError: "",
         metrics: [],
         ...current,

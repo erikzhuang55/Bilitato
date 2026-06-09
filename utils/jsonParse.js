@@ -51,6 +51,13 @@ function repairUnescapedQuotes(str) {
   return out;
 }
 
+function repairKnownBareNumericFieldTokens(str) {
+  return String(str || "").replace(
+    /("(?:start|end|start_line|end_line|ad_start_line|ad_end_line)"\s*:\s*)([A-Za-z_][A-Za-z0-9_]*)(?=\s*(?:,|}|\]))/g,
+    "$1null"
+  );
+}
+
 function isDebugEnabled() {
   return !!globalThis.AIPluginLogger?.isDebugEnabled?.();
 }
@@ -107,9 +114,14 @@ export function robustJSONParse(str) {
           try {
              return JSON.parse(repaired);
           } catch (e3) {
+             repaired = repairKnownBareNumericFieldTokens(repaired);
+             try {
+               return JSON.parse(repaired);
+             } catch (e4) {
              // Attempt repair unescaped quotes
-             repaired = repairUnescapedQuotes(repaired);
-             return JSON.parse(repaired);
+               repaired = repairUnescapedQuotes(repaired);
+               return JSON.parse(repaired);
+             }
           }
       } catch (e2) {
           globalThis.AIPluginLogger?.create?.("ai", {

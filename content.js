@@ -4292,6 +4292,33 @@ function renderSegmentPromptDebugControls() {
     `;
 }
 
+function renderTaskRetryDebugPanel() {
+    const retryState = appState.tabState?.taskRetryState?.segments || null;
+    const strategyMap = {
+        primary: "原 Prompt 重试",
+        compact: "保守 Prompt 重试"
+    };
+    const strategyLabel = strategyMap[String(retryState?.strategy || "")] || "未重试";
+    const code = String(retryState?.code || "");
+    const mode = String(retryState?.mode || "");
+    return `
+        <div class="settings-group-title">分段自动重试状态</div>
+        <div class="error-demo-section">
+            ${retryState ? `
+                <div class="debug-state-preview">
+                    <div><strong>状态：</strong>自动重试中</div>
+                    <div><strong>阶段：</strong>${escapeHtml(strategyLabel)}</div>
+                    <div><strong>次数：</strong>第 ${Number(retryState.attempt || 0)}/${Number(retryState.total || 0)} 次</div>
+                    <div><strong>触发错误：</strong>${escapeHtml(code || "-")}</div>
+                    <div><strong>任务模式：</strong>${escapeHtml(mode || "-")}</div>
+                </div>
+            ` : `
+                <div class="empty-text">当前没有正在进行的分段自动重试。</div>
+            `}
+        </div>
+    `;
+}
+
 function renderDebugPanel(panel) {
     panel.dataset.lastSignature = "debug";
     const manifestVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "";
@@ -4306,6 +4333,7 @@ function renderDebugPanel(panel) {
             </div>
         </div>
         <div class="page-body debug-page-body">
+            ${renderTaskRetryDebugPanel()}
             ${renderSegmentPromptDebugControls()}
             ${renderSubtitleEmptyDemoControls()}
             ${renderAsrUiTracePanel()}

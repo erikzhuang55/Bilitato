@@ -45,6 +45,40 @@ describe("contentErrorMessages", () => {
     });
   });
 
+  it("maps generic 429 and 5xx to panel retry guidance", () => {
+    expect(messages.mapErrorToView({ code: "HTTP_429", message: "API Error 429" })).toMatchObject({
+      title: "请求太频繁",
+      action: "retry",
+      presentation: "panel"
+    });
+    expect(messages.mapErrorToView({ code: "HTTP_5XX", message: "API Error 503" })).toMatchObject({
+      title: "模型服务暂时不可用",
+      action: "retry",
+      presentation: "panel"
+    });
+  });
+
+  it("refines 402 and 429 provider errors into clearer panel guidance", () => {
+    expect(messages.mapErrorToView({
+      message: 'API Error 402: {"error":{"message":"Insufficient Balance","code":"invalid_request_error"}}'
+    })).toMatchObject({
+      code: "HTTP_402_INSUFFICIENT_BALANCE",
+      title: "余额或额度已用尽",
+      action: "goto-setup-guide",
+      secondaryAction: "retry",
+      presentation: "panel"
+    });
+    expect(messages.mapErrorToView({
+      message: 'API Error 429: {"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}'
+    }).code).toBe("HTTP_429_INSUFFICIENT_QUOTA");
+    expect(messages.mapErrorToView({
+      message: 'API Error 429: {"error":{"code":"queue_exceeded","message":"queue_exceeded"}}'
+    }).code).toBe("HTTP_429_QUEUE_EXCEEDED");
+    expect(messages.mapErrorToView({
+      message: 'API Error 429: {"error":{"message":"Too many requests","type":"limitation"}}'
+    }).code).toBe("HTTP_429_RATE_LIMIT");
+  });
+
   it("maps unsupported API user location to provider guidance", () => {
     const view = messages.mapErrorToView({ message: "User location is not supported for the API use." });
     const html = messages.renderErrorPanel(view, "run-summary");

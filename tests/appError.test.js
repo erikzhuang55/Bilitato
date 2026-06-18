@@ -26,7 +26,10 @@ describe("appError", () => {
   });
 
   it("infers error codes from messages", () => {
-    expect(inferErrorCode(new Error("API Error 429: rate limit"))).toBe("HTTP_429");
+    expect(inferErrorCode(new Error("API Error 429: rate limit"))).toBe("HTTP_429_RATE_LIMIT");
+    expect(inferErrorCode(new Error('API Error 429: {"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}'))).toBe("HTTP_429_INSUFFICIENT_QUOTA");
+    expect(inferErrorCode(new Error('API Error 429: {"error":{"code":"queue_exceeded","message":"queue_exceeded"}}'))).toBe("HTTP_429_QUEUE_EXCEEDED");
+    expect(inferErrorCode(new Error('API Error 402: {"error":{"message":"Insufficient Balance"}}'))).toBe("HTTP_402_INSUFFICIENT_BALANCE");
     expect(inferErrorCode(new Error('API Error 400: {"error":{"message":"Invalid API key"}}'))).toBe("HTTP_401");
     expect(inferErrorCode(createAppError("TIMEOUT", "任务超时"))).toBe("TIMEOUT");
     expect(inferErrorCode(new Error("User location is not supported for the API use."))).toBe("API_LOCATION_UNSUPPORTED");

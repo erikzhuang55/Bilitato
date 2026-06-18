@@ -4,6 +4,56 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.4.1": {
+      title: "Bilitato 已更新至 v1.4.1",
+      displayVersion: "v1.4.1",
+      subtitle: "本次重点升级原生字幕接管、错误面板、反馈中心与使用数据打点，集中优化默认开字幕暴露、限流提示过轻、反馈服务误伤主流程和模型选择范围不够的问题。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "新增小米 MiMo Provider",
+              desc: "设置页现在支持直接选择小米 MiMo，并内置常用模型候选项，扩充了可用模型池。",
+              highlight: true,
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "修复 B 站原生字幕默认露出和黑框残留",
+              desc: "针对 B 站字幕懒加载，改为自动触发后只做无感隐藏，并在用户手动碰字幕按钮时立刻恢复，避免按钮卡死、黑框残留和字幕露出。",
+              highlight: true,
+            },
+            {
+              title: "修复合集/分 P 切换时字幕串线",
+              desc: "字幕抓取改为按 `bvid + p` 路由识别，切换合集或分 P 时会更准确地重置状态，减少把上一个视频字幕带到当前视频的问题。",
+            },
+            {
+              title: "修复反馈服务异常误导感",
+              desc: "反馈中心不可用时继续按非阻塞方式降级，只影响反馈入口，不再给人主功能也会受影响的感觉。",
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "429 / 5XX 改为面板提示",
+              desc: "高频限流和服务异常不再只弹 Toast，而是进入面板卡片，并统一补上重试按钮。",
+              highlight: true,
+            },
+            {
+              title: "细化 402 / 429 错误文案",
+              desc: "现在会区分余额不足、模型不可用、配额耗尽、频率限制和队列拥堵，用户更容易知道该换模型、等一会儿还是去设置。",
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。新增的使用行为上报仅记录任务状态、Provider、模型、耗时等统计字段，不包含聊天正文、Prompt 或字幕原文。",
+    },
     "1.4.0": {
       title: "Bilitato 已更新至 v1.4.0",
       displayVersion: "v1.4.0",
@@ -608,7 +658,9 @@
 
   function buildReleasePageVersions(version) {
     const majorHistory = [];
-    if (version === "1.4.0") {
+    if (version === "1.4.1") {
+      majorHistory.push("1.4.1", "1.4.0");
+    } else if (version === "1.4.0") {
       majorHistory.push("1.4.0", "1.3.x", "1.2.x");
     } else if (version === "1.3.1" || version === "1.3.0" || version === "1.3.x") {
       majorHistory.push("1.3.x", "1.2.x");

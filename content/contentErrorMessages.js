@@ -30,6 +30,24 @@
             secondaryAction: "goto-setup-guide",
             presentation: "panel"
         },
+        HTTP_402_INSUFFICIENT_BALANCE: {
+            title: "余额或额度已用尽",
+            message: "当前账号余额不足，或模型调用额度已经用完。请充值、切换到有额度的 Provider，或修改模型后重试。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            secondaryActionText: "重试",
+            secondaryAction: "retry",
+            presentation: "panel"
+        },
+        HTTP_402_MODEL_UNAVAILABLE: {
+            title: "当前模型暂不可用",
+            message: "服务商返回 402。当前免费路由、模型配置或可用通道暂不可用。请切换模型或 Provider 后重试。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            secondaryActionText: "重试",
+            secondaryAction: "retry",
+            presentation: "panel"
+        },
         MODEL_ACCESS_DENIED: {
             title: "模型没有访问权限",
             message: "当前账号没有权限使用这个模型，或该模型是私有模型。请切换模型、检查账号权限，或更换 Provider。",
@@ -79,14 +97,43 @@
             message: "服务商返回限流或额度上限，请稍等一会儿再试。",
             actionText: "重试",
             action: "retry",
-            presentation: "toast"
+            presentation: "panel"
+        },
+        HTTP_429_INSUFFICIENT_QUOTA: {
+            title: "模型额度已用尽",
+            message: "当前模型的调用额度已经用完，请换个模型试试，或检查账单与配额设置。",
+            actionText: "去设置",
+            action: "goto-setup-guide",
+            secondaryActionText: "重试",
+            secondaryAction: "retry",
+            presentation: "panel"
+        },
+        HTTP_429_RATE_LIMIT: {
+            title: "请求过于频繁",
+            message: "当前 Provider 触发了频率限制。请稍等片刻后重试，或切换到更稳定的 Provider。",
+            actionText: "重试",
+            action: "retry",
+            secondaryActionText: "去设置",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
+        },
+        HTTP_429_QUEUE_EXCEEDED: {
+            title: "服务当前较拥堵",
+            message: "当前模型队列已满或服务拥堵，继续立即重试成功率不高。建议稍后再试，或切换到其他模型。",
+            actionText: "重试",
+            action: "retry",
+            secondaryActionText: "去设置",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
         },
         HTTP_5XX: {
             title: "模型服务暂时不可用",
             message: "服务商服务器异常，可以稍后重试，或切换 Provider。",
             actionText: "重试",
             action: "retry",
-            presentation: "toast"
+            secondaryActionText: "去设置",
+            secondaryAction: "goto-setup-guide",
+            presentation: "panel"
         },
         TIMEOUT: {
             title: "请求超时",
@@ -337,6 +384,9 @@
             "HTTP_400",
             "HTTP_401",
             "HTTP_403",
+            "HTTP_402",
+            "HTTP_429",
+            "HTTP_5XX",
             "TIMEOUT",
             "NETWORK_ERROR",
             "JSON_PARSE_ERROR",
@@ -350,6 +400,11 @@
         if (/Model is private|private model|没有权限使用这个模型|无权访问该模型|model.*forbidden|model.*denied/i.test(message)) return "MODEL_ACCESS_DENIED";
         if (/Groq.*(?:Forbidden|拒绝了当前网络请求)|ASR_GROQ_ACCESS_BLOCKED/i.test(message)) return "ASR_GROQ_ACCESS_BLOCKED";
         if (/(?:Groq|硅基流动|transcription|转录).*(?:403|forbidden|Illegal operation)|(?:403|forbidden|Illegal operation).*(?:Groq|硅基流动|transcription|转录)/i.test(message)) return "ASR_FORBIDDEN";
+        if (/Insufficient Balance|余额不足|额度不足|balance.*insufficient/i.test(message)) return "HTTP_402_INSUFFICIENT_BALANCE";
+        if (/402/i.test(message) && /free route|免费路由|route unavailable|模型配置不可用|当前模型配置不可用|provider.*unavailable/i.test(message)) return "HTTP_402_MODEL_UNAVAILABLE";
+        if (/insufficient_quota|request_quota_exceeded|额度已用尽|配额已用尽|quota exceeded/i.test(message)) return "HTTP_429_INSUFFICIENT_QUOTA";
+        if (/queue_exceeded|队列已满|队列拥堵|service unavailable due to queue/i.test(message)) return "HTTP_429_QUEUE_EXCEEDED";
+        if (/Too many requests|rate limit|请求太频繁|限流|too many tokens/i.test(message) && !/groq|转录/i.test(message)) return "HTTP_429_RATE_LIMIT";
         const httpMatch = message.match(/\bHTTP\s+([0-9]{3})\b|API Error\s+([0-9]{3})/i);
         if (httpMatch) {
             const status = Number(httpMatch[1] || httpMatch[2] || 0);

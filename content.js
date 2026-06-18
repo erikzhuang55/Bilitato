@@ -2032,7 +2032,7 @@ function bindPanelDelegatedEvents() {
         if (action === "debug-show-release-notice") {
             globalThis.BilitatoReleaseNotice?.renderReleaseNotice?.({
                 root: panelShadowRoot,
-                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.0"
+                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.1"
             });
             return;
         }
@@ -4302,15 +4302,22 @@ function renderSettings(panel) {
 }
 
 function renderErrorDemoControls() {
-    const currentVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.0";
+    const currentVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.1";
     const panelErrors = [
         ["HTTP_401", "401 Key 无效", "summary"],
         ["ALIYUN_REALNAME_REQUIRED", "阿里云未实名", "summary"],
         ["HTTP_403", "403 无权限", "summary"],
+        ["HTTP_402_INSUFFICIENT_BALANCE", "402 余额不足", "summary"],
+        ["HTTP_402_MODEL_UNAVAILABLE", "402 配置不可用", "summary"],
         ["MODEL_ACCESS_DENIED", "模型无权限", "summary"],
         ["ASR_FORBIDDEN", "转录 403", "summary"],
         ["INVALID_MODEL_ID", "模型 ID 无效", "summary"],
         ["HTTP_404", "404 模型/接口", "summary"],
+        ["HTTP_429_INSUFFICIENT_QUOTA", "429 配额耗尽", "summary"],
+        ["HTTP_429_RATE_LIMIT", "429 频率限制", "summary"],
+        ["HTTP_429_QUEUE_EXCEEDED", "429 队列拥堵", "summary"],
+        ["HTTP_429", "429 通用", "summary"],
+        ["HTTP_5XX", "5XX 服务异常", "summary"],
         ["TIMEOUT", "超时", "summary"],
         ["AI_RESPONSE_TIMEOUT", "模型请求超时", "summary"],
         ["AI_STREAM_TIMEOUT", "模型流超时", "summary"],
@@ -4335,8 +4342,6 @@ function renderErrorDemoControls() {
         ["JSON_PARSE_ERROR", "验真 JSON", "real"]
     ];
     const toastErrors = [
-        ["HTTP_429", "429 限流"],
-        ["HTTP_5XX", "5XX 服务异常"],
         ["ASR_RATE_LIMIT", "ASR 限流"],
         ["CLOUD_FAILED", "云缓存失败"],
         ["DOWNLOAD_FAILED", "下载失败"]
@@ -4481,16 +4486,6 @@ function renderTaskRetryDebugPanel() {
     `;
 }
 
-function renderUserFacingSummaryPreviewSection() {
-    return `
-        <div class="settings-group-title">用户前台实时预览</div>
-        <div class="error-demo-section">
-            <div class="empty-text" style="margin-bottom:8px;">下面这块直接复用总结页真实渲染，用来观察用户实际会看到的分段界面。</div>
-            <div id="debug-summary-preview" class="debug-summary-preview"></div>
-        </div>
-    `;
-}
-
 function renderDebugPanel(panel) {
     panel.dataset.lastSignature = "debug";
     const manifestVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "";
@@ -4506,7 +4501,6 @@ function renderDebugPanel(panel) {
         </div>
         <div class="page-body debug-page-body">
             ${renderTaskRetryDebugPanel()}
-            ${renderUserFacingSummaryPreviewSection()}
             ${renderSegmentPromptDebugControls()}
             ${renderSubtitleEmptyDemoControls()}
             ${renderAsrUiTracePanel()}
@@ -4514,10 +4508,6 @@ function renderDebugPanel(panel) {
             ${renderRealtimeLogPanel()}
         </div>
     `;
-    const summaryPreview = panel.querySelector("#debug-summary-preview");
-    if (summaryPreview) {
-        renderSummary(summaryPreview);
-    }
     bindSegmentPromptDebugControls(panel);
     bindRealtimeLogPanel(panel);
     renderAsrUiTraceData();

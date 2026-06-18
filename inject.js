@@ -17,7 +17,6 @@
     let subtitleStringCache = [];
     let routeMetaReadyAt = 0;
     let autoTriggerAttempts = 0;
-    let visualRestoreTimer = null;
     const stealthStyleId = "bili-stealth-css";
     const originalFetch = window.fetch;
     const originalOpen = XMLHttpRequest.prototype.open;
@@ -117,7 +116,6 @@
         const delay = Math.max(0, Number(routeMetaReadyAt || 0) - Date.now());
         setTimeout(() => {
             postSubtitleData(body);
-            scheduleVisualRestore(3000);
         }, delay);
     }
 
@@ -175,8 +173,7 @@
             return;
         }
         autoTriggerStarted = true;
-        const performed = performSilentAutoTrigger();
-        if (performed) scheduleVisualRestore(3000);
+        performSilentAutoTrigger();
         emitLog("subtitle_autotrigger", { reason, attempts: autoTriggerAttempts });
     }
 
@@ -189,15 +186,21 @@
     }
 
     function applyStealthMask() {
-        if (isSubtitleCaptured) return;
         if (document.getElementById(stealthStyleId)) return;
         maskNode = document.createElement("style");
         maskNode.id = stealthStyleId;
-        maskNode.innerHTML = ".bpx-player-video-subtitle { visibility: hidden !important; } .bpx-common-toast { display: none !important; }";
+        maskNode.innerHTML = [
+            ".bpx-player-video-subtitle { visibility: hidden !important; }",
+            ".bili-subtitle-x-subtitle-panel-position { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
+            ".bpx-player-ctrl-subtitle-menu.bui.bui-panel.bui-dark { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
+            ".bpx-common-toast, .bpx-player-toast-wrap, .bpx-player-toast-row, .bpx-player-toast-auto { display: none !important; opacity: 0 !important; visibility: hidden !important; }"
+        ].join(" ");
         document.head.appendChild(maskNode);
+        emitLog("subtitle_stealth_applied", { source: "inject" });
     }
 
     function removeStealthMask() {
+        const hadMask = !!document.getElementById(stealthStyleId) || !!maskNode?.isConnected;
         const style = document.getElementById(stealthStyleId);
         if (style) style.remove();
         if (maskNode?.isConnected) maskNode.remove();
@@ -211,27 +214,11 @@
             container.style.removeProperty("pointer-events");
             container.style.pointerEvents = "auto";
         });
+        if (hadMask) emitLog("subtitle_stealth_released", { source: "manual_interaction" });
     }
 
     function hackSubtitleOff() {
-        const stateNodes = document.querySelectorAll(".bpx-player-ctrl-subtitle, .bpx-player-ctrl-subtitle-panel, .bilibili-player-video-btn-subtitle");
-        stateNodes.forEach((node) => {
-            node.classList.remove("active", "on", "show", "open", "opened", "is-active", "bpx-state-active", "bpx-state-show", "bpx-state-opened");
-            if (node.matches(".bpx-player-ctrl-subtitle")) node.setAttribute("aria-label", "开启字幕");
-        });
-        const allItems = document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item, .bpx-player-ctrl-subtitle-menu-item");
-        allItems.forEach((item) => {
-            item.classList.remove("bpx-state-active", "bpx-state-selected");
-        });
-        const containers = document.querySelectorAll(".bpx-player-video-subtitle, .bili-subtitle, .subtitle-item, .bpx-player-subtitle-wrap, .bpx-player-subtitle");
-        containers.forEach((container) => {
-            container.innerHTML = "";
-            container.setAttribute("style", "display: none !important; opacity: 0 !important; height: 0 !important; pointer-events: none !important;");
-        });
-        const toasts = document.querySelectorAll(".bpx-common-toast");
-        toasts.forEach((toast) => {
-            toast.style.display = "none";
-        });
+        applyStealthMask();
     }
 
     function performSilentAutoTrigger() {
@@ -334,22 +321,21 @@
         }, 0);
     }
 
-    function scheduleVisualRestore(delayMs) {
-        if (visualRestoreTimer) {
-            clearTimeout(visualRestoreTimer);
-            visualRestoreTimer = null;
-        }
-        visualRestoreTimer = setTimeout(() => {
-            removeStealthMask();
-            visualRestoreTimer = null;
-        }, Math.max(0, Number(delayMs) || 0));
-    }
-
     function bindManualCCIntervention() {
-        document.addEventListener("click", (event) => {
+        const release = (eventName, event) => {
             const target = event.target?.closest?.(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
             if (!target) return;
+            emitLog("subtitle_manual_intervention", { event: eventName });
             removeStealthMask();
+        };
+        document.addEventListener("mouseover", (event) => {
+            release("mouseover", event);
+        }, true);
+        document.addEventListener("mousedown", (event) => {
+            release("mousedown", event);
+        }, true);
+        document.addEventListener("click", (event) => {
+            release("click", event);
         }, true);
     }
 

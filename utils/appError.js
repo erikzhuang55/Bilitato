@@ -39,6 +39,9 @@ export function inferErrorCode(error) {
     "HTTP_400",
     "HTTP_401",
     "HTTP_403",
+    "HTTP_402",
+    "HTTP_429",
+    "HTTP_5XX",
     "TIMEOUT",
     "NETWORK_ERROR",
     "JSON_PARSE_ERROR",
@@ -52,6 +55,11 @@ export function inferErrorCode(error) {
   if (/Model is private|private model|没有权限使用这个模型|无权访问该模型|model.*forbidden|model.*denied/i.test(message)) return "MODEL_ACCESS_DENIED";
   if (/Groq.*(?:Forbidden|拒绝了当前网络请求)|ASR_GROQ_ACCESS_BLOCKED/i.test(message)) return "ASR_GROQ_ACCESS_BLOCKED";
   if (/(?:Groq|硅基流动|transcription|转录).*(?:403|forbidden|Illegal operation)|(?:403|forbidden|Illegal operation).*(?:Groq|硅基流动|transcription|转录)/i.test(message)) return "ASR_FORBIDDEN";
+  if (/Insufficient Balance|余额不足|额度不足|balance.*insufficient/i.test(message)) return "HTTP_402_INSUFFICIENT_BALANCE";
+  if (/402/i.test(message) && /free route|免费路由|route unavailable|模型配置不可用|当前模型配置不可用|provider.*unavailable/i.test(message)) return "HTTP_402_MODEL_UNAVAILABLE";
+  if (/insufficient_quota|request_quota_exceeded|额度已用尽|配额已用尽|quota exceeded/i.test(message)) return "HTTP_429_INSUFFICIENT_QUOTA";
+  if (/queue_exceeded|队列已满|队列拥堵|service unavailable due to queue/i.test(message)) return "HTTP_429_QUEUE_EXCEEDED";
+  if (/Too many requests|rate limit|请求太频繁|限流|too many tokens/i.test(message) && !/groq|转录/i.test(message)) return "HTTP_429_RATE_LIMIT";
   const httpMatch = message.match(/\bHTTP\s+([0-9]{3})\b|API Error\s+([0-9]{3})/i);
   if (httpMatch) return normalizeHttpErrorCode(Number(httpMatch[1] || httpMatch[2]));
   if (/模型长时间没有开始返回内容|stream timeout|first token timeout/i.test(message)) return "AI_STREAM_TIMEOUT";

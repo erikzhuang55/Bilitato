@@ -494,6 +494,7 @@ async function submitFeedbackFromContent(msg, sender) {
 
 const MAX_GLOBAL_CONCURRENCY = 1;
 const TASK_TIMEOUT_MS = 60000;
+const ASR_TASK_TIMEOUT_MS = 120000;
 const EFFICIENCY_TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
 const MAX_SEGMENTS_SUBTITLE_CHARS = 120000;
@@ -2187,7 +2188,7 @@ class ContentProvider {
             if (externalSignal.aborted) forwardAbort();
             else externalSignal.addEventListener("abort", forwardAbort, { once: true });
         }
-        const timeoutId = setTimeout(() => controller.abort("timeout"), TASK_TIMEOUT_MS);
+        const timeoutId = setTimeout(() => controller.abort("timeout"), ASR_TASK_TIMEOUT_MS);
         let response;
         try {
             response = await fetch(GROQ_AUDIO_TRANSCRIBE_URL, {
@@ -2203,7 +2204,7 @@ class ContentProvider {
                     attachSentryContext(timeoutError, {
                         provider: "groq_asr",
                         model: String(groqModel || ""),
-                        timeout_ms: TASK_TIMEOUT_MS,
+                        timeout_ms: ASR_TASK_TIMEOUT_MS,
                         request_stream: false,
                         bypass_queue: true
                     });
@@ -2433,7 +2434,7 @@ class ContentProvider {
             if (externalSignal.aborted) forwardAbort();
             else externalSignal.addEventListener("abort", forwardAbort, { once: true });
         }
-        const timeoutId = setTimeout(() => controller.abort("timeout"), TASK_TIMEOUT_MS);
+        const timeoutId = setTimeout(() => controller.abort("timeout"), ASR_TASK_TIMEOUT_MS);
         let response;
         try {
             response = await fetch(SILICONFLOW_AUDIO_TRANSCRIBE_URL, {
@@ -2449,7 +2450,7 @@ class ContentProvider {
                     attachSentryContext(timeoutError, {
                         provider: "siliconflow_asr",
                         model: String(model || ""),
-                        timeout_ms: TASK_TIMEOUT_MS,
+                        timeout_ms: ASR_TASK_TIMEOUT_MS,
                         request_stream: false,
                         bypass_queue: true
                     });

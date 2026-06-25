@@ -1699,6 +1699,59 @@ function hideProviderQuotaTooltip() {
     panelShadowRoot?.getElementById("provider-quota-tooltip")?.remove();
 }
 
+function hideButtonTooltip() {
+    panelShadowRoot?.getElementById("button-tooltip")?.remove();
+}
+
+function showButtonTooltip(target) {
+    if (!target || !panelShadowRoot) return;
+    const text = String(target.dataset.buttonTooltip || "").trim();
+    if (!text) return;
+    let tooltip = panelShadowRoot.getElementById("button-tooltip");
+    if (!tooltip) {
+        tooltip = document.createElement("div");
+        tooltip.id = "button-tooltip";
+        tooltip.className = "button-tooltip";
+        panelShadowRoot.appendChild(tooltip);
+    }
+    tooltip.textContent = text;
+    const rect = target.getBoundingClientRect();
+    const margin = 7;
+    const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    const tooltipWidth = tooltip.offsetWidth;
+    const tooltipHeight = tooltip.offsetHeight;
+    let placement;
+    let left;
+    let top;
+
+    if (target.classList.contains("side-nav-item")) {
+        placement = "right";
+        left = rect.right + margin;
+        if (left + tooltipWidth + margin > viewportWidth) {
+            placement = "left";
+            left = rect.left - tooltipWidth - margin;
+        }
+        top = rect.top + ((rect.height - tooltipHeight) / 2);
+    } else {
+        placement = target.classList.contains("follow-fab") ? "top" : "bottom";
+        left = rect.left + ((rect.width - tooltipWidth) / 2);
+        top = placement === "top"
+            ? rect.top - tooltipHeight - margin
+            : rect.bottom + margin;
+        if (placement === "bottom" && top + tooltipHeight + margin > viewportHeight) {
+            placement = "top";
+            top = rect.top - tooltipHeight - margin;
+        } else if (placement === "top" && top < margin) {
+            placement = "bottom";
+            top = rect.bottom + margin;
+        }
+    }
+    tooltip.dataset.placement = placement;
+    tooltip.style.left = `${Math.round(Math.max(margin, Math.min(left, viewportWidth - tooltipWidth - margin)))}px`;
+    tooltip.style.top = `${Math.round(Math.max(margin, Math.min(top, viewportHeight - tooltipHeight - margin)))}px`;
+}
+
 function showProviderQuotaTooltip(target) {
     if (!target || !panelShadowRoot) return;
     const text = String(target.dataset.tooltip || "").trim();
@@ -2088,16 +2141,28 @@ function bindPanelDelegatedEvents() {
         }
     });
     panelRoot.addEventListener("mouseover", (event) => {
+        const tooltipButton = event.target.closest("[data-button-tooltip]");
+        if (tooltipButton) showButtonTooltip(tooltipButton);
         const badge = event.target.closest(".provider-free-badge");
         if (badge) showProviderQuotaTooltip(badge);
         const infoIcon = event.target.closest(".custom-option-info");
         if (infoIcon) showProviderQuotaTooltip(infoIcon);
     });
     panelRoot.addEventListener("mouseout", (event) => {
+        const tooltipButton = event.target.closest("[data-button-tooltip]");
+        if (tooltipButton && !tooltipButton.contains(event.relatedTarget)) hideButtonTooltip();
         const badge = event.target.closest(".provider-free-badge");
         if (badge && !badge.contains(event.relatedTarget)) hideProviderQuotaTooltip();
         const infoIcon = event.target.closest(".custom-option-info");
         if (infoIcon && !infoIcon.contains(event.relatedTarget)) hideProviderQuotaTooltip();
+    });
+    panelRoot.addEventListener("focusin", (event) => {
+        const tooltipButton = event.target.closest("[data-button-tooltip]");
+        if (tooltipButton) showButtonTooltip(tooltipButton);
+    });
+    panelRoot.addEventListener("focusout", (event) => {
+        const tooltipButton = event.target.closest("[data-button-tooltip]");
+        if (tooltipButton && !tooltipButton.contains(event.relatedTarget)) hideButtonTooltip();
     });
 }
 
@@ -2128,10 +2193,10 @@ function renderNav() {
     if (!top || !bottom) return;
 
     const items = [
-        { id: "CC", file: "CC.png", slot: "top" },
-        { id: "summary", file: "summary.png", slot: "top" },
-        { id: "chat", file: "chat.png", slot: "top" },
-        { id: "real", file: "real.png", slot: "top" },
+        { id: "CC", file: "CC.png", slot: "top", label: "字幕" },
+        { id: "summary", file: "summary.png", slot: "top", label: "总结" },
+        { id: "chat", file: "chat.png", slot: "top", label: "聊天" },
+        { id: "real", file: "real.png", slot: "top", label: "验真" },
         { id: "debug", file: "settings.png", slot: "top", label: "测试" },
         { id: "copy", file: "copy.png", slot: "bottom", label: "复制" },
         { id: "export", file: "download.png", slot: "bottom", label: "导出" },
@@ -2192,6 +2257,8 @@ function renderNav() {
 
             container.appendChild(node);
         }
+        node.dataset.buttonTooltip = item.label || item.id;
+        node.setAttribute("aria-label", item.label || item.id);
         const existingDot = node.querySelector(".nav-red-dot");
         if (item.id === "settings" && hasFeedbackUnread()) {
             if (!existingDot) {
@@ -2726,8 +2793,8 @@ function renderSummary(panel) {
     
     const copyIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/copy2.png`);
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
-    const actionButton = `<button class="panel-icon-btn" data-action="run-summary" title="重新生成"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>`;
-    const copyBtn = summary ? `<button class="panel-icon-btn" data-action="summary-copy" title="复制"><img src="${copyIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(1);"></button>` : "";
+    const actionButton = `<button class="panel-icon-btn" data-action="run-summary" data-button-tooltip="重新生成" aria-label="重新生成"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>`;
+    const copyBtn = summary ? `<button class="panel-icon-btn" data-action="summary-copy" data-button-tooltip="复制" aria-label="复制"><img src="${copyIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(1);"></button>` : "";
 
     const isExpanded = !!appState.segmentsCollapsed;
     panel.classList.toggle("is-segments-expanded", isExpanded);
@@ -3001,8 +3068,8 @@ function renderCC(panel, rowsOverride) {
         ? (subtitleCacheSource === "cloud" ? "云端缓存" : (isAsrSubtitle ? "ASR转录生成" : "官方AI字幕"))
         : "未检测到字幕";
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
-    const regenBtnHtml = shouldShowRegenerate ? `<button class="panel-icon-btn" data-action="cc-regenerate-transcribe" title="重新生成"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>` : "";
-    const searchBoxHtml = `<div class="cc-search-container"><input type="text" id="cc-search-input" class="cc-search-input" placeholder="搜索字幕..." /><button type="button" class="cc-search-clear" aria-label="清空">×</button></div>`;
+    const regenBtnHtml = shouldShowRegenerate ? `<button class="panel-icon-btn" data-action="cc-regenerate-transcribe" data-button-tooltip="重新转录" aria-label="重新转录"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>` : "";
+    const searchBoxHtml = `<div class="cc-search-container"><input type="text" id="cc-search-input" class="cc-search-input" placeholder="搜索字幕..." /><button type="button" class="cc-search-clear" data-button-tooltip="清空搜索" aria-label="清空搜索">×</button></div>`;
     const progressBarHtml = '';
 
     const controlCenterHtml = `<div class="transcription-control-center"><div class="cc-transcribe-head">${searchBoxHtml}<div class="cc-header-right"><div class="cc-transcribe-status">${escapeHtml(sourceText)}</div><div class="cc-transcribe-actions">${regenBtnHtml}</div></div></div>${(rows.length > 0 || running) ? progressBarHtml : ''}</div>`;
@@ -3041,7 +3108,7 @@ function renderCC(panel, rowsOverride) {
                 ${controlCenterHtml}
                 <div class="cc-viewport">
                     <div class="cc-list" id="cc-list">${rowsHtml}</div>
-                    <button class="follow-fab direction-down" id="btn-follow-now" data-action="follow-now" style="display:none;" title="回到当前">
+                    <button class="follow-fab direction-down" id="btn-follow-now" data-action="follow-now" data-button-tooltip="回到当前" aria-label="回到当前" style="display:none;">
                         <img class="follow-fab-icon" src="${chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/up.png`)}" alt="回到当前">
                     </button>
                 </div>
@@ -3470,7 +3537,7 @@ function renderReal(panel) {
             <div class="page-header">
                 <h3>验真助手 <div class="header-tags"><span class="beta-tag">Beta</span>${rumorsCacheTag}</div></h3>
                 <div class="summary-header-actions" style="display:flex;gap:6px;">
-                    <button class="panel-icon-btn" disabled>
+                    <button class="panel-icon-btn" data-button-tooltip="正在验真" aria-label="正在验真" disabled>
                         <img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);opacity:0.5;">
                     </button>
                 </div>
@@ -3541,8 +3608,8 @@ function renderReal(panel) {
 
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
     const actionButton = rumorsStatus === "processing" 
-        ? `<button class="panel-icon-btn" disabled><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);opacity:0.5;"></button>`
-        : `<button class="panel-icon-btn" data-action="run-rumors" title="${hasRumorsCache ? "重新验真" : "开始验真"}"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>`;
+        ? `<button class="panel-icon-btn" data-button-tooltip="正在验真" aria-label="正在验真" disabled><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);opacity:0.5;"></button>`
+        : `<button class="panel-icon-btn" data-action="run-rumors" data-button-tooltip="${hasRumorsCache ? "重新验真" : "开始验真"}" aria-label="${hasRumorsCache ? "重新验真" : "开始验真"}"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>`;
 
     if (!hasRumorsCache && rumorsStatus !== "processing") {
         const errorView = appState.panelErrors?.real;

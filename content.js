@@ -6886,7 +6886,7 @@ function evaluateTranscriptionNeedAfterDelay(meta) {
     if (appState.subtitleDomDetected || hasNativeCCSubtitleDom()) return;
     appState.transcriptionCapsuleMeta = {
         bvid,
-        cid: Number(meta?.cid || appState.tabState?.activeCid || 0),
+        cid: Number(resolveCid() || meta?.cid || appState.tabState?.activeCid || 0),
         tid: meta?.tid || appState.tabState?.activeTid || null,
         title: String(meta?.title || "").trim()
     };
@@ -6916,7 +6916,7 @@ function hasNativeCCSubtitleDom() {
 async function startTranscriptionFromCapsule() {
     const fallbackMeta = {
         bvid: normalizeBvidCase(appState.injectBvid || resolveCurrentBvid()),
-        cid: Number(appState.injectCid || appState.tabState?.activeCid || 0),
+        cid: Number(resolveCid() || appState.injectCid || appState.tabState?.activeCid || 0),
         tid: appState.tabState?.activeTid || getTidFromUrl(location.href),
         title: cleanBilibiliTitle(document.title)
     };
@@ -7045,7 +7045,12 @@ async function startTranscriptionFromCapsule() {
         });
         const res = await chrome.runtime.sendMessage({
             action: "GET_AUDIO_URL",
-            payload: { ...meta, audioUrl, asrRunId }
+            payload: {
+                ...meta,
+                cid: Number(resolveCid() || meta?.cid || 0),
+                audioUrl,
+                asrRunId
+            }
         });
         if (!res?.ok) throw new Error(res?.error || "Groq 转录失败");
     } catch (error) {
@@ -7103,7 +7108,7 @@ async function handleRegenerateGroqSubtitle() {
     renderContent();
     const payload = {
         bvid: injectBvid,
-        cid: Number(appState.injectCid || appState.tabState?.activeCid || 0),
+        cid: Number(resolveCid() || appState.injectCid || appState.tabState?.activeCid || 0),
         tid: appState.tabState?.activeTid || getTidFromUrl(location.href),
         title: cleanBilibiliTitle(document.title)
     };
@@ -7131,7 +7136,12 @@ async function handleRegenerateGroqSubtitle() {
         });
         const res = await chrome.runtime.sendMessage({
             action: "GET_AUDIO_URL",
-            payload: { ...payload, audioUrl, asrRunId }
+            payload: {
+                ...payload,
+                cid: Number(resolveCid() || payload.cid || 0),
+                audioUrl,
+                asrRunId
+            }
         });
         if (!res?.ok) throw new Error(res?.error || "重新生成失败");
     } catch (error) {

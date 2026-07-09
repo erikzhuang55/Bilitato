@@ -1460,20 +1460,29 @@ async function getCurrentBiliVideoIdentity(tabId, fallback = {}) {
                 const videoData = state.videoData || state?.reduxAsyncConnect?.videoData || {};
                 const pages = Array.isArray(videoData.pages) ? videoData.pages : [];
                 const params = new URLSearchParams(String(location?.search || ""));
-                const pageIndex = Math.max(1, Number(state.p || params.get("p") || fallbackData.page || 1) || 1);
-                const page = pages[pageIndex - 1] || pages.find((item) => Number(item?.cid || 0) === Number(fallbackData.cid || 0)) || pages[0] || {};
+                const pageIndex = Math.max(1, Number(params.get("p") || state.p || fallbackData.page || 1) || 1);
+                const page = pages.find((item) => Number(item?.page || 0) === pageIndex)
+                    || pages[pageIndex - 1]
+                    || pages.find((item) => Number(item?.cid || 0) === Number(fallbackData.cid || 0))
+                    || pages[0]
+                    || {};
                 const href = String(location?.href || "");
                 const routeBvid = href.match(/\/video\/(BV[0-9A-Za-z]+)/i)?.[1] || "";
                 const title = String(videoData.title || document?.title || "").replace(/_哔哩哔哩_bilibili\s*$/i, "").trim();
                 return {
                     aid: Number(videoData.aid || fallbackData.aid || 0),
                     bvid: String(videoData.bvid || routeBvid || fallbackData.bvid || "").trim(),
-                    cid: Number(page.cid || fallbackData.cid || 0),
+                    cid: Number(page.cid || 0),
                     page: pageIndex,
                     title
                 };
             },
-            args: [{ bvid: fallbackBvid, cid: fallbackCid, aid: Number(fallback?.aid || 0), page: Number(fallback?.page || 1) }]
+            args: [{
+                bvid: fallbackBvid,
+                cid: fallbackCid,
+                aid: Number(fallback?.aid || 0),
+                page: Number(fallback?.page || fallback?.tid || 1) || 1
+            }]
         });
         const identity = results?.[0]?.result || {};
         return {
@@ -1931,6 +1940,8 @@ class ContentProvider {
             }
             const media = await this.extractAudioSourceFromTab(tabId, { ...payload, asrProvider });
             if (!media?.url) throw new Error("未提取到音轨地址，可能是付费视频、CDN 限制或页面未完成加载");
+            const effectiveCid = Number(media?.cid || media?.pageCid || cid || 0);
+            const effectiveTid = media?.tid || media?.page || tid || null;
             const mediaSummary = await summarizeMediaLocator(media.url);
             const mediaPageBvid = normalizeBvid(media?.pageBvid || "");
             logASR.info("asr_audio_source_selected", {
@@ -1943,6 +1954,8 @@ class ContentProvider {
                     tab_id: tabId,
                     media_source: String(media?.source || ""),
                     media_page_bvid: mediaPageBvid,
+                    media_cid: effectiveCid,
+                    media_page: media?.page || null,
                     expected_bvid: bvid,
                     source_bvid_matched: !mediaPageBvid || mediaPageBvid === bvid,
                     ...mediaSummary
@@ -1963,7 +1976,13 @@ class ContentProvider {
                     }
                 });
             }
-            await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 20, updatedAt: Date.now() });
+            await updateTabState(tabId, {
+                activeBvid: bvid,
+                activeCid: Number.isFinite(effectiveCid) ? effectiveCid : 0,
+                activeTid: effectiveTid,
+                transcriptionProgress: 20,
+                updatedAt: Date.now()
+            });
             await notifyTranscribeStatus(tabId, { stage: "download", level: "info", text: "正在下载音轨...", progress: 20, bvid });
             const audioFetchStartedAt = Date.now();
             const shouldAllowOversizeDownload = asrProvider === "groq" || asrProvider === "siliconflow";
@@ -2082,13 +2101,20 @@ class ContentProvider {
             if (!rows.length) throw new Error("转录返回为空，未生成可用字幕");
             await handleSubtitleCaptured(tabId, {
                 bvid,
-                cid: Number.isFinite(cid) ? cid : 0,
-                tid,
+                cid: Number.isFinite(effectiveCid) ? effectiveCid : 0,
+                tid: effectiveTid,
                 title: title || media.title || "",
                 subtitle: rows,
                 source: subtitleSource
             });
-            await updateTabState(tabId, { activeBvid: bvid, subtitleSource, transcriptionProgress: 100, updatedAt: Date.now() });
+            await updateTabState(tabId, {
+                activeBvid: bvid,
+                activeCid: Number.isFinite(effectiveCid) ? effectiveCid : 0,
+                activeTid: effectiveTid,
+                subtitleSource,
+                transcriptionProgress: 100,
+                updatedAt: Date.now()
+            });
             await notifyTranscribeStatus(tabId, {
                 stage: "done",
                 level: "success",
@@ -2198,7 +2224,10 @@ class ContentProvider {
                     urls: audio.urls,
                     title: String(result?.identity?.title || payload?.title || "").trim(),
                     source: "playurl_api_audio",
-                    pageBvid: identityBvid || expectedBvid
+                    pageBvid: identityBvid || expectedBvid,
+                    cid: Number(result?.identity?.cid || payload?.cid || 0),
+                    page: Number(result?.identity?.page || payload?.tid || 0) || null,
+                    tid: result?.identity?.page ? String(result.identity.page) : (payload?.tid || null)
                 };
             }
             if (expectedBvid && identityBvid && expectedBvid !== identityBvid) {
@@ -2235,15 +2264,27 @@ class ContentProvider {
                 url: payload.audioUrl,
                 title,
                 source: "content_payload",
-                pageBvid: normalizeBvid(payload?.bvid || "")
+                pageBvid: normalizeBvid(payload?.bvid || ""),
+                cid: Number(payload?.cid || 0),
+                page: Number(payload?.tid || 0) || null,
+                tid: payload?.tid || null
             };
         }
         // 降级：executeScript 读 __playinfo__（兜底，SPA 下可能是旧视频数据）
         const results = await chrome.scripting.executeScript({
             target: { tabId },
             world: "MAIN",
-            func: () => {
+            func: (fallbackData) => {
                 const playinfo = globalThis.__playinfo__ || globalThis.window?.__playinfo__;
+                const state = globalThis.__INITIAL_STATE__ || {};
+                const videoData = state.videoData || state?.reduxAsyncConnect?.videoData || {};
+                const pages = Array.isArray(videoData.pages) ? videoData.pages : [];
+                const params = new URLSearchParams(String(location?.search || ""));
+                const pageIndex = Math.max(1, Number(params.get("p") || state.p || fallbackData.page || 1) || 1);
+                const page = pages.find((item) => Number(item?.page || 0) === pageIndex)
+                    || pages[pageIndex - 1]
+                    || pages.find((item) => Number(item?.cid || 0) === Number(fallbackData.cid || 0))
+                    || {};
                 const data = playinfo?.data || {};
                 const dash = data?.dash || {};
                 const audioList = Array.isArray(dash?.audio) ? dash.audio : [];
@@ -2254,9 +2295,13 @@ class ContentProvider {
                     url: first?.baseUrl || first?.base_url || "",
                     title,
                     source: "main_world_playinfo",
-                    pageBvid: match ? match[1] : ""
+                    pageBvid: match ? match[1] : "",
+                    cid: Number(page?.cid || fallbackData.cid || 0),
+                    page: pageIndex,
+                    tid: String(pageIndex)
                 };
-            }
+            },
+            args: [{ cid: Number(payload?.cid || 0), page: Number(payload?.tid || payload?.page || 1) || 1 }]
         });
         return results?.[0]?.result || null;
     }

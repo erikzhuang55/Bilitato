@@ -145,6 +145,15 @@ describe("native side panel", () => {
     expect(sidepanelCss).toContain(".subtitle-language-option.active");
   });
 
+  it("stores ASR subtitles with the current part cid resolved from playurl", () => {
+    expect(background).toContain("const effectiveCid = Number(media?.cid || media?.pageCid || cid || 0)");
+    expect(background).toContain("cid: Number.isFinite(effectiveCid) ? effectiveCid : 0");
+    expect(background).toContain("cid: Number(result?.identity?.cid || payload?.cid || 0)");
+    expect(background).toContain("Number(params.get(\"p\") || state.p || fallbackData.page || 1)");
+    expect(content).toContain("cid: Number(resolveCid() || meta?.cid || 0)");
+    expect(content).toContain("cid: Number(resolveCid() || payload.cid || 0)");
+  });
+
   it("adds confirmed local cache cleanup actions in settings", () => {
     expect(background).toContain('msg.action === "DELETE_VIDEO_CACHE"');
     expect(background).toContain('msg.action === "DELETE_ALL_VIDEO_CACHE"');

@@ -133,8 +133,11 @@ describe("native side panel", () => {
     expect(content).toContain("resolveSubtitleRowsForOption(option, { forceRefresh: true })");
     expect(content).toContain("saveOfficialSubtitleRows(resolved.option, resolved.rows, resolved.cached)");
     expect(content).toContain("function applyOfficialSubtitleVariantToLocalCache");
+    expect(content).toContain("function syncBiliSubtitleDomLanguage");
+    expect(content).toContain("syncBiliSubtitleDomLanguage(targetOption)");
     expect(content).toContain("subtitleVariants: variants");
     expect(content).toContain("rawSubtitle: rows");
+    expect(content).not.toContain("if (!rows.length && option?.domLabel)");
     expect(content).toContain("该语种暂不支持直接切换");
     expect(content).toContain("BILI_SWITCH_SUBTITLE_LANGUAGE");
     expect(inject).toContain('event.data?.type === "BILI_SWITCH_SUBTITLE_LANGUAGE"');

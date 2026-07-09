@@ -1120,6 +1120,15 @@ async function onInjectMessage(event) {
         pendingPayload.subtitleLanguageLabel = String(languageSwitch.label || "");
         pendingPayload.clearDerived = true;
         appState.activeSubtitleId = String(languageSwitch.id || "");
+    } else if (!pendingPayload.subtitleLanguage) {
+        const selectedSubtitleOption = appState.subtitleOptions.find((item) => getSubtitleOptionId(item) === appState.activeSubtitleId)
+            || pickSubtitle(appState.subtitleOptions);
+        if (selectedSubtitleOption) {
+            pendingPayload.subtitleLanguage = normalizeSubtitleLanguageKey(selectedSubtitleOption) || getSubtitleOptionId(selectedSubtitleOption);
+            pendingPayload.subtitleLanguageLabel = selectedSubtitleOption.label || getSubtitleOptionId(selectedSubtitleOption);
+            pendingPayload.subtitleUrl = selectedSubtitleOption.url || pendingPayload.subtitleUrl;
+            appState.activeSubtitleId = pendingPayload.subtitleLanguage || appState.activeSubtitleId;
+        }
     }
     if (!pendingPayload.bvid) {
         appState.pendingSubtitle = pendingPayload;
@@ -7247,8 +7256,17 @@ function normalizeSubtitleLanguageKey(option) {
         option?.lanDoc,
         option?.domLabel
     ].filter(Boolean).join(" ").toLowerCase();
-    if (/中文|汉语|简体|zh-cn|zh-hans|zh_hans|\bzh\b/.test(text)) return "zh";
-    if (/english|英语|英文|en-us|en-gb|\ben\b/.test(text)) return "en";
+    if (/中文|汉语|简体|繁體|繁体|chinese|zh-cn|zh-tw|zh-hans|zh_hans|zh-hant|zh_hant|\bzh\b|\bchi\b|\bzho\b/.test(text)) return "zh";
+    if (/english|英语|英文|en-us|en-gb|\ben\b|\beng\b/.test(text)) return "en";
+    if (/日本語|日本话|日语|日文|japanese|\bja\b|\bjpn\b|\bjp\b/.test(text)) return "ja";
+    if (/español|espanol|西班牙语|西班牙文|spanish|\bes\b|\bspa\b/.test(text)) return "es";
+    if (/العربية|عربي|阿拉伯语|阿拉伯文|arabic|\bar\b|\bara\b/.test(text)) return "ar";
+    if (/português|portugues|葡萄牙语|葡萄牙文|portuguese|\bpt\b|\bpor\b/.test(text)) return "pt";
+    if (/한국어|조선말|韩语|韓語|korean|\bko\b|\bkor\b/.test(text)) return "ko";
+    if (/français|francais|法语|法文|french|\bfr\b|\bfre\b|\bfra\b/.test(text)) return "fr";
+    if (/deutsch|德语|德文|german|\bde\b|\bger\b|\bdeu\b/.test(text)) return "de";
+    if (/русский|俄语|俄文|russian|\bru\b|\brus\b/.test(text)) return "ru";
+    if (/italiano|意大利语|意大利文|italian|\bit\b|\bita\b/.test(text)) return "it";
     return text.replace(/[（(].*?[）)]/g, "").replace(/\s+/g, "").trim();
 }
 
@@ -7389,10 +7407,16 @@ function getCachedSubtitleRowsForLanguage(option) {
 
 function findSubtitleOption(options, optionId) {
     const targetId = String(optionId || "").trim();
-    return (Array.isArray(options) ? options : []).find((item) => (
+    const targetKey = normalizeSubtitleLanguageKey({ id: targetId, label: targetId, domLabel: targetId });
+    const candidates = (Array.isArray(options) ? options : []).filter((item) => (
         getSubtitleOptionId(item) === targetId ||
-        normalizeSubtitleLanguageKey(item) === targetId
-    )) || null;
+        normalizeSubtitleLanguageKey(item) === targetId ||
+        (targetKey && normalizeSubtitleLanguageKey(item) === targetKey)
+    ));
+    if (!candidates.length) return null;
+    return candidates.find((item) => !!getCachedSubtitleRowsForLanguage(item)?.rows?.length)
+        || candidates.find((item) => !!String(item?.url || "").trim())
+        || candidates[0];
 }
 
 async function resolveSubtitleRowsForOption(option, { forceRefresh = false } = {}) {
@@ -7422,6 +7446,12 @@ async function resolveSubtitleRowsForOption(option, { forceRefresh = false } = {
         }
     }
     return { option: targetOption, rows: [], cached: null };
+}
+
+function syncBiliSubtitleDomLanguage(option) {
+    const label = String(option?.domLabel || option?.label || "").trim();
+    if (!label) return;
+    clickSubtitleLanguageDomOption(label).catch(() => {});
 }
 
 async function saveOfficialSubtitleRows(option, rows, cached = null) {
@@ -7522,17 +7552,11 @@ async function switchOfficialSubtitleLanguage(optionId) {
     const options = await refreshSubtitleOptionsForCurrentVideo({ force: !getOfficialSubtitleOptionsForCurrentVideo().length });
     const option = findSubtitleOption(options, optionId);
     if (!option) throw new Error("未找到该字幕语种");
-    let { option: targetOption, rows, cached } = await resolveSubtitleRowsForOption(option, { forceRefresh: !option?.url });
-    if (!rows.length && option?.domLabel) {
-        await switchSubtitleLanguageByDom(option);
-        return;
-    }
-    if (!rows.length && option?.url) {
-        ({ option: targetOption, rows, cached } = await resolveSubtitleRowsForOption(option, { forceRefresh: true }));
-    }
+    const { option: targetOption, rows, cached } = await resolveSubtitleRowsForOption(option, { forceRefresh: true });
     if (!rows.length && !targetOption?.url) throw new Error("该语种暂不支持直接切换");
     if (!rows.length) throw new Error("该语种字幕为空");
     await saveOfficialSubtitleRows(targetOption, rows, cached);
+    syncBiliSubtitleDomLanguage(targetOption);
     showToast(`已切换为${targetOption.label || targetOption.id}`);
 }
 

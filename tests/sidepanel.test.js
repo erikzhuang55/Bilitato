@@ -130,6 +130,11 @@ describe("native side panel", () => {
     expect(content).toContain(".bpx-player-ctrl-subtitle-major-inner");
     expect(content).toContain("switchSubtitleLanguageByDom");
     expect(content).toContain("mergeSubtitleOptions(apiOptions, domOptions)");
+    expect(content).toContain("resolveSubtitleRowsForOption(option, { forceRefresh: true })");
+    expect(content).toContain("saveOfficialSubtitleRows(resolved.option, resolved.rows, resolved.cached)");
+    expect(content).toContain("function applyOfficialSubtitleVariantToLocalCache");
+    expect(content).toContain("subtitleVariants: variants");
+    expect(content).toContain("rawSubtitle: rows");
     expect(content).toContain("该语种暂不支持直接切换");
     expect(content).toContain("BILI_SWITCH_SUBTITLE_LANGUAGE");
     expect(inject).toContain('event.data?.type === "BILI_SWITCH_SUBTITLE_LANGUAGE"');

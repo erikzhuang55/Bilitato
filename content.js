@@ -7387,24 +7387,47 @@ function getCachedSubtitleRowsForLanguage(option) {
     return { key, rows, entry };
 }
 
-async function switchOfficialSubtitleLanguage(optionId) {
+function findSubtitleOption(options, optionId) {
+    const targetId = String(optionId || "").trim();
+    return (Array.isArray(options) ? options : []).find((item) => (
+        getSubtitleOptionId(item) === targetId ||
+        normalizeSubtitleLanguageKey(item) === targetId
+    )) || null;
+}
+
+async function resolveSubtitleRowsForOption(option, { forceRefresh = false } = {}) {
+    const languageKey = normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default";
+    let targetOption = option;
+    let cached = getCachedSubtitleRowsForLanguage(targetOption);
+    if (cached?.rows?.length) {
+        return { option: targetOption, rows: cached.rows, cached };
+    }
+    if (targetOption?.url) {
+        const rows = await fetchSubtitleBody(targetOption.url);
+        if (rows.length) return { option: targetOption, rows, cached: null };
+    }
+    if (forceRefresh) {
+        const freshOptions = await refreshSubtitleOptionsForCurrentVideo({ force: true });
+        const freshOption = findSubtitleOption(freshOptions, languageKey);
+        if (freshOption) {
+            targetOption = freshOption;
+            cached = getCachedSubtitleRowsForLanguage(targetOption);
+            if (cached?.rows?.length) {
+                return { option: targetOption, rows: cached.rows, cached };
+            }
+            if (targetOption?.url) {
+                const rows = await fetchSubtitleBody(targetOption.url);
+                if (rows.length) return { option: targetOption, rows, cached: null };
+            }
+        }
+    }
+    return { option: targetOption, rows: [], cached: null };
+}
+
+async function saveOfficialSubtitleRows(option, rows, cached = null) {
     const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
     if (!bvid) throw new Error("未获取到当前视频");
-    const options = await refreshSubtitleOptionsForCurrentVideo({ force: !getOfficialSubtitleOptionsForCurrentVideo().length });
-    const targetId = String(optionId || "").trim();
-    const option = options.find((item) => getSubtitleOptionId(item) === targetId || normalizeSubtitleLanguageKey(item) === targetId);
-    if (!option) throw new Error("未找到该字幕语种");
     const languageKey = normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default";
-    const cached = getCachedSubtitleRowsForLanguage(option);
-    const rows = cached?.rows?.length
-        ? cached.rows
-        : (option?.url ? await fetchSubtitleBody(option.url) : []);
-    if (!rows.length && option?.domLabel) {
-        await switchSubtitleLanguageByDom(option);
-        return;
-    }
-    if (!rows.length && !option?.url) throw new Error("该语种暂不支持直接切换");
-    if (!rows.length) throw new Error("该语种字幕为空");
     const res = await chrome.runtime.sendMessage({
         action: "SUBTITLE_CAPTURED",
         payload: {
@@ -7421,12 +7444,96 @@ async function switchOfficialSubtitleLanguage(optionId) {
         }
     });
     if (!res?.ok) throw new Error(res?.error || "切换字幕失败");
-    appState.activeSubtitleId = languageKey;
-    appState.subtitleCapturedBvid = bvid;
+    applyOfficialSubtitleVariantToLocalCache({
+        bvid,
+        option,
+        rows,
+        cached,
+        languageKey
+    });
+    renderContent();
+    syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true })
+        .then(() => {
+            if (appState.activePage === "CC") renderContent();
+        })
+        .catch(() => {});
+}
+
+function applyOfficialSubtitleVariantToLocalCache({ bvid, option, rows, cached = null, languageKey = "" } = {}) {
+    const target = normalizeBvidCase(bvid || resolveCurrentBvid() || "");
+    if (!target || !Array.isArray(rows) || !rows.length) return;
+    const cid = resolveCid();
+    const language = String(languageKey || normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default").trim() || "default";
+    const key = createSubtitleCacheKey({ bvid: target, cid, language });
+    const existingCache = appState.cache && typeof appState.cache === "object" ? appState.cache : {};
+    const variants = existingCache.subtitleVariants && typeof existingCache.subtitleVariants === "object"
+        ? { ...existingCache.subtitleVariants }
+        : {};
+    const processedSubtitle = Array.isArray(cached?.entry?.processedSubtitle) && cached.entry.processedSubtitle.length
+        ? cached.entry.processedSubtitle
+        : (Array.isArray(existingCache.processedSubtitle) && String(existingCache.subtitleLanguage || "") === language
+            ? existingCache.processedSubtitle
+            : []);
+    variants[key] = {
+        ...(variants[key] && typeof variants[key] === "object" ? variants[key] : {}),
+        bvid: target,
+        cid,
+        language,
+        languageLabel: String(option?.label || getSubtitleOptionId(option) || language),
+        subtitleUrl: String(option?.url || cached?.entry?.subtitleUrl || ""),
+        rawSubtitle: rows,
+        processedSubtitle,
+        updatedAt: Date.now()
+    };
+    appState.cache = {
+        ...existingCache,
+        bvid: target,
+        cid,
+        tid: getTidFromUrl(location.href),
+        title: cleanBilibiliTitle(document.title),
+        subtitleSource: "official",
+        subtitleLanguage: language,
+        subtitleLanguageLabel: String(option?.label || getSubtitleOptionId(option) || language),
+        subtitleUrl: String(option?.url || cached?.entry?.subtitleUrl || ""),
+        rawSubtitle: rows,
+        processedSubtitle,
+        subtitleVariants: variants,
+        updatedAt: Date.now()
+    };
+    appState.tabState = {
+        ...(appState.tabState || {}),
+        activeBvid: target,
+        activeCid: cid || appState.tabState?.activeCid || 0,
+        activeTid: getTidFromUrl(location.href) || appState.tabState?.activeTid || null,
+        subtitleSource: "official",
+        subtitleLanguage: language,
+        subtitleLanguageLabel: String(option?.label || getSubtitleOptionId(option) || language),
+        transcriptionProgress: 0,
+        updatedAt: Date.now()
+    };
+    appState.activeSubtitleId = language;
+    appState.subtitleCapturedBvid = target;
     appState.lastSubtitleForwardAt = Date.now();
-    await syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true });
-    if (appState.activePage === "CC") renderContent();
-    showToast(`已切换为${option.label || option.id}`);
+}
+
+async function switchOfficialSubtitleLanguage(optionId) {
+    const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    if (!bvid) throw new Error("未获取到当前视频");
+    const options = await refreshSubtitleOptionsForCurrentVideo({ force: !getOfficialSubtitleOptionsForCurrentVideo().length });
+    const option = findSubtitleOption(options, optionId);
+    if (!option) throw new Error("未找到该字幕语种");
+    let { option: targetOption, rows, cached } = await resolveSubtitleRowsForOption(option, { forceRefresh: !option?.url });
+    if (!rows.length && option?.domLabel) {
+        await switchSubtitleLanguageByDom(option);
+        return;
+    }
+    if (!rows.length && option?.url) {
+        ({ option: targetOption, rows, cached } = await resolveSubtitleRowsForOption(option, { forceRefresh: true }));
+    }
+    if (!rows.length && !targetOption?.url) throw new Error("该语种暂不支持直接切换");
+    if (!rows.length) throw new Error("该语种字幕为空");
+    await saveOfficialSubtitleRows(targetOption, rows, cached);
+    showToast(`已切换为${targetOption.label || targetOption.id}`);
 }
 
 async function switchSubtitleLanguageByDom(option) {
@@ -7447,7 +7554,13 @@ async function switchSubtitleLanguageByDom(option) {
         appState.pendingSubtitleLanguageSwitch = null;
         throw new Error("未找到该字幕语种");
     }
-    await waitForSubtitleSwitchForward(marker);
+    try {
+        await waitForSubtitleSwitchForward(marker);
+    } catch (error) {
+        const resolved = await resolveSubtitleRowsForOption(option, { forceRefresh: true });
+        if (!resolved.rows.length) throw error;
+        await saveOfficialSubtitleRows(resolved.option, resolved.rows, resolved.cached);
+    }
     await syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true });
     if (appState.activePage === "CC") renderContent();
     showToast(`已切换为${label}`);

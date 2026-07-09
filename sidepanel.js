@@ -27,6 +27,7 @@ const state = {
     chatGuideHidden: false,
     settingsSaveTimer: null,
     feedbackDraft: { type: "bug", title: "", content: "", includeLogs: true },
+    cloudCachePrefs: { all: false, current: false },
     releaseChecked: false,
     summaryRatio: 0.6,
     segmentsExpanded: false,
@@ -87,6 +88,13 @@ function formatMetricQuotaValue(remaining, limit) {
     return hasLimit ? `${remaining}/${limit}` : String(remaining);
 }
 
+function normalizeCloudCachePrefs(value = {}) {
+    return {
+        all: !!value?.all,
+        current: !!value?.current
+    };
+}
+
 function isBiliTab(tab) {
     return /^https:\/\/www\.bilibili\.com\/(video|list)\//i.test(String(tab?.url || ""));
 }
@@ -137,6 +145,7 @@ async function refreshState({ quiet = false, hydrate = false } = {}) {
         state.tabState = result.tabState || null;
         state.cache = result.cache || null;
         state.settings = result.settings || {};
+        state.cloudCachePrefs = normalizeCloudCachePrefs(result.cloudCachePrefs);
         if (!state.initialized) {
             const preferred = String(state.settings.defaultOpenPage || "CC");
             state.activePage = ["CC", "summary", "chat", "real"].includes(preferred) ? preferred : "CC";
@@ -154,6 +163,7 @@ async function refreshState({ quiet = false, hydrate = false } = {}) {
             tabState: state.tabState,
             cache: state.cache,
             settings: state.settings,
+            cloudCachePrefs: state.cloudCachePrefs,
             settingsUiOptions: state.settingsUiOptions,
             subtitleOptions: state.subtitleOptions,
             activeSubtitleId: state.activeSubtitleId,
@@ -772,6 +782,12 @@ function renderSettings() {
     const asrProvider = settings.asrProvider === "siliconflow" ? "siliconflow" : "groq";
     const guidedVisible = promptSettings.mode === "custom" ? "settings-hidden" : "";
     const customPromptVisible = promptSettings.mode === "custom" ? "" : "settings-hidden";
+    const cloudCachePrefs = normalizeCloudCachePrefs(state.cloudCachePrefs);
+    const allCloudDisabledOn = !!(cloudCachePrefs.all || settings.disableCloudCacheRead);
+    const currentCloudDisabled = (allCloudDisabledOn || cloudCachePrefs.current) ? "checked" : "";
+    const allCloudDisabled = allCloudDisabledOn ? "checked" : "";
+    const currentCloudDisabledAttr = getBvid() && !allCloudDisabledOn ? "" : "disabled";
+    const currentCloudLabel = allCloudDisabledOn ? "本视频不拉取云端缓存（已由所有视频设置覆盖）" : "本视频不拉取云端缓存";
     const secretField = (id, value, placeholder = "") => `<div class="settings-secret-field"><input id="${id}" type="password" value="${escapeHtml(value || "")}" placeholder="${escapeHtml(placeholder)}" autocomplete="off"><button type="button" class="settings-secret-toggle" data-action="toggle-secret" data-target="${id}">显示</button></div><div class="field-error" id="${id}-error"></div>`;
     const asrRegisterUrl = settings.asrProvider === "siliconflow"
         ? "https://cloud.siliconflow.cn/account/ak"
@@ -808,7 +824,12 @@ function renderSettings() {
                 <div class="field"><label>调用模式</label><select id="setting-pref-mode"><option value="quality" ${settings.prefMode !== "efficiency" ? "selected" : ""}>高速模式</option><option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>省流模式</option></select></div>
                 <div class="field"><label>默认页面</label><select id="setting-default-page">${["CC", "summary", "chat", "real"].map((key) => `<option value="${key}" ${settings.defaultOpenPage === key ? "selected" : ""}>${{CC:"字幕",summary:"总结",chat:"聊天",real:"验真"}[key]}</option>`).join("")}</select></div>
                 <div class="field"><label>异常上报</label><select id="setting-sentry"><option value="true" ${settings.sentryEnabled ? "selected" : ""}>开启</option><option value="false" ${!settings.sentryEnabled ? "selected" : ""}>关闭</option></select></div>
-                <div class="settings-action-row"><button class="btn secondary" data-action="delete-current-cache">删除当前视频缓存</button><button class="btn secondary" data-action="delete-all-cache">删除所有视频缓存</button></div>
+                <div class="settings-group-title">缓存管理</div>
+                <div class="settings-action-row"><button class="btn secondary" data-action="delete-current-cache">删除当前视频 AI 结果缓存</button><button class="btn secondary" data-action="delete-all-cache">删除所有视频 AI 结果缓存</button></div>
+                <div class="settings-check-grid">
+                    <label class="settings-check-row"><input id="setting-disable-cloud-current" type="checkbox" ${currentCloudDisabled} ${currentCloudDisabledAttr}><span>${escapeHtml(currentCloudLabel)}</span></label>
+                    <label class="settings-check-row"><input id="setting-disable-cloud-all" type="checkbox" ${allCloudDisabled}><span>所有视频不拉取云端缓存</span></label>
+                </div>
             </div>
             <div class="settings-group">
                 <div class="settings-group-title">个性化</div>
@@ -1166,6 +1187,7 @@ async function saveSettings({ silent = false } = {}) {
         prefMode: document.getElementById("setting-pref-mode")?.value || "quality",
         defaultOpenPage: document.getElementById("setting-default-page")?.value || "CC",
         sentryEnabled: document.getElementById("setting-sentry")?.value === "true",
+        disableCloudCacheRead: document.getElementById("setting-disable-cloud-all")?.checked === true,
         promptSettings: {
             ...(current.promptSettings || {}),
             mode: document.getElementById("setting-prompt-mode")?.value || "guided",
@@ -1400,21 +1422,40 @@ async function handleAction(actionNode) {
 async function deleteCurrentVideoCache() {
     const bvid = getBvid();
     if (!bvid) throw new Error("未获取到当前视频");
-    if (!window.confirm("确定删除当前视频的本地缓存吗？字幕、总结、分段、聊天记录和验真结果都会被清除。")) return;
+    if (!window.confirm("确定删除当前视频的 AI 结果缓存吗？会清除总结、分段、聊天记录和验真结果，本地字幕缓存会保留。")) return;
     const result = await runtimeMessage({ action: "DELETE_VIDEO_CACHE", bvid });
     state.cache = null;
+    await updateCloudCacheReadPref("current", true, { silent: true, render: false });
+    const currentCheckbox = document.getElementById("setting-disable-cloud-current");
+    if (currentCheckbox) currentCheckbox.checked = true;
     await refreshState({ quiet: true, skipCloud: true });
-    showToast("已删除当前视频缓存");
+    showToast("已删除当前视频 AI 结果缓存，并已关闭本视频云端缓存拉取");
     return result;
 }
 
 async function deleteAllVideoCache() {
-    if (!window.confirm("确定删除所有视频的本地缓存吗？所有视频的字幕、总结、分段、聊天记录和验真结果都会被清除。")) return;
+    if (!window.confirm("确定删除所有视频的 AI 结果缓存吗？会清除总结、分段、聊天记录和验真结果，本地字幕缓存会保留。")) return;
     const result = await runtimeMessage({ action: "DELETE_ALL_VIDEO_CACHE" });
     state.cache = null;
+    await updateCloudCacheReadPref("all", true, { silent: true, render: false });
+    const allCheckbox = document.getElementById("setting-disable-cloud-all");
+    if (allCheckbox) allCheckbox.checked = true;
     await refreshState({ quiet: true, skipCloud: true });
-    showToast(`已删除 ${Number(result?.deleted || 0)} 条视频缓存`);
+    showToast(`已删除 ${Number(result?.deleted || 0)} 条 AI 结果缓存，并已关闭所有视频云端缓存拉取`);
     return result;
+}
+
+async function updateCloudCacheReadPref(scope, disabled, options = {}) {
+    const result = await runtimeMessage({
+        action: "SET_CLOUD_CACHE_READ_PREF",
+        scope,
+        disabled,
+        bvid: getBvid()
+    });
+    if (result.settings) state.settings = result.settings;
+    state.cloudCachePrefs = normalizeCloudCachePrefs(result.cloudCachePrefs);
+    if (options.render !== false) render();
+    if (!options.silent) showToast("缓存设置已保存");
 }
 
 app.addEventListener("click", (event) => {
@@ -1542,6 +1583,20 @@ app.addEventListener("change", (event) => {
         const input = document.getElementById("setting-model");
         if (input) input.classList.toggle("settings-hidden", event.target.value !== "custom");
     }
+    if (event.target.id === "setting-disable-cloud-current") {
+        updateCloudCacheReadPref("current", !!event.target.checked).catch((error) => {
+            event.target.checked = !event.target.checked;
+            showToast(error?.message || "保存失败");
+        });
+        return;
+    }
+    if (event.target.id === "setting-disable-cloud-all") {
+        updateCloudCacheReadPref("all", !!event.target.checked).catch((error) => {
+            event.target.checked = !event.target.checked;
+            showToast(error?.message || "保存失败");
+        });
+        return;
+    }
     if (event.target.id?.startsWith("setting-")) scheduleSettingsSave();
     if (event.target.id === "feedback-type") state.feedbackDraft.type = event.target.value;
     if (event.target.id === "feedback-include-logs") state.feedbackDraft.includeLogs = event.target.checked;
@@ -1561,7 +1616,7 @@ app.addEventListener("keydown", (event) => {
 });
 
 chrome.storage.onChanged.addListener((changes) => {
-    if (Object.keys(changes || {}).some((key) => key === "settings" || key.startsWith("cache_") || key.startsWith("tabState_"))) {
+    if (Object.keys(changes || {}).some((key) => key === "settings" || key === "cloudReadDisabledBvids" || key.startsWith("cache_") || key.startsWith("tabState_"))) {
         refreshState({ quiet: true });
     }
 });

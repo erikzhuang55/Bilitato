@@ -463,6 +463,7 @@ const appState = {
     feedbackHasSubmission: false,
     feedbackSeenTimer: null,
     feedbackVisibleUnreadIds: new Set(),
+    cloudCachePrefs: { all: false, current: false },
     lastSettingsUsageEventSignature: "",
     playInfo: null,
     playInfoUpdatedAt: 0,
@@ -482,6 +483,13 @@ function getFeedbackState() {
         errorText: "",
         loadedAt: 0,
         ...(appState.feedback || {})
+    };
+}
+
+function normalizeCloudCachePrefs(value = {}) {
+    return {
+        all: !!value?.all,
+        current: !!value?.current
     };
 }
 
@@ -1096,7 +1104,21 @@ function onStorageChanged(changes, areaName) {
     const tabStateBefore = appState.tabState;
     if (changes.settings?.newValue) {
         appState.settings = changes.settings.newValue;
+        appState.cloudCachePrefs = {
+            ...normalizeCloudCachePrefs(appState.cloudCachePrefs),
+            all: !!changes.settings.newValue.disableCloudCacheRead
+        };
         globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
+    }
+    if (changes.cloudReadDisabledBvids) {
+        const target = normalizeBvidCase(resolveCurrentBvid() || appState.cache?.bvid || "");
+        const map = changes.cloudReadDisabledBvids.newValue && typeof changes.cloudReadDisabledBvids.newValue === "object"
+            ? changes.cloudReadDisabledBvids.newValue
+            : {};
+        appState.cloudCachePrefs = {
+            ...normalizeCloudCachePrefs(appState.cloudCachePrefs),
+            current: !!(target && map[target])
+        };
     }
     if (changes.providers?.newValue) appState.providers = changes.providers.newValue;
     const newKey = String(changes.settings?.newValue?.apiKey || "").trim();
@@ -1692,6 +1714,7 @@ async function loadBootstrapData() {
     appState.cache = bootstrapCache && normalizeBvidCase(bootstrapCache?.bvid || "") === bootstrapBvid ? bootstrapCache : null;
     appState.settings = res?.settings || null;
     appState.providers = res?.providers || null;
+    appState.cloudCachePrefs = normalizeCloudCachePrefs(res?.cloudCachePrefs);
     if (res?.feedback) {
         setFeedbackState({
             ...res.feedback,
@@ -4002,6 +4025,13 @@ function renderSettings(panel) {
     const modelLabelInfo = providerKey === "modelscope"
         ? `<span class="settings-info-icon" data-tooltip="${escapeHtmlAttr(modelScopeModelInfo)}">i</span>`
         : "";
+    const cloudCachePrefs = normalizeCloudCachePrefs(appState.cloudCachePrefs);
+    const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    const allCloudDisabledOn = !!(cloudCachePrefs.all || settings.disableCloudCacheRead);
+    const currentCloudDisabled = (allCloudDisabledOn || cloudCachePrefs.current) ? "checked" : "";
+    const allCloudDisabled = (cloudCachePrefs.all || settings.disableCloudCacheRead) ? "checked" : "";
+    const currentCloudDisabledAttr = currentBvid && !allCloudDisabledOn ? "" : "disabled";
+    const currentCloudLabel = allCloudDisabledOn ? "本视频不拉取云端缓存（已由所有视频设置覆盖）" : "本视频不拉取云端缓存";
     const asrProviderKey = String(settings.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
     const asrProviders = {
         groq: {
@@ -4174,9 +4204,20 @@ function renderSettings(panel) {
                     { value: "false", label: "关闭" },
                     { value: "true", label: "开启" }
                 ], settings.sentryEnabled ? "true" : "false")}
+                <div class="settings-group-title">缓存管理</div>
                 <div class="settings-action-row">
-                    <button type="button" class="panel-btn ghost" data-action="settings-delete-current-cache">删除当前视频缓存</button>
-                    <button type="button" class="panel-btn ghost" data-action="settings-delete-all-cache">删除所有视频缓存</button>
+                    <button type="button" class="panel-btn ghost" data-action="settings-delete-current-cache">删除当前视频 AI 结果缓存</button>
+                    <button type="button" class="panel-btn ghost" data-action="settings-delete-all-cache">删除所有视频 AI 结果缓存</button>
+                </div>
+                <div class="settings-check-grid">
+                    <label class="settings-check-row">
+                        <input id="settings-disable-cloud-current" class="settings-cache-checkbox" type="checkbox" ${currentCloudDisabled} ${currentCloudDisabledAttr}>
+                        <span>${escapeHtml(currentCloudLabel)}</span>
+                    </label>
+                    <label class="settings-check-row">
+                        <input id="settings-disable-cloud-all" class="settings-cache-checkbox" type="checkbox" ${allCloudDisabled}>
+                        <span>所有视频不拉取云端缓存</span>
+                    </label>
                 </div>
                 <!--
                 <label>Debug</label>
@@ -4344,6 +4385,18 @@ function renderSettings(panel) {
         });
     }
     applyProviderModelVisibility();
+    panel.querySelector("#settings-disable-cloud-current")?.addEventListener("change", (event) => {
+        updateCloudCacheReadPref("current", !!event.target.checked).catch((error) => {
+            event.target.checked = !event.target.checked;
+            showToast(error?.message || "保存失败");
+        });
+    });
+    panel.querySelector("#settings-disable-cloud-all")?.addEventListener("change", (event) => {
+        updateCloudCacheReadPref("all", !!event.target.checked).catch((error) => {
+            event.target.checked = !event.target.checked;
+            showToast(error?.message || "保存失败");
+        });
+    });
     const applyPromptModeVisibility = () => {
         const mode = String(promptModeSelect?.value || "guided") === "custom" ? "custom" : "guided";
         if (promptGuidedWrap) promptGuidedWrap.classList.toggle("settings-hidden", mode !== "guided");
@@ -4519,7 +4572,7 @@ async function deleteCurrentVideoCacheFromPanel() {
         showToast("未获取到当前视频");
         return;
     }
-    const ok = window.confirm("确定删除当前视频的本地缓存吗？字幕、总结、分段、聊天记录和验真结果都会被清除。");
+    const ok = window.confirm("确定删除当前视频的 AI 结果缓存吗？会清除总结、分段、聊天记录和验真结果，本地字幕缓存会保留。");
     if (!ok) return;
     const res = await chrome.runtime.sendMessage({ action: "DELETE_VIDEO_CACHE", bvid });
     if (!res?.ok) {
@@ -4528,13 +4581,16 @@ async function deleteCurrentVideoCacheFromPanel() {
     }
     appState.cache = null;
     resetTaskUiForDeletedCache();
+    await updateCloudCacheReadPref("current", true, { silent: true, render: false });
+    const currentCheckbox = panelShadowRoot?.getElementById("settings-disable-cloud-current");
+    if (currentCheckbox) currentCheckbox.checked = true;
     await syncCacheFromBackground(bvid, { preserveCacheOnMiss: false, force: true, skipCloud: true }).catch(() => {});
     renderContent();
-    showToast("已删除当前视频缓存");
+    showToast("已删除当前视频 AI 结果缓存，并已关闭本视频云端缓存拉取");
 }
 
 async function deleteAllVideoCacheFromPanel() {
-    const ok = window.confirm("确定删除所有视频的本地缓存吗？所有视频的字幕、总结、分段、聊天记录和验真结果都会被清除。");
+    const ok = window.confirm("确定删除所有视频的 AI 结果缓存吗？会清除总结、分段、聊天记录和验真结果，本地字幕缓存会保留。");
     if (!ok) return;
     const res = await chrome.runtime.sendMessage({ action: "DELETE_ALL_VIDEO_CACHE" });
     if (!res?.ok) {
@@ -4543,8 +4599,35 @@ async function deleteAllVideoCacheFromPanel() {
     }
     appState.cache = null;
     resetTaskUiForDeletedCache();
+    await updateCloudCacheReadPref("all", true, { silent: true, render: false });
+    const allCheckbox = panelShadowRoot?.getElementById("settings-disable-cloud-all");
+    if (allCheckbox) allCheckbox.checked = true;
+    const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    if (currentBvid) {
+        await syncCacheFromBackground(currentBvid, { preserveCacheOnMiss: false, force: true, skipCloud: true }).catch(() => {});
+    }
     renderContent();
-    showToast(`已删除 ${Number(res.deleted || 0)} 条视频缓存`);
+    showToast(`已删除 ${Number(res.deleted || 0)} 条 AI 结果缓存，并已关闭所有视频云端缓存拉取`);
+}
+
+async function updateCloudCacheReadPref(scope, disabled, options = {}) {
+    const bvid = normalizeBvidCase(resolveCurrentBvid() || appState.cache?.bvid || "");
+    const res = await chrome.runtime.sendMessage({
+        action: "SET_CLOUD_CACHE_READ_PREF",
+        scope,
+        disabled,
+        bvid
+    });
+    if (!res?.ok) throw new Error(res?.error || "保存失败");
+    if (res.settings) appState.settings = res.settings;
+    appState.cloudCachePrefs = normalizeCloudCachePrefs(res.cloudCachePrefs);
+    if (disabled && (scope === "all" || scope === "current")) {
+        appState.cloudReadState = createCloudReadState(bvid, "failed", Number(appState.cloudReadState?.requestId || 0) + 1);
+    } else {
+        appState.cloudReadState = createCloudReadState(bvid, "idle", Number(appState.cloudReadState?.requestId || 0) + 1);
+    }
+    if (options.render !== false) renderContent();
+    if (!options.silent) showToast("缓存设置已保存");
 }
 
 function resetTaskUiForDeletedCache() {
@@ -5514,10 +5597,14 @@ function isCloudReadLoadingForCurrentVideo() {
 }
 
 function shouldAttemptCloudReadForVideo(bvid) {
+    const prefs = normalizeCloudCachePrefs(appState.cloudCachePrefs);
+    if (prefs.all || prefs.current) return false;
     return shouldAttemptCloudReadForVideoState(appState.cache, appState.cloudReadState, bvid || resolveCurrentBvid());
 }
 
 function shouldAttemptCloudReadForPage(page) {
+    const prefs = normalizeCloudCachePrefs(appState.cloudCachePrefs);
+    if (prefs.all || prefs.current) return false;
     return shouldAttemptCloudReadForPageState(appState.cache, appState.cloudReadState, resolveCurrentBvid(), page);
 }
 
@@ -6009,6 +6096,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         prefMode: panel.querySelector("#settings-pref-mode")?.value || "quality",
         defaultOpenPage,
         sentryEnabled: panel.querySelector("#settings-sentry-enabled")?.value === "true",
+        disableCloudCacheRead: panel.querySelector("#settings-disable-cloud-all")?.checked === true,
         sentryDsn: String(appState.settings?.sentryDsn || "").trim(),
         debugMode: panel.querySelector("#settings-debug-mode")?.value === "true",
         promptSettings: {
@@ -7967,6 +8055,7 @@ async function syncCacheFromBackground(bvid, options = {}) {
             skipCloud: options.skipCloud !== false
         });
         if (!res?.ok) return;
+        if (res.cloudCachePrefs) appState.cloudCachePrefs = normalizeCloudCachePrefs(res.cloudCachePrefs);
         const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href));
         if (routeBvid && routeBvid !== target) return;
         const cache = res.cache || null;

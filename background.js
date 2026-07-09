@@ -512,6 +512,7 @@ const SUPABASE_DEFAULT_USAGE_DAILY_RPC = "increment_feature_usage_daily";
 const DEFAULT_SENTRY_DSN = "https://04879b2bd5fc72eba741a402e26c4790@o4511384082055168.ingest.de.sentry.io/4511384299634768";
 const TASK_KEYS = ["summary", "segments", "rumors"];
 const CLOUD_CACHE_KEYS = ["subtitle", ...TASK_KEYS];
+const CLOUD_READ_DISABLED_BVIDS_KEY = "cloudReadDisabledBvids";
 const CLOUD_TASK_FIELD_MAP = {
     summary: ["summary", "summary_model", "summary_upvotes", "summary_downvotes"],
     segments: ["segments", "segments_model", "segments_upvotes", "segments_downvotes"],
@@ -540,7 +541,8 @@ const DEFAULT_SETTINGS = {
     segmentPromptVariant: "test",
     debugMode: false,
     sentryEnabled: true,
-    sentryDsn: DEFAULT_SENTRY_DSN
+    sentryDsn: DEFAULT_SENTRY_DSN,
+    disableCloudCacheRead: false
 };
 const LEGACY_MODELSCOPE_MODELS = new Set([
     "moonshotai/Kimi-K2.5",
@@ -1027,17 +1029,46 @@ async function handleMessage(msg, sender) {
     if (msg.action === "DELETE_VIDEO_CACHE") {
         const bvid = normalizeBvid(msg.bvid);
         if (!bvid) return { deleted: 0 };
-        const keys = [`cache_${bvid}`, `cache_${String(msg.bvid || "").toUpperCase()}`];
-        await chrome.storage.local.remove([...new Set(keys)]);
-        cacheMemory.delete(bvid);
+        const current = await getCache(bvid);
+        if (!current || !Object.keys(current).length) return { deleted: 0 };
+        await mergeCacheByBvid(bvid, buildDerivedCacheClearPatch());
         return { deleted: 1 };
     }
     if (msg.action === "DELETE_ALL_VIDEO_CACHE") {
         const data = await chrome.storage.local.get(null);
-        const keys = Object.keys(data || {}).filter((key) => key.startsWith("cache_"));
-        if (keys.length) await chrome.storage.local.remove(keys);
-        cacheMemory.clear();
-        return { deleted: keys.length };
+        const entries = Object.entries(data || {}).filter(([key, value]) => key.startsWith("cache_") && value && typeof value === "object");
+        const seen = new Set();
+        await Promise.all(entries.map(async ([key, value]) => {
+            const bvid = normalizeBvid(value?.bvid || key.replace(/^cache_/i, ""));
+            if (!bvid || seen.has(bvid)) return;
+            seen.add(bvid);
+            await mergeCacheByBvid(bvid, buildDerivedCacheClearPatch());
+        }));
+        return { deleted: seen.size };
+    }
+    if (msg.action === "SET_CLOUD_CACHE_READ_PREF") {
+        const scope = String(msg.scope || "").toLowerCase();
+        const disabled = !!msg.disabled;
+        if (scope === "all") {
+            const settings = await mergeSettings({ disableCloudCacheRead: disabled });
+            return { settings, cloudCachePrefs: await getCloudCacheReadPrefs(msg.bvid, settings) };
+        }
+        if (scope === "current") {
+            const bvid = normalizeBvid(msg.bvid);
+            if (!bvid) throw new Error("未获取到当前视频");
+            const data = await chrome.storage.local.get([CLOUD_READ_DISABLED_BVIDS_KEY]);
+            const map = data?.[CLOUD_READ_DISABLED_BVIDS_KEY] && typeof data[CLOUD_READ_DISABLED_BVIDS_KEY] === "object"
+                ? { ...data[CLOUD_READ_DISABLED_BVIDS_KEY] }
+                : {};
+            if (disabled) map[bvid] = true;
+            else delete map[bvid];
+            await chrome.storage.local.set({ [CLOUD_READ_DISABLED_BVIDS_KEY]: map });
+            return { cloudCachePrefs: await getCloudCacheReadPrefs(bvid) };
+        }
+        return { cloudCachePrefs: await getCloudCacheReadPrefs(msg.bvid) };
+    }
+    if (msg.action === "GET_CLOUD_CACHE_READ_PREFS") {
+        return { cloudCachePrefs: await getCloudCacheReadPrefs(msg.bvid) };
     }
     if (msg.action === "GET_BOOTSTRAP") {
         if (!tabId) return { tabState: null, cache: null };
@@ -1048,7 +1079,8 @@ async function handleMessage(msg, sender) {
         }
         const cache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
         const feedback = await fetchFeedbackState(settings).catch(() => ({ rows: [], unreadCount: 0, enabled: false }));
-        return { tabId, tabState, cache, settings, providers: PROVIDERS, feedback };
+        const cloudCachePrefs = await getCloudCacheReadPrefs(tabState?.activeBvid, settings);
+        return { tabId, tabState, cache, settings, providers: PROVIDERS, feedback, cloudCachePrefs };
     }
     if (msg.action === "GET_CACHE") {
         const expected = normalizeBvid(msg.bvid);
@@ -1061,7 +1093,7 @@ async function handleMessage(msg, sender) {
                 await hydrateCloudCacheIfNeeded(bvid, CLOUD_CACHE_KEYS, settings);
             }
             const cache = bvid ? await getCache(bvid) : null;
-            return { bvid, cache, tabState };
+            return { bvid, cache, tabState, cloudCachePrefs: await getCloudCacheReadPrefs(bvid, settings) };
         }
         const settings = await getResolvedSettings();
         if (msg?.skipCloud !== true) {
@@ -1069,7 +1101,7 @@ async function handleMessage(msg, sender) {
         }
         const cache = await getCache(expected);
         const tabState = tabId ? await getTabState(tabId) : null;
-        return { bvid: expected, cache, tabState };
+        return { bvid: expected, cache, tabState, cloudCachePrefs: await getCloudCacheReadPrefs(expected, settings) };
     }
     if (msg.action === "RUN_TASKS") {
         if (!tabId) throw new Error("tabId 缺失");
@@ -6194,6 +6226,41 @@ async function getCache(bvid) {
     return value;
 }
 
+function buildDerivedCacheClearPatch() {
+    return {
+        summary: "",
+        segments: [],
+        rumors: null,
+        history: [],
+        metrics: [],
+        summaryCacheSource: "",
+        segmentsCacheSource: "",
+        rumorsCacheSource: "",
+        summaryModel: "",
+        segmentsModel: "",
+        rumorsModel: "",
+        updatedAt: Date.now()
+    };
+}
+
+async function getCloudCacheReadPrefs(bvid, settingsInput = null) {
+    const normalizedBvid = normalizeBvid(bvid);
+    const settings = settingsInput || await getResolvedSettings();
+    const data = await chrome.storage.local.get([CLOUD_READ_DISABLED_BVIDS_KEY]);
+    const map = data?.[CLOUD_READ_DISABLED_BVIDS_KEY] && typeof data[CLOUD_READ_DISABLED_BVIDS_KEY] === "object"
+        ? data[CLOUD_READ_DISABLED_BVIDS_KEY]
+        : {};
+    return {
+        all: !!settings?.disableCloudCacheRead,
+        current: !!(normalizedBvid && map[normalizedBvid])
+    };
+}
+
+async function shouldSkipCloudCacheRead(bvid, settingsInput = null) {
+    const prefs = await getCloudCacheReadPrefs(bvid, settingsInput);
+    return !!(prefs.all || prefs.current);
+}
+
 function isStorageQuotaError(error) {
     const message = String(error?.message || "");
     return /QUOTA_BYTES|quota exceeded/i.test(message);
@@ -6334,6 +6401,9 @@ function normalizeSettings(settings) {
     const sentryEnabled = Object.prototype.hasOwnProperty.call(base, "sentryEnabled")
         ? !!base.sentryEnabled
         : !!DEFAULT_SETTINGS.sentryEnabled;
+    const disableCloudCacheRead = Object.prototype.hasOwnProperty.call(base, "disableCloudCacheRead")
+        ? !!base.disableCloudCacheRead
+        : !!DEFAULT_SETTINGS.disableCloudCacheRead;
     return {
         ...DEFAULT_SETTINGS,
         ...base,
@@ -6358,7 +6428,8 @@ function normalizeSettings(settings) {
         supabaseFeedbackTable,
         supabaseUsageDailyRpcName,
         prefMode,
-        segmentPromptVariant
+        segmentPromptVariant,
+        disableCloudCacheRead
     };
 }
 
@@ -6478,6 +6549,7 @@ async function fetchCloudVideoCacheRow(bvid, tasks, settings) {
 async function hydrateCloudCacheIfNeeded(bvid, tasks, settings) {
     const current = await getCache(bvid);
     if (!isSupabaseEnabled(settings)) return { hydratedTasks: [], cache: current };
+    if (await shouldSkipCloudCacheRead(bvid, settings)) return { hydratedTasks: [], cache: current };
     const missingTasks = (Array.isArray(tasks) ? tasks : []).filter((task) => !hasTaskResult(current, task));
     if (!missingTasks.length) return { hydratedTasks: [], cache: current };
     try {

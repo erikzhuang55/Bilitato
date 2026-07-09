@@ -106,12 +106,34 @@ describe("native side panel", () => {
   it("adds confirmed local cache cleanup actions in settings", () => {
     expect(background).toContain('msg.action === "DELETE_VIDEO_CACHE"');
     expect(background).toContain('msg.action === "DELETE_ALL_VIDEO_CACHE"');
+    expect(background).toContain("buildDerivedCacheClearPatch");
+    expect(background).not.toContain("cacheMemory.clear()");
     expect(content).toContain('data-action="settings-delete-current-cache"');
     expect(content).toContain('data-action="settings-delete-all-cache"');
-    expect(content).toContain("确定删除当前视频的本地缓存吗");
-    expect(content).toContain("确定删除所有视频的本地缓存吗");
+    expect(content).toContain("本地字幕缓存会保留");
+    expect(content).toContain('updateCloudCacheReadPref("current", true');
+    expect(content).toContain('updateCloudCacheReadPref("all", true');
     expect(sidepanel).toContain('data-action="delete-current-cache"');
     expect(sidepanel).toContain('data-action="delete-all-cache"');
+    expect(sidepanel).toContain("本地字幕缓存会保留");
+    expect(sidepanel).toContain('updateCloudCacheReadPref("current", true');
+    expect(sidepanel).toContain('updateCloudCacheReadPref("all", true');
+  });
+
+  it("adds cloud cache read controls in cache management", () => {
+    expect(background).toContain("CLOUD_READ_DISABLED_BVIDS_KEY");
+    expect(background).toContain('msg.action === "SET_CLOUD_CACHE_READ_PREF"');
+    expect(background).toContain("shouldSkipCloudCacheRead");
+    expect(content).toContain("缓存管理");
+    expect(content).toContain("settings-disable-cloud-current");
+    expect(content).toContain("settings-disable-cloud-all");
+    expect(content).toContain("本视频不拉取云端缓存");
+    expect(content).toContain("已由所有视频设置覆盖");
+    expect(content).toContain("currentCloudDisabledAttr = currentBvid && !allCloudDisabledOn");
+    expect(content).toContain("所有视频不拉取云端缓存");
+    expect(sidepanel).toContain("setting-disable-cloud-current");
+    expect(sidepanel).toContain("setting-disable-cloud-all");
+    expect(sidepanel).toContain("currentCloudDisabledAttr = getBvid() && !allCloudDisabledOn");
   });
 
   it("does not show the empty summary call-to-action under task errors", () => {

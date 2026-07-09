@@ -48,6 +48,9 @@ const files = [
   "offscreen.js",
   "permission-request.html",
   "permission-request.js",
+  "sidepanel.html",
+  "sidepanel.css",
+  "sidepanel.js",
   "rules.json",
   "subtitleProcessor.js"
 ];

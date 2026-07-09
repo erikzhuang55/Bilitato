@@ -101,11 +101,11 @@ function getProviderModelOptions(providerKey) {
     const key = String(providerKey || "").toLowerCase();
     const options = {
         modelscope: [
-            "moonshotai/Kimi-K2.5",
-            "MiniMax/MiniMax-M2.5",
-            "ZhipuAI/GLM-5.1",
+            "deepseek-ai/DeepSeek-V4-Flash",
+            "deepseek-ai/DeepSeek-V4-Pro",
             "deepseek-ai/DeepSeek-V3.2",
-            "Qwen/Qwen3.5-27B"
+            "ZhipuAI/GLM-5.2",
+            "stepfun-ai/Step-3.7-Flash"
         ],
         zhipu: [
             "glm-5.1",
@@ -201,6 +201,22 @@ function getDefaultProviderModel(providerKey) {
     return options[0] || "";
 }
 
+function resolveProviderModelValue(providerKey, model) {
+    const key = String(providerKey || "").toLowerCase();
+    const value = String(model || "").trim();
+    if (key !== "modelscope") return value;
+    const legacyModelScopeModels = new Set([
+        "moonshotai/Kimi-K2.5",
+        "moonshotai/Kimi-K2.6",
+        "MiniMax/MiniMax-M2.5",
+        "ZhipuAI/GLM-5.1",
+        "ZhipuAI/GLM-4.7-Flash",
+        "Qwen/Qwen3.5-27B",
+        "Qwen/Qwen2.5-72B-Instruct"
+    ]);
+    return legacyModelScopeModels.has(value) ? getDefaultProviderModel("modelscope") : value;
+}
+
 function getSortedProviderKeys(providers = {}) {
     const keys = Object.keys(providers || {});
     return keys.sort((left, right) => {
@@ -219,11 +235,11 @@ function getProviderFreeQuotaText(providerKey) {
     const quotaText = {
         modelscope: [
             "ModelScope 免费额度",
-            "Kimi-K2.5：50次/天",
-            "MiniMax-M2.5：100次/天",
-            "DeepSeek-R1/V3：20次/天",
-            "Qwen3/3.5系列：500次/天",
-            "GLM-4.5/4.7/5系列：50次/天",
+            "DeepSeek-V4-Flash：50次/天",
+            "DeepSeek-V4-Pro：以官网为准",
+            "DeepSeek-V3.2：20次/天",
+            "GLM-5.2：50次/天",
+            "Step-3.7-Flash：50次/天",
             "RPM：每个模型约5-20"
         ],
         gemini: [
@@ -279,6 +295,7 @@ const {
 const {
     cleanBilibiliTitle,
     isStorageChangeStateDirty: isStorageChangeStateDirtyFromPage,
+    normalizeSubtitleOptions: normalizeSubtitleOptionsFromPage,
     pickSubtitle: pickSubtitleFromPage,
     resolveCidFromState,
     resolveCurrentBvidFromState
@@ -366,6 +383,10 @@ const appState = {
     routeWatchBvid: "",
     routeWatchKey: "",
     subtitleTimeline: [],
+    subtitleOptions: [],
+    subtitleOptionsBvid: "",
+    activeSubtitleId: "",
+    pendingSubtitleLanguageSwitch: null,
     transcription: {
         phase: "idle",
         bvid: "",
@@ -875,6 +896,7 @@ async function bootstrap() {
     scheduleInjectRetry();
     window.addEventListener("message", onInjectMessage, false);
     chrome.runtime.onMessage.addListener(onBackgroundMessage);
+    chrome.runtime.onMessage.addListener(onSidePanelMessage);
     window.addEventListener("keydown", isolateChatInputKeyboardEvent, true);
     window.addEventListener("keydown", onGlobalShortcut, true);
     window.addEventListener("resize", syncPanelHeightMode);
@@ -1030,6 +1052,14 @@ async function onInjectMessage(event) {
         title: cleanBilibiliTitle(document.title),
         subtitle: subtitles
     };
+    const languageSwitch = appState.pendingSubtitleLanguageSwitch;
+    if (languageSwitch && (!languageSwitch.bvid || normalizeBvidCase(languageSwitch.bvid) === bvid)) {
+        pendingPayload.source = "official";
+        pendingPayload.subtitleLanguage = String(languageSwitch.id || "");
+        pendingPayload.subtitleLanguageLabel = String(languageSwitch.label || "");
+        pendingPayload.clearDerived = true;
+        appState.activeSubtitleId = String(languageSwitch.id || "");
+    }
     if (!pendingPayload.bvid) {
         appState.pendingSubtitle = pendingPayload;
         logContent.info("subtitle_detected", { source: "pending_subtitle_set", count: subtitles.length, bvid: currentUrlBvid || "" });
@@ -1039,6 +1069,7 @@ async function onInjectMessage(event) {
         return;
     }
     await forwardSubtitlePayload(pendingPayload, "inject_message_forwarded");
+    if (languageSwitch) appState.pendingSubtitleLanguageSwitch = null;
     if (appState.activePage === "CC") {
         const container = document.getElementById("page-CC");
         if (container) renderCC(container, subtitles);
@@ -1199,15 +1230,23 @@ async function waitPanelMount() {
         panel.className = "ai-summary-plugin-box";
         const logoIconSrc = chrome.runtime.getURL(`assets/icons/icon38.png`);
         const usageIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/usage.png`);
+        const sidebarDefaultIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/sidebar.png`);
+        const sidebarActiveIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/active/sidebar.png`);
         panel.innerHTML = `
             <div class="plugin-top-logo">
                 <div style="display:flex; align-items:center; gap:8px;">
                     <img src="${logoIconSrc}" style="width:38px;height:38px;object-fit:contain;" />
                     <span class="logo-title">Bilitato B站视频小助手</span>
                 </div>
-                <div class="logo-remaining-container">
-                    <img src="${usageIconSrc}" class="logo-info-icon" />
-                    <div class="logo-remaining-tooltip" id="logo-remaining">Checking...</div>
+                <div class="plugin-top-actions">
+                    <div class="logo-remaining-container">
+                        <img src="${usageIconSrc}" class="logo-info-icon" />
+                        <div class="logo-remaining-tooltip" id="logo-remaining">Checking...</div>
+                    </div>
+                    <button type="button" class="native-side-panel-btn" id="native-side-panel-btn" data-button-tooltip="打开浏览器侧边栏" aria-label="打开浏览器侧边栏">
+                        <img class="sidebar-icon-default" src="${sidebarDefaultIconSrc}" alt="">
+                        <img class="sidebar-icon-active" src="${sidebarActiveIconSrc}" alt="">
+                    </button>
                 </div>
                 <div class="progress-container"><div id="step-progress-bar" class="progress-bar"></div></div>
             </div>
@@ -1239,13 +1278,18 @@ async function waitPanelMount() {
 
             // Click on other parts of the top area to collapse/expand
             logoEl.onclick = (e) => {
-                if (e.target === logoImg) return;
+                if (e.target === logoImg || e.target.closest(".plugin-top-actions")) return;
                 appState.isCollapsed = !appState.isCollapsed;
                 const box = panelShadowRoot.querySelector('.ai-summary-plugin-box');
                 box.classList.toggle('is-collapsed', appState.isCollapsed);
                 if (!appState.isCollapsed) syncPluginHeight();
             };
         }
+        panel.querySelector("#native-side-panel-btn")?.addEventListener("click", async (event) => {
+            event.stopPropagation();
+            const result = await chrome.runtime.sendMessage({ action: "OPEN_SIDE_PANEL" });
+            if (!result?.ok) showToast(result?.error || "无法打开浏览器侧边栏");
+        });
 
         // Ensure progress bar is hidden initially
         const bar = panel.querySelector("#step-progress-bar");
@@ -1345,6 +1389,12 @@ function syncPluginHeight() {
             }
         }
     }
+}
+
+function setEmbeddedPanelVisible(visible = true) {
+    const root = document.getElementById("__bili_ai_plugin_root__");
+    if (!root) return;
+    root.style.display = visible ? "" : "none";
 }
 
 // 移除 syncPanelPosition 相关逻辑，因为不再需要 fixed 定位同步
@@ -1929,6 +1979,25 @@ function bindPanelDelegatedEvents() {
             handleCopyRawSubtitle(actionNode);
             return;
         }
+        if (action === "cc-language-menu") {
+            toggleSubtitleLanguageMenu(actionNode);
+            return;
+        }
+        if (action === "cc-switch-language") {
+            closeSubtitleLanguageMenu();
+            switchOfficialSubtitleLanguage(actionNode.dataset.languageId).catch((error) => {
+                showToast(error?.message || "切换字幕失败");
+            });
+            return;
+        }
+        if (action === "settings-delete-current-cache") {
+            deleteCurrentVideoCacheFromPanel();
+            return;
+        }
+        if (action === "settings-delete-all-cache") {
+            deleteAllVideoCacheFromPanel();
+            return;
+        }
         if (action === "export-srt") {
             handleExportSrt(actionNode);
             return;
@@ -2085,7 +2154,7 @@ function bindPanelDelegatedEvents() {
         if (action === "debug-show-release-notice") {
             globalThis.BilitatoReleaseNotice?.renderReleaseNotice?.({
                 root: panelShadowRoot,
-                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.1"
+                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.2"
             });
             return;
         }
@@ -3068,11 +3137,17 @@ function renderCC(panel, rowsOverride) {
         ? (subtitleCacheSource === "cloud" ? "云端缓存" : (isAsrSubtitle ? "ASR转录生成" : "官方AI字幕"))
         : "未检测到字幕";
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
+    const languageIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/language.png`);
+    const languageActiveIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/active/language.png`);
+    const canSwitchOfficialSubtitle = false;
+    const languageBtnHtml = canSwitchOfficialSubtitle
+        ? `<button class="panel-icon-btn cc-language-btn" data-action="cc-language-menu" data-button-tooltip="切换字幕语言" aria-label="切换字幕语言"><img class="icon-default" src="${languageIconSrc}" alt=""><img class="icon-active" src="${languageActiveIconSrc}" alt=""></button>`
+        : "";
     const regenBtnHtml = shouldShowRegenerate ? `<button class="panel-icon-btn" data-action="cc-regenerate-transcribe" data-button-tooltip="重新转录" aria-label="重新转录"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>` : "";
     const searchBoxHtml = `<div class="cc-search-container"><input type="text" id="cc-search-input" class="cc-search-input" placeholder="搜索字幕..." /><button type="button" class="cc-search-clear" data-button-tooltip="清空搜索" aria-label="清空搜索">×</button></div>`;
     const progressBarHtml = '';
 
-    const controlCenterHtml = `<div class="transcription-control-center"><div class="cc-transcribe-head">${searchBoxHtml}<div class="cc-header-right"><div class="cc-transcribe-status">${escapeHtml(sourceText)}</div><div class="cc-transcribe-actions">${regenBtnHtml}</div></div></div>${(rows.length > 0 || running) ? progressBarHtml : ''}</div>`;
+    const controlCenterHtml = `<div class="transcription-control-center"><div class="cc-transcribe-head">${searchBoxHtml}<div class="cc-header-right"><div class="cc-transcribe-status">${escapeHtml(sourceText)}</div><div class="cc-transcribe-actions">${languageBtnHtml}${regenBtnHtml}</div></div></div>${(rows.length > 0 || running) ? progressBarHtml : ''}</div>`;
 
     if (rows.length > 0) {
         logAsrUiTrace("cc_render", {
@@ -3916,13 +3991,17 @@ function renderSettings(panel) {
     const hasProviderModelSelect = providerKey !== "custom" && providerModelOptions.length > 0;
     const currentModel = String(providerKey === "custom"
         ? (settings.customModel || settings.model || "")
-        : (settings.model || getDefaultProviderModel(providerKey) || "")
+        : resolveProviderModelValue(providerKey, settings.model || getDefaultProviderModel(providerKey) || "")
     ).trim();
     const providerModelSelectValue = hasProviderModelSelect && providerModelOptions.includes(currentModel) ? currentModel : "custom";
     const providerModelWrapVisible = hasProviderModelSelect ? "" : "settings-hidden";
     const providerCustomModelVisible = hasProviderModelSelect && providerModelSelectValue === "custom" ? "" : "settings-hidden";
     const plainModelVisible = hasProviderModelSelect ? "settings-hidden" : "";
     const showOpenRouterFreeHint = providerKey === "openrouter" && currentModel === "openrouter/free";
+    const modelScopeModelInfo = "ModelScope官网近期下线了对部分模型的平台调用支持，本插件会动态更新可直接使用的模型列表。";
+    const modelLabelInfo = providerKey === "modelscope"
+        ? `<span class="settings-info-icon" data-tooltip="${escapeHtmlAttr(modelScopeModelInfo)}">i</span>`
+        : "";
     const asrProviderKey = String(settings.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
     const asrProviders = {
         groq: {
@@ -3976,7 +4055,7 @@ function renderSettings(panel) {
                 <div class="settings-provider-url">${escapeHtml(provider.baseUrl || "-")}</div>
                 <label>API Key</label>
                 ${renderSecretInput("settings-api-key", settings.apiKey || "", "示例：sk-xxxxx")}
-                <label>Model</label>
+                <label class="settings-label-with-info">Model${modelLabelInfo}</label>
                 <div id="settings-provider-model-wrap" class="${providerModelWrapVisible}">
                     ${renderCustomSelect("settings-provider-model", [
                         ...providerModelOptions.map((model) => ({ value: model, label: model, tooltip: providerKey === "modelscope" ? (MODELSCOPE_MODEL_LIMIT_TOOLTIPS[model] || "") : "" })),
@@ -4095,6 +4174,10 @@ function renderSettings(panel) {
                     { value: "false", label: "关闭" },
                     { value: "true", label: "开启" }
                 ], settings.sentryEnabled ? "true" : "false")}
+                <div class="settings-action-row">
+                    <button type="button" class="panel-btn ghost" data-action="settings-delete-current-cache">删除当前视频缓存</button>
+                    <button type="button" class="panel-btn ghost" data-action="settings-delete-all-cache">删除所有视频缓存</button>
+                </div>
                 <!--
                 <label>Debug</label>
                 <select id="settings-debug-mode">
@@ -4369,7 +4452,7 @@ function renderSettings(panel) {
 }
 
 function renderErrorDemoControls() {
-    const currentVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.1";
+    const currentVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.2";
     const panelErrors = [
         ["HTTP_401", "401 Key 无效", "summary"],
         ["ALIYUN_REALNAME_REQUIRED", "阿里云未实名", "summary"],
@@ -4428,6 +4511,49 @@ function renderErrorDemoControls() {
             <button type="button" class="panel-btn ghost error-demo-clear" data-action="debug-clear-errors">清空测试状态</button>
         </div>
     `;
+}
+
+async function deleteCurrentVideoCacheFromPanel() {
+    const bvid = normalizeBvidCase(resolveCurrentBvid() || appState.cache?.bvid || "");
+    if (!bvid) {
+        showToast("未获取到当前视频");
+        return;
+    }
+    const ok = window.confirm("确定删除当前视频的本地缓存吗？字幕、总结、分段、聊天记录和验真结果都会被清除。");
+    if (!ok) return;
+    const res = await chrome.runtime.sendMessage({ action: "DELETE_VIDEO_CACHE", bvid });
+    if (!res?.ok) {
+        showToast(res?.error || "删除失败");
+        return;
+    }
+    appState.cache = null;
+    resetTaskUiForDeletedCache();
+    await syncCacheFromBackground(bvid, { preserveCacheOnMiss: false, force: true, skipCloud: true }).catch(() => {});
+    renderContent();
+    showToast("已删除当前视频缓存");
+}
+
+async function deleteAllVideoCacheFromPanel() {
+    const ok = window.confirm("确定删除所有视频的本地缓存吗？所有视频的字幕、总结、分段、聊天记录和验真结果都会被清除。");
+    if (!ok) return;
+    const res = await chrome.runtime.sendMessage({ action: "DELETE_ALL_VIDEO_CACHE" });
+    if (!res?.ok) {
+        showToast(res?.error || "删除失败");
+        return;
+    }
+    appState.cache = null;
+    resetTaskUiForDeletedCache();
+    renderContent();
+    showToast(`已删除 ${Number(res.deleted || 0)} 条视频缓存`);
+}
+
+function resetTaskUiForDeletedCache() {
+    appState.chatPending = [];
+    appState.timelineSearchTerm = "";
+    appState.activeSubtitleId = "";
+    appState.subtitleOptions = [];
+    appState.subtitleOptionsBvid = "";
+    appState.panelErrors = {};
 }
 
 function renderSubtitleEmptyDemoControls() {
@@ -4851,15 +4977,28 @@ function renderTopRemaining() {
         holder.title = "暂无调用指标";
         return;
     }
-    const remaining = latest.modelScopeRemaining === null || latest.modelScopeRemaining === undefined || latest.modelScopeRemaining === "" ? "-" : String(latest.modelScopeRemaining);
     const total = Number(latest.tokens || 0);
     const input = Number(latest.inputTokens || 0);
     const output = Number(latest.outputTokens || 0);
     const tokenStr = input || output ? `${total} (In ${input} / Out ${output})` : `${total}`;
     const latency = Number.isFinite(Number(latest.latencyMs)) ? `${(Number(latest.latencyMs) / 1000).toFixed(3)}s` : "-";
-    const metricLine = `用时: ${latency} · Tokens: ${tokenStr} · 该模型当天剩余次数 ${remaining}`;
+    const parts = [`用时: ${latency}`, `Tokens: ${tokenStr}`];
+    if (String(latest.provider || "").toLowerCase() === "modelscope") {
+        parts.push(
+            `模型剩余 ${formatMetricQuotaValue(latest.modelScopeRemaining, latest.modelScopeModelLimit)}`,
+            `账号剩余 ${formatMetricQuotaValue(latest.modelScopeUserRemaining, latest.modelScopeUserLimit)}`
+        );
+    }
+    const metricLine = parts.join(" · ");
     holder.textContent = metricLine;
     holder.title = metricLine;
+}
+
+function formatMetricQuotaValue(remaining, limit) {
+    const hasRemaining = remaining !== null && remaining !== undefined && remaining !== "";
+    const hasLimit = limit !== null && limit !== undefined && limit !== "";
+    if (!hasRemaining) return "未返回";
+    return hasLimit ? `${remaining}/${limit}` : String(remaining);
 }
 
 function renderChatRows(history) {
@@ -5056,8 +5195,12 @@ function resetPageStateByBvidSwitch() {
     appState.followCurrentIndex = -1;
     appState.renderedSubtitleIndex = -1;
     closeCopyMenu();
+    closeSubtitleLanguageMenu();
     appState.chatAutoScrollPausedUntil = 0;
     appState.subtitleCapturedBvid = "";
+    appState.subtitleOptions = [];
+    appState.subtitleOptionsBvid = "";
+    appState.activeSubtitleId = "";
     appState.pendingSubtitle = null;
     appState.timelineSearchTerm = "";
     if (appState.timelineSearchDebounceTimer) {
@@ -5156,6 +5299,9 @@ function resetAllState() {
     appState.transcriptionCapsuleVisible = false;
     appState.transcriptionCapsuleMeta = null;
     appState.pendingSubtitle = null;
+    appState.subtitleOptions = [];
+    appState.subtitleOptionsBvid = "";
+    appState.activeSubtitleId = "";
     appState.cache = null; // Explicitly clear cache including summary, segments, etc.
     appState.playInfo = null; // Explicitly clear playInfo
     
@@ -5272,6 +5418,55 @@ function closeCopyMenu() {
     if (appState.navActionActive === "copy") {
         setNavActionActive("");
     }
+}
+
+function toggleSubtitleLanguageMenu(buttonNode) {
+    const existing = document.getElementById("subtitle-language-menu");
+    if (existing) {
+        existing.remove();
+        return;
+    }
+    const options = getOfficialSubtitleOptionsForCurrentVideo();
+    if (options.length <= 1) {
+        refreshSubtitleOptionsForCurrentVideo({ force: true })
+            .then(() => {
+                renderContent();
+                const freshOptions = getOfficialSubtitleOptionsForCurrentVideo();
+                if (freshOptions.length > 1) toggleSubtitleLanguageMenu(buttonNode);
+                else showToast("当前视频暂无可切换字幕语种");
+            })
+            .catch(() => showToast("读取字幕语种失败"));
+        return;
+    }
+    const rect = buttonNode?.getBoundingClientRect?.();
+    const overlay = document.createElement("div");
+    overlay.id = "subtitle-language-menu";
+    overlay.className = "copy-menu-overlay";
+    const activeId = String(appState.activeSubtitleId || appState.cache?.subtitleLanguage || "");
+    overlay.innerHTML = `<div class="copy-option-menu subtitle-language-menu">${options.map((item) => {
+        const id = getSubtitleOptionId(item);
+        const active = id && id === activeId;
+        return `<button type="button" class="copy-option-btn subtitle-language-option ${active ? "active" : ""}" data-action="cc-switch-language" data-language-id="${escapeHtmlAttr(id)}">${escapeHtml(item.label || id)}${active ? " · 当前" : ""}</button>`;
+    }).join("")}</div>`;
+    const menu = overlay.querySelector(".copy-option-menu");
+    overlay.addEventListener("click", (event) => {
+        if (event.target === overlay) closeSubtitleLanguageMenu();
+    });
+    if (rect) {
+        const left = Math.max(8, Math.min(rect.right + 8, window.innerWidth - 180));
+        const top = Math.max(8, rect.top);
+        overlay.style.setProperty("--copy-menu-left", `${left}px`);
+        overlay.style.setProperty("--copy-menu-top", `${top}px`);
+        if (menu) {
+            menu.style.left = "var(--copy-menu-left)";
+            menu.style.top = "var(--copy-menu-top)";
+        }
+    }
+    document.body.appendChild(overlay);
+}
+
+function closeSubtitleLanguageMenu() {
+    document.getElementById("subtitle-language-menu")?.remove();
 }
 
 async function handleCopySubtitleWithTimestamp() {
@@ -5489,11 +5684,11 @@ function updateSettingsProviderHint(panel) {
 
 const GROQ_ASR_LIMIT_TOOLTIP = "当前常见 Groq 转录限额：RPM 20；ASH 7.2K（每小时约 2 小时音频）。具体以 Groq 控制台 Limits 页面为准。";
 const MODELSCOPE_MODEL_LIMIT_TOOLTIPS = {
-    "moonshotai/Kimi-K2.5": "Kimi-K2.5：50次/天",
-    "MiniMax/MiniMax-M2.5": "MiniMax-M2.5：100次/天",
-    "deepseek-ai/DeepSeek-V3.2": "DeepSeek-R1/V3：20次/天",
-    "Qwen/Qwen3.5-27B": "Qwen3/3.5系列：500次/天",
-    "ZhipuAI/GLM-5.1": "GLM-4.5/4.7/5系列：50次/天"
+    "deepseek-ai/DeepSeek-V4-Flash": "ModelScope 免费额度：50次/天",
+    "deepseek-ai/DeepSeek-V4-Pro": "ModelScope 当前可直接调用模型",
+    "deepseek-ai/DeepSeek-V3.2": "ModelScope 免费额度：20次/天",
+    "ZhipuAI/GLM-5.2": "ModelScope 免费额度：50次/天",
+    "stepfun-ai/Step-3.7-Flash": "ModelScope 免费额度：50次/天"
 };
 
 function updateSettingsAsrProviderHint(panel) {
@@ -6349,6 +6544,7 @@ async function triggerDefaultSubtitleCapture() {
             });
             return;
         }
+        const selectedSubtitleOption = appState.subtitleOptions.find((item) => getSubtitleOptionId(item) === appState.activeSubtitleId) || null;
         await chrome.runtime.sendMessage({
             action: "SUBTITLE_CAPTURED",
             payload: {
@@ -6356,7 +6552,10 @@ async function triggerDefaultSubtitleCapture() {
                 cid: resolveCid(),
                 tid: getTidFromUrl(location.href),
                 title: cleanBilibiliTitle(document.title),
-                subtitle: payload
+                subtitle: payload,
+                source: "official",
+                subtitleLanguage: getSubtitleOptionId(selectedSubtitleOption),
+                subtitleLanguageLabel: selectedSubtitleOption?.label || ""
             }
         });
         appState.subtitleCapturedBvid = bvid;
@@ -6748,10 +6947,133 @@ async function fetchSubtitleByPlayerApi(bvid) {
     const data = await res.json();
     const subtitles = Array.isArray(data?.data?.subtitle?.subtitles) ? data.data.subtitle.subtitles : [];
     if (!subtitles.length) return [];
+    appState.subtitleOptions = normalizeSubtitleOptions(subtitles);
+    appState.subtitleOptionsBvid = normalizeBvidCase(bvid);
     const picked = pickSubtitle(subtitles);
-    const rawUrl = String(picked?.subtitle_url || "").trim();
+    appState.activeSubtitleId = getSubtitleOptionId(picked);
+    const rawUrl = String(picked?.url || picked?.subtitle_url || "").trim();
     if (!rawUrl) return [];
     const subtitleUrl = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
+    return fetchSubtitleBody(subtitleUrl);
+}
+
+function pickSubtitle(subtitles) {
+    return pickSubtitleFromPage(subtitles);
+}
+
+function normalizeSubtitleOptions(subtitles) {
+    if (typeof normalizeSubtitleOptionsFromPage === "function") {
+        return normalizeSubtitleOptionsFromPage(subtitles);
+    }
+    const list = Array.isArray(subtitles) ? subtitles : [];
+    return list.map((item, index) => {
+        const rawUrl = String(item?.subtitle_url || item?.url || "").trim();
+        const url = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
+        const id = String(item?.lan || item?.lan_doc || `subtitle-${index + 1}`).trim();
+        const label = String(item?.lan_doc || item?.lan || `字幕 ${index + 1}`).trim();
+        return { id, label, url };
+    }).filter((item) => item.url);
+}
+
+function getSubtitleOptionId(option) {
+    return String(option?.id || option?.lan || option?.lan_doc || "").trim();
+}
+
+function mergeSubtitleOptions(...groups) {
+    const output = [];
+    groups.flat().forEach((item) => {
+        const id = getSubtitleOptionId(item);
+        const label = String(item?.label || item?.lanDoc || item?.lan || id || "").trim();
+        if (!id && !label) return;
+        const normalized = { ...item, id: id || label, label: label || id };
+        const labelKey = label.toLowerCase();
+        const existingIndex = output.findIndex((option) => String(option.label || "").toLowerCase() === labelKey);
+        if (existingIndex >= 0) {
+            const existing = output[existingIndex];
+            output[existingIndex] = {
+                ...normalized,
+                ...existing,
+                url: existing.url || normalized.url || "",
+                domLabel: existing.domLabel || normalized.domLabel || ""
+            };
+            return;
+        }
+        output.push(normalized);
+    });
+    return output;
+}
+
+function collectSubtitleOptionsFromDom() {
+    const roots = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-major-inner"));
+    const scopedTextNodes = roots.flatMap((root) => Array.from(root.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text")));
+    const fallbackTextNodes = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
+    const nodes = scopedTextNodes.length ? scopedTextNodes : fallbackTextNodes;
+    return nodes.map((node, index) => {
+        const label = String(node?.textContent || node?.innerText || "").replace(/\s+/g, " ").trim();
+        if (!label || /关闭|字幕设置|自动/i.test(label)) return null;
+        return {
+            id: `dom:${label}`,
+            label,
+            domLabel: label,
+            domIndex: index,
+            source: "dom"
+        };
+    }).filter(Boolean);
+}
+
+function openSubtitleLanguageDomMenu() {
+    const trigger = document.querySelector(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
+    if (!trigger) return false;
+    try {
+        trigger.dispatchEvent(new MouseEvent("mouseenter", { bubbles: true, cancelable: true, view: window }));
+    } catch (_) {}
+    trigger.click?.();
+    return true;
+}
+
+async function refreshSubtitleOptionsFromDom() {
+    let options = collectSubtitleOptionsFromDom();
+    if (options.length > 1) return options;
+    openSubtitleLanguageDomMenu();
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    options = collectSubtitleOptionsFromDom();
+    return options;
+}
+
+function getOfficialSubtitleOptionsForCurrentVideo() {
+    const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    if (!currentBvid || normalizeBvidCase(appState.subtitleOptionsBvid || "") !== currentBvid) return [];
+    return Array.isArray(appState.subtitleOptions) ? appState.subtitleOptions : [];
+}
+
+async function refreshSubtitleOptionsForCurrentVideo({ force = false } = {}) {
+    const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    const cid = resolveCid();
+    if (!bvid || !cid) return [];
+    if (!force && normalizeBvidCase(appState.subtitleOptionsBvid || "") === bvid && Array.isArray(appState.subtitleOptions) && appState.subtitleOptions.length) {
+        return appState.subtitleOptions;
+    }
+    let apiOptions = [];
+    try {
+        const api = `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`;
+        const res = await fetch(api, { credentials: "include" });
+        if (res.ok) {
+            const data = await res.json();
+            const subtitles = Array.isArray(data?.data?.subtitle?.subtitles) ? data.data.subtitle.subtitles : [];
+            apiOptions = normalizeSubtitleOptions(subtitles);
+        }
+    } catch (_) {}
+    const domOptions = await refreshSubtitleOptionsFromDom().catch(() => []);
+    appState.subtitleOptions = mergeSubtitleOptions(apiOptions, domOptions);
+    appState.subtitleOptionsBvid = bvid;
+    if (!appState.activeSubtitleId && appState.subtitleOptions.length) {
+        const picked = pickSubtitle(appState.subtitleOptions);
+        appState.activeSubtitleId = getSubtitleOptionId(picked);
+    }
+    return appState.subtitleOptions;
+}
+
+async function fetchSubtitleBody(subtitleUrl) {
     const subRes = await fetch(subtitleUrl, { credentials: "include" });
     if (!subRes.ok) return [];
     const subData = await subRes.json();
@@ -6759,8 +7081,94 @@ async function fetchSubtitleByPlayerApi(bvid) {
     return Array.isArray(body) ? body : [];
 }
 
-function pickSubtitle(subtitles) {
-    return pickSubtitleFromPage(subtitles);
+async function switchOfficialSubtitleLanguage(optionId) {
+    const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    if (!bvid) throw new Error("未获取到当前视频");
+    const options = await refreshSubtitleOptionsForCurrentVideo({ force: !getOfficialSubtitleOptionsForCurrentVideo().length });
+    const targetId = String(optionId || "").trim();
+    const option = options.find((item) => getSubtitleOptionId(item) === targetId);
+    if (!option) throw new Error("未找到该字幕语种");
+    if (!option?.url && option?.domLabel) {
+        await switchSubtitleLanguageByDom(option);
+        return;
+    }
+    if (!option?.url) throw new Error("未找到该字幕语种");
+    const rows = await fetchSubtitleBody(option.url);
+    if (!rows.length) throw new Error("该语种字幕为空");
+    const res = await chrome.runtime.sendMessage({
+        action: "SUBTITLE_CAPTURED",
+        payload: {
+            bvid,
+            cid: resolveCid(),
+            tid: getTidFromUrl(location.href),
+            title: cleanBilibiliTitle(document.title),
+            subtitle: rows,
+            source: "official",
+            subtitleLanguage: getSubtitleOptionId(option),
+            subtitleLanguageLabel: option.label || getSubtitleOptionId(option),
+            clearDerived: true
+        }
+    });
+    if (!res?.ok) throw new Error(res?.error || "切换字幕失败");
+    appState.activeSubtitleId = getSubtitleOptionId(option);
+    appState.subtitleCapturedBvid = bvid;
+    appState.lastSubtitleForwardAt = Date.now();
+    await syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true });
+    showToast(`已切换为${option.label || option.id}`);
+}
+
+async function switchSubtitleLanguageByDom(option) {
+    const label = String(option?.domLabel || option?.label || "").trim();
+    if (!label) throw new Error("未找到该字幕语种");
+    const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    const marker = Date.now();
+    appState.pendingSubtitleLanguageSwitch = {
+        id: getSubtitleOptionId(option),
+        label,
+        bvid,
+        startedAt: marker
+    };
+    window.postMessage({ type: "BILI_ALLOW_SUBTITLE_RECAPTURE" }, "*");
+    const clicked = await clickSubtitleLanguageDomOption(label);
+    if (!clicked) {
+        appState.pendingSubtitleLanguageSwitch = null;
+        throw new Error("未找到该字幕语种");
+    }
+    await waitForSubtitleSwitchForward(marker);
+    await syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true });
+    showToast(`已切换为${label}`);
+}
+
+async function clickSubtitleLanguageDomOption(label) {
+    let nodes = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
+    if (!nodes.some((node) => String(node?.textContent || node?.innerText || "").trim() === label)) {
+        openSubtitleLanguageDomMenu();
+        await new Promise((resolve) => setTimeout(resolve, 160));
+        nodes = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
+    }
+    const node = nodes.find((item) => String(item?.textContent || item?.innerText || "").replace(/\s+/g, " ").trim() === label);
+    const target = node?.closest?.(".bpx-player-ctrl-subtitle-language-item") || node;
+    if (!target) return false;
+    target.click();
+    return true;
+}
+
+function waitForSubtitleSwitchForward(marker, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+        const startedAt = Date.now();
+        const timer = setInterval(() => {
+            if (Number(appState.lastSubtitleForwardAt || 0) >= marker) {
+                clearInterval(timer);
+                resolve();
+                return;
+            }
+            if (Date.now() - startedAt > timeoutMs) {
+                clearInterval(timer);
+                appState.pendingSubtitleLanguageSwitch = null;
+                reject(new Error("字幕切换超时，请重试"));
+            }
+        }, 120);
+    });
 }
 
 function resolveCid() {
@@ -7485,6 +7893,14 @@ async function syncActiveCacheByBvid(expectedBvid) {
                 appState.transcriptionCapsuleVisible = false;
                 appState.transcriptionCapsuleMeta = null;
             }
+            const source = String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "").toLowerCase();
+            if (!["groq", "whisper", "siliconflow", "funasr"].includes(source)) {
+                refreshSubtitleOptionsForCurrentVideo()
+                    .then((options) => {
+                        if (Array.isArray(options) && options.length > 1 && appState.activePage === "CC") renderContent();
+                    })
+                    .catch(() => {});
+            }
         }
         appState.isStateDirty = false;
         renderContent();
@@ -7602,6 +8018,112 @@ async function syncCacheFromBackgroundWithRetry(bvid, attempts = 6, delayMs = 25
     return false;
 }
 
+function onSidePanelMessage(message, sender, sendResponse) {
+    if (String(message?.action || "") !== "SIDE_PANEL_CONTENT_ACTION") return false;
+    const command = String(message?.command || "");
+    Promise.resolve().then(async () => {
+        if (command === "seek") {
+            jumpTo(Number(message?.time || 0));
+            return {};
+        }
+        if (command === "transcribe") {
+            await startTranscriptionFromCapsule();
+            return {};
+        }
+        if (command === "retranscribe") {
+            await handleRegenerateGroqSubtitle();
+            return {};
+        }
+        if (command === "get-subtitle-options") {
+            const options = await refreshSubtitleOptionsForCurrentVideo().catch(() => getOfficialSubtitleOptionsForCurrentVideo());
+            return {
+                options,
+                activeId: String(appState.activeSubtitleId || appState.cache?.subtitleLanguage || ""),
+                source: String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "")
+            };
+        }
+        if (command === "switch-subtitle-language") {
+            await switchOfficialSubtitleLanguage(message?.languageId);
+            return {};
+        }
+        if (command === "download-video") {
+            throw new Error("请在侧边栏选择视频清晰度");
+        }
+        if (command === "download-audio") {
+            throw new Error("请在侧边栏选择音频流");
+        }
+        if (command === "get-streams") {
+            const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
+            const info = await refreshPlayInfoNow(7000).catch(() => null);
+            if (!hasUsablePlayInfoForBvid(info, bvid)) {
+                throw new Error("暂未拿到可用媒体流，请稍后重试");
+            }
+            return {
+                title: cleanBilibiliTitle(document.title),
+                video: Array.isArray(info?.video) ? info.video : [],
+                audio: Array.isArray(info?.audio) ? info.audio : []
+            };
+        }
+        if (command === "prepare-download") {
+            const kind = String(message?.kind || "");
+            const groupIndex = Number(message?.groupIndex || 0);
+            const streamIndex = Number(message?.streamIndex || 0);
+            const info = await refreshPlayInfoNow(7000).catch(() => null);
+            const stream = kind === "video"
+                ? info?.video?.[groupIndex]?.streams?.[streamIndex]
+                : info?.audio?.[streamIndex];
+            if (!stream) throw new Error("媒体流已变化，请重新打开下载菜单");
+            const url = await pickVerifiedDownloadUrl(stream);
+            if (!url) throw new Error("下载链接不可用，请刷新后重试");
+            const title = sanitizeDownloadFileName(cleanBilibiliTitle(document.title));
+            const desc = String(kind === "video" ? info?.video?.[groupIndex]?.desc || "" : stream?.desc || "").trim();
+            return {
+                url,
+                filename: `${title}${desc ? `_${desc}` : ""}.${kind === "video" ? "mp4" : "m4a"}`
+            };
+        }
+        if (command === "refresh-cache") {
+            await syncCacheFromBackground(resolveCurrentBvid(), {
+                preserveCacheOnMiss: true,
+                force: true,
+                skipCloud: false
+            });
+            return {};
+        }
+        if (command === "open-setup-guide") {
+            showSetupGuide();
+            return {};
+        }
+        if (command === "switch-to-embedded") {
+            setEmbeddedPanelVisible(true);
+            const root = document.getElementById("__bili_ai_plugin_root__");
+            root?.scrollIntoView({ behavior: "smooth", block: "start" });
+            return {};
+        }
+        if (command === "set-embedded-visible") {
+            setEmbeddedPanelVisible(message?.visible !== false);
+            return {};
+        }
+        if (command === "get-playback-state") {
+            const video = document.querySelector("video");
+            return {
+                currentTime: video ? Number(video.currentTime) : null,
+                paused: video ? !!video.paused : true
+            };
+        }
+        if (command === "get-settings-ui-options") {
+            const providers = { ...(appState.providers || {}) };
+            return {
+                providerModels: Object.fromEntries(Object.keys(providers).map((key) => [key, getProviderModelOptions(key)])),
+                freeQuotaProviders: ["gemini", "modelscope", "openrouter"]
+            };
+        }
+        throw new Error("未知侧边栏操作");
+    }).then((result) => sendResponse({ ok: true, ...result }))
+        .catch((error) => sendResponse({ ok: false, error: error?.message || "操作失败" }));
+    return true;
+}
+
 function onBackgroundMessage(message) {
     const action = String(message?.action || "");
     if (action === "SHOW_TOAST") {
@@ -7629,12 +8151,12 @@ function onBackgroundMessage(message) {
 
         if (messageBvid && currentBvid && messageBvid !== currentBvid) {
             logContent.warn("transcription_stale_message_drop", {
-            task: "asr",
-            bvid: messageBvid,
-            detail: { current_bvid: currentBvid, stage: message?.stage || "" }
+                task: "asr",
+                bvid: messageBvid,
+                detail: { current_bvid: currentBvid, stage: message?.stage || "" }
             });
             return false;
-}
+        }
         const activeTranscribeBvid = messageBvid || normalizeBvidCase(getTranscriptionBvid() || appState.injectBvid || currentBvid || "unknown");
         const progressTaskId = `transcribe:${activeTranscribeBvid}`;
 

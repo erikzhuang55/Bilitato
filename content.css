@@ -39,6 +39,54 @@ body::-webkit-scrollbar {
     position: relative;
 }
 
+.plugin-top-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.native-side-panel-btn {
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    cursor: pointer;
+}
+
+.native-side-panel-btn:hover,
+.native-side-panel-btn:focus-visible {
+    background: #eef2f6;
+}
+
+.native-side-panel-btn img {
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+}
+
+.native-side-panel-btn .sidebar-icon-active {
+    opacity: 0;
+}
+
+.native-side-panel-btn:hover .sidebar-icon-default,
+.native-side-panel-btn:focus-visible .sidebar-icon-default,
+.native-side-panel-btn:active .sidebar-icon-default {
+    opacity: 0;
+}
+
+.native-side-panel-btn:hover .sidebar-icon-active,
+.native-side-panel-btn:focus-visible .sidebar-icon-active,
+.native-side-panel-btn:active .sidebar-icon-active {
+    opacity: 1;
+}
+
 .progress-container {
     position: absolute;
     bottom: 0;
@@ -1100,6 +1148,30 @@ body::-webkit-scrollbar {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+}
+
+.cc-language-btn {
+    position: relative;
+}
+
+.cc-language-btn img {
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+}
+
+.cc-language-btn .icon-active {
+    display: none;
+}
+
+.cc-language-btn:hover .icon-default,
+.cc-language-btn.is-active .icon-default {
+    display: none;
+}
+
+.cc-language-btn:hover .icon-active,
+.cc-language-btn.is-active .icon-active {
+    display: block;
 }
 
 .cc-progress-track {
@@ -2710,6 +2782,16 @@ input[type="range"]:active::-webkit-slider-thumb {
 .copy-option-btn:hover {
     background: #ff85ad;
     color: #fff;
+}
+
+.subtitle-language-menu {
+    min-width: 130px;
+}
+
+.subtitle-language-option.active {
+    background: #fff0f6;
+    color: #fb7299;
+    font-weight: 600;
 }
 
 .copy-option-btn:active {

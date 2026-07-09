@@ -35,6 +35,13 @@
             }, "*");
             return;
         }
+        if (event.data?.type === "BILI_ALLOW_SUBTITLE_RECAPTURE") {
+            isSubtitleCaptured = false;
+            subtitleStringCache = [];
+            removeStealthMask();
+            emitLog("subtitle_recapture_enabled", { source: "content" });
+            return;
+        }
         if (event.data && (event.data.type === "RE_EMIT_PLAYINFO" || event.data.type === "REFRESH_PLAYINFO" || event.data.type === "PLAYER_WAKE_UP")) {
             emitPlayInfo();
         }

@@ -4,6 +4,59 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.4.2": {
+      title: "Bilitato 已更新至 v1.4.2",
+      displayVersion: "v1.4.2",
+      subtitle: "这版重点补上浏览器侧边栏、缓存管理和一批细节体验修复，让看视频时的操作更稳定、更顺手。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "新增浏览器侧边栏模式",
+              desc: "可以把 Bilitato 打开到浏览器侧边栏里使用，字幕、总结、聊天、验真和设置都能在更宽的空间里操作。",
+              highlight: true,
+            },
+            {
+              title: "新增本地缓存清理",
+              desc: "设置页现在可以删除当前视频缓存，也可以一键清空所有视频缓存，误点前会先二次确认。",
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "修复侧边栏体验不一致",
+              desc: "侧边栏的字幕、总结、聊天、验真和设置样式进一步对齐内嵌面板，复制、下载、提示气泡和滚动表现更一致。",
+              highlight: true,
+            },
+            {
+              title: "修复聊天和总结滚动异常",
+              desc: "修复流式输出时页面跳到顶部、切换新视频后聊天引导缺失、复制后无反馈等问题。",
+            },
+            {
+              title: "修复下载兼容问题",
+              desc: "针对部分浏览器直接下载 B 站音视频时的跨域失败，改为更兼容的下载链路。",
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "更新 ModelScope 模型选项",
+              desc: "根据 ModelScope 当前可直接调用的模型范围更新默认选项，并补充更清晰的额度提示。",
+            },
+            {
+              title: "优化侧边栏与内嵌面板切换",
+              desc: "打开侧边栏后自动隐藏内嵌面板，切回内嵌时再恢复，页面不再同时出现两套入口。",
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。本地缓存清理只会删除浏览器本机保存的视频缓存，不会删除您的 B 站数据。",
+    },
     "1.4.1": {
       title: "Bilitato 已更新至 v1.4.1",
       displayVersion: "v1.4.1",
@@ -657,7 +710,9 @@
 
   function buildReleasePageVersions(version) {
     const majorHistory = [];
-    if (version === "1.4.1") {
+    if (version === "1.4.2") {
+      majorHistory.push("1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");
+    } else if (version === "1.4.1") {
       majorHistory.push("1.4.1", "1.4.0", "1.3.x", "1.2.x");
     } else if (version === "1.4.0") {
       majorHistory.push("1.4.0", "1.3.x", "1.2.x");

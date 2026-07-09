@@ -38,9 +38,21 @@
         const total = Number.isFinite(Number(metrics.tokens)) ? Number(metrics.tokens) : 0;
         const input = Number.isFinite(Number(metrics.inputTokens)) ? Number(metrics.inputTokens) : 0;
         const output = Number.isFinite(Number(metrics.outputTokens)) ? Number(metrics.outputTokens) : 0;
-        const remaining = metrics.modelScopeRemaining === null || metrics.modelScopeRemaining === undefined || metrics.modelScopeRemaining === "" ? "-" : String(metrics.modelScopeRemaining);
         const tokenStr = input || output ? `${total} (In ${input} / Out ${output})` : `${total}`;
-        return `用时 ${latency} · Tokens ${tokenStr} · 该模型当天剩余次数 ${remaining}`;
+        const parts = [`用时 ${latency}`, `Tokens ${tokenStr}`];
+        if (String(metrics.provider || "").toLowerCase() === "modelscope") {
+            const modelRemaining = formatQuotaValue(metrics.modelScopeRemaining, metrics.modelScopeModelLimit);
+            const userRemaining = formatQuotaValue(metrics.modelScopeUserRemaining, metrics.modelScopeUserLimit);
+            parts.push(`模型剩余 ${modelRemaining}`, `账号剩余 ${userRemaining}`);
+        }
+        return parts.join(" · ");
+    }
+
+    function formatQuotaValue(remaining, limit) {
+        const hasRemaining = remaining !== null && remaining !== undefined && remaining !== "";
+        const hasLimit = limit !== null && limit !== undefined && limit !== "";
+        if (!hasRemaining) return "未返回";
+        return hasLimit ? `${remaining}/${limit}` : String(remaining);
     }
 
     globalThis.BilitatoContentChat = {

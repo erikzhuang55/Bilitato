@@ -34,7 +34,17 @@ describe("contentPage", () => {
       { lan_doc: "中文", subtitle_url: "zh.json" }
     ]);
 
-    expect(picked.subtitle_url).toBe("zh.json");
+    expect(picked.url).toBe("zh.json");
+  });
+
+  it("normalizes subtitle language options", () => {
+    expect(page.normalizeSubtitleOptions([
+      { lan: "en", lan_doc: "English", subtitle_url: "//example.com/en.json" },
+      { lan_doc: "中文", subtitle_url: "zh.json" }
+    ])).toEqual([
+      { id: "en", label: "English", url: "https://example.com/en.json", lan: "en", lanDoc: "English" },
+      { id: "中文", label: "中文", url: "zh.json", lan: "", lanDoc: "中文" }
+    ]);
   });
 
   it("cleans bilibili title suffix", () => {

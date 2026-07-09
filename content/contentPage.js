@@ -26,9 +26,22 @@
     }
 
     function pickSubtitle(subtitles) {
-        const list = Array.isArray(subtitles) ? subtitles : [];
-        const zh = list.find((item) => /zh|cn|中文/i.test(String(item?.lan || item?.lan_doc || "")));
+        const list = normalizeSubtitleOptions(subtitles);
+        const zh = list.find((item) => /zh|cn|中文/i.test(`${item.id} ${item.label}`));
         return zh || list[0] || null;
+    }
+
+    function normalizeSubtitleOptions(subtitles) {
+        const list = Array.isArray(subtitles) ? subtitles : [];
+        return list.map((item, index) => {
+            const rawUrl = String(item?.subtitle_url || item?.url || "").trim();
+            const url = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
+            const lan = String(item?.lan || item?.id || "").trim();
+            const lanDoc = String(item?.lan_doc || item?.label || "").trim();
+            const id = lan || lanDoc || `subtitle-${index + 1}`;
+            const label = lanDoc || lan || `字幕 ${index + 1}`;
+            return { id, label, url, lan, lanDoc };
+        }).filter((item) => item.url);
     }
 
     function cleanBilibiliTitle(title) {
@@ -49,6 +62,7 @@
     globalThis.BilitatoContentPage = {
         cleanBilibiliTitle,
         isStorageChangeStateDirty,
+        normalizeSubtitleOptions,
         pickSubtitle,
         resolveCidFromState,
         resolveCurrentBvidFromState

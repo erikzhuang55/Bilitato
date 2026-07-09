@@ -519,7 +519,7 @@ const CLOUD_TASK_FIELD_MAP = {
 };
 const DEFAULT_SETTINGS = {
     provider: "modelscope",
-    model: "moonshotai/Kimi-K2.5",
+    model: "deepseek-ai/DeepSeek-V4-Flash",
     apiKey: "",
     providerApiKeys: {},
     providerModels: {},
@@ -542,6 +542,15 @@ const DEFAULT_SETTINGS = {
     sentryEnabled: true,
     sentryDsn: DEFAULT_SENTRY_DSN
 };
+const LEGACY_MODELSCOPE_MODELS = new Set([
+    "moonshotai/Kimi-K2.5",
+    "moonshotai/Kimi-K2.6",
+    "MiniMax/MiniMax-M2.5",
+    "ZhipuAI/GLM-5.1",
+    "ZhipuAI/GLM-4.7-Flash",
+    "Qwen/Qwen3.5-27B",
+    "Qwen/Qwen2.5-72B-Instruct"
+]);
 
 const queue = [];
 let activeCount = 0;
@@ -653,7 +662,49 @@ function abortTabOperations(tabId, reason = "aborted") {
 
 syncDebugModeFromStorage();
 
+let latestModelScopeRateLimitInfo = null;
+
+function captureModelScopeRateLimitHeaders(details = {}) {
+    const headers = Array.isArray(details.responseHeaders) ? details.responseHeaders : [];
+    const getHeader = (name) => {
+        const target = String(name || "").toLowerCase();
+        const item = headers.find((header) => String(header?.name || "").toLowerCase() === target);
+        return item?.value ?? null;
+    };
+    const info = {
+        modelLimit: parseHeaderNumber(getHeader("modelscope-ratelimit-model-requests-limit")),
+        modelRemaining: parseHeaderNumber(getHeader("modelscope-ratelimit-model-requests-remaining")),
+        userLimit: parseHeaderNumber(getHeader("modelscope-ratelimit-requests-limit")),
+        userRemaining: parseHeaderNumber(getHeader("modelscope-ratelimit-requests-remaining")),
+        capturedAt: Date.now()
+    };
+    if ([info.modelLimit, info.modelRemaining, info.userLimit, info.userRemaining].some((value) => value !== null)) {
+        latestModelScopeRateLimitInfo = info;
+    }
+}
+
+function registerModelScopeRateLimitObserver() {
+    if (!chrome.webRequest?.onHeadersReceived) return;
+    chrome.webRequest.onHeadersReceived.addListener(
+        captureModelScopeRateLimitHeaders,
+        { urls: ["https://api-inference.modelscope.cn/*"] },
+        ["responseHeaders"]
+    );
+}
+
+registerModelScopeRateLimitObserver();
+
+function enableSidePanelActionClick() {
+    if (!chrome.sidePanel?.setPanelBehavior) return;
+    chrome.sidePanel
+        .setPanelBehavior({ openPanelOnActionClick: true })
+        .catch((error) => logBackground.warn("side_panel_action_behavior_failed", { error: error?.message || String(error) }));
+}
+
+enableSidePanelActionClick();
+
 chrome.runtime.onInstalled.addListener(async () => {
+    enableSidePanelActionClick();
     const { settings } = await chrome.storage.local.get(["settings"]);
     const normalized = normalizeSettings(settings);
     await chrome.storage.local.set({ settings: normalized });
@@ -793,6 +844,11 @@ chrome.downloads.onChanged.addListener((delta) => {
 });
 
 async function handleMessage(msg, sender) {
+    if (msg.action === "OPEN_SIDE_PANEL") {
+        const tabId = Number(msg.tabId || sender?.tab?.id || 0);
+        if (!tabId || !chrome.sidePanel?.open) throw new Error("当前浏览器不支持侧边栏");
+        return chrome.sidePanel.open({ tabId }).then(() => ({ tabId }));
+    }
     if (msg.action === "REPORT_ERROR") {
         await captureBackgroundError(msg.error || "Content error", {
             ...(msg.context || {}),
@@ -879,7 +935,8 @@ async function handleMessage(msg, sender) {
     if (msg.action === "PROBE_URL") {
         const url = String(msg?.payload?.url || "").trim();
         if (!url) return { status: "unknown" };
-        const status = await probeUrlStatus(url);
+        const tabId = Number(msg.tabId || sender.tab?.id || 0);
+        const status = tabId ? await probeUrlStatusForTab(tabId, url) : await probeUrlStatus(url);
         return { status };
     }
     if (msg.action === "GET_COMPAT_PLAYURL") {
@@ -966,6 +1023,21 @@ async function handleMessage(msg, sender) {
             });
         }
         return {};
+    }
+    if (msg.action === "DELETE_VIDEO_CACHE") {
+        const bvid = normalizeBvid(msg.bvid);
+        if (!bvid) return { deleted: 0 };
+        const keys = [`cache_${bvid}`, `cache_${String(msg.bvid || "").toUpperCase()}`];
+        await chrome.storage.local.remove([...new Set(keys)]);
+        cacheMemory.delete(bvid);
+        return { deleted: 1 };
+    }
+    if (msg.action === "DELETE_ALL_VIDEO_CACHE") {
+        const data = await chrome.storage.local.get(null);
+        const keys = Object.keys(data || {}).filter((key) => key.startsWith("cache_"));
+        if (keys.length) await chrome.storage.local.remove(keys);
+        cacheMemory.clear();
+        return { deleted: keys.length };
     }
     if (msg.action === "GET_BOOTSTRAP") {
         if (!tabId) return { tabState: null, cache: null };
@@ -1381,6 +1453,54 @@ async function fetchBiliPlayUrl(identity, options = {}) {
     return json?.data || {};
 }
 
+async function fetchBiliPlayUrlForTab(tabId, identity, options = {}) {
+    const cid = Number(identity?.cid || 0);
+    const aid = Number(identity?.aid || 0);
+    const bvid = normalizeBvid(identity?.bvid || "");
+    const rawBvid = String(identity?.rawBvid || identity?.bvid || "").trim();
+    if (!tabId || !cid || (!aid && !bvid)) {
+        throw createAppError("DOWNLOAD_PLAYINFO_MISSING", "缺少当前视频 aid/cid，无法获取兼容下载链接");
+    }
+    const params = {
+        otype: "json",
+        platform: "html5",
+        cid: String(cid),
+        fnver: "0",
+        high_quality: "1",
+        fnval: String(options.fnval || 1)
+    };
+    if (aid) params.avid = String(aid);
+    if (rawBvid) params.bvid = rawBvid;
+    if (Number(options.qn || 0)) params.qn = String(Number(options.qn));
+    const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        world: "MAIN",
+        func: (baseUrl, query) => new Promise((resolve, reject) => {
+            const callbackName = `__bilitatoPlayurl_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+            const script = document.createElement("script");
+            const timeoutId = setTimeout(() => finish(new Error("B站播放接口请求超时")), 8000);
+            const finish = (error, value) => {
+                clearTimeout(timeoutId);
+                script.remove();
+                try { delete window[callbackName]; } catch (_) { window[callbackName] = undefined; }
+                if (error) reject(error);
+                else resolve(value);
+            };
+            window[callbackName] = (value) => finish(null, value);
+            script.onerror = () => finish(new Error("B站播放接口加载失败"));
+            const params = new URLSearchParams({ ...query, callback: callbackName, jsonp: "jsonp" });
+            script.src = `${baseUrl}?${params.toString()}`;
+            (document.head || document.documentElement).appendChild(script);
+        }),
+        args: [BILI_PLAYURL_API, params]
+    });
+    const json = results?.[0]?.result || {};
+    if (Number(json?.code || 0) !== 0) {
+        throw createAppError("DOWNLOAD_PLAYURL_API_FAILED", String(json?.message || "B站播放接口返回失败"));
+    }
+    return json?.data || {};
+}
+
 function buildCompatVideoPayload(data, identity, selectedQn = 0) {
     const acceptQuality = Array.isArray(data?.accept_quality) ? data.accept_quality.map(Number).filter(Boolean) : [];
     const acceptDescription = Array.isArray(data?.accept_description) ? data.accept_description : [];
@@ -1438,7 +1558,7 @@ async function getCompatPlayUrlForTab(tabId, payload = {}) {
     const type = String(payload?.type || "video") === "audio" ? "audio" : "video";
     const qn = Number(payload?.qn || 0);
     const identity = await getCurrentBiliVideoIdentity(tabId, payload);
-    const data = await fetchBiliPlayUrl(identity, {
+    const data = await fetchBiliPlayUrlForTab(tabId, identity, {
         fnval: type === "audio" ? 16 : 1,
         qn: type === "video" ? (qn || 80) : 0
     });
@@ -1458,6 +1578,40 @@ async function getCompatPlayUrlForTab(tabId, payload = {}) {
         }
     });
     return { ok: true, type, ...result };
+}
+
+async function probeUrlStatusForTab(tabId, url) {
+    try {
+        const results = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: async (target) => {
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 4000);
+                try {
+                    const response = await fetch(target, {
+                        method: "GET",
+                        headers: { Range: "bytes=0-0" },
+                        credentials: "omit",
+                        cache: "no-store",
+                        signal: controller.signal
+                    });
+                    const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+                    if (contentType.includes("text/html") || response.status === 401 || response.status === 403) return "expired";
+                    if (response.ok || response.status === 206) return "ok";
+                    return "unknown";
+                } catch (_) {
+                    return "unknown";
+                } finally {
+                    clearTimeout(timeoutId);
+                }
+            },
+            args: [url]
+        });
+        return String(results?.[0]?.result || "unknown");
+    } catch (_) {
+        return "unknown";
+    }
 }
 
 async function ensureDownloadHeaderRule(url) {
@@ -2590,6 +2744,9 @@ async function handleSubtitleCaptured(tabId, payload) {
     const cid = Number(payload.cid || 0);
     const tid = payload.tid || null;
     const subtitleSource = String(payload?.source || "official");
+    const subtitleLanguage = String(payload?.subtitleLanguage || "").trim();
+    const subtitleLanguageLabel = String(payload?.subtitleLanguageLabel || subtitleLanguage || "").trim();
+    const clearDerived = payload?.clearDerived === true;
     logBackground.info("subtitle_detected", { tab_id: tabId, bvid, cid, tid });
     const existing = await getCache(bvid);
     const rawSubtitle = normalizeRawSubtitle(payload.subtitle || []);
@@ -2597,10 +2754,19 @@ async function handleSubtitleCaptured(tabId, payload) {
     if (existing?.rawHash && existing.rawHash === rawHash) {
         logBackground.debug("subtitle_duplicate_ignore", { bvid, tab_id: tabId, raw_hash: rawHash });
         const existingSource = String(existing?.subtitleSource || "");
+        const existingLanguage = String(existing?.subtitleLanguage || "");
         let nextCache = existing;
-        if (subtitleSource && existingSource !== subtitleSource) {
+        if ((subtitleSource && existingSource !== subtitleSource) || (subtitleLanguage && existingLanguage !== subtitleLanguage)) {
             await mergeCacheByBvid(bvid, {
                 subtitleSource,
+                subtitleLanguage,
+                subtitleLanguageLabel,
+                ...(clearDerived ? {
+                    summary: "",
+                    segments: [],
+                    rumors: [],
+                    history: []
+                } : {}),
                 updatedAt: Date.now()
             });
             nextCache = await getCache(bvid);
@@ -2610,6 +2776,8 @@ async function handleSubtitleCaptured(tabId, payload) {
             activeCid: Number.isFinite(cid) ? cid : 0,
             activeTid: tid,
             subtitleSource,
+            subtitleLanguage,
+            subtitleLanguageLabel,
             transcriptionProgress: isAsrSubtitleSource(subtitleSource) ? 100 : 0,
             updatedAt: Date.now()
         });
@@ -2645,10 +2813,18 @@ async function handleSubtitleCaptured(tabId, payload) {
         tid,
         title: payload.title || "",
         subtitleSource,
+        subtitleLanguage,
+        subtitleLanguageLabel,
         rawSubtitle,
         processedSubtitle,
         rawHash,
         processedHash,
+        ...(clearDerived ? {
+            summary: "",
+            segments: [],
+            rumors: [],
+            history: []
+        } : {}),
         updatedAt: Date.now()
     });
     await updateTabState(tabId, {
@@ -2656,6 +2832,8 @@ async function handleSubtitleCaptured(tabId, payload) {
         activeCid: Number.isFinite(cid) ? cid : 0,
         activeTid: tid,
         subtitleSource,
+        subtitleLanguage,
+        subtitleLanguageLabel,
         transcriptionProgress: isAsrSubtitleSource(subtitleSource) ? 100 : 0,
         lastError: "",
         taskStatus: {
@@ -3055,7 +3233,7 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
 }
 
 async function runChatForPort(port, msg) {
-    const tabId = port?.sender?.tab?.id;
+    const tabId = Number(msg?.tabId || port?.sender?.tab?.id || 0);
     if (!tabId) throw new Error("tabId 缺失");
     const text = String(msg?.text || "").trim();
     const messageId = String(msg?.messageId || "");
@@ -3554,8 +3732,9 @@ function pickSummarySegmentsFailureError(results) {
 }
 
 function shouldUseCompactSegmentsFirst(settings = {}) {
-    return String(settings?.provider || "").toLowerCase() === "openrouter"
-        && String(settings?.model || "").toLowerCase() === "openrouter/free";
+    const provider = String(settings?.provider || "").toLowerCase();
+    if (provider === "modelscope") return true;
+    return provider === "openrouter" && String(settings?.model || "").toLowerCase() === "openrouter/free";
 }
 
 const AUTO_RETRY_SEGMENT_ERROR_CODES = new Set([
@@ -3732,8 +3911,8 @@ async function recordAsrChunkingDebugState(tabId, diagnostics = null) {
     await updateTabState(tabId, { taskRetryState, updatedAt: Date.now() });
 }
 
-function buildPrimarySegmentsPrompt({ settings, cache, subtitleText, mode, guided, customPrompts, taskContext, promptTaskContext }) {
-    if (shouldUseCompactSegmentsFirst(settings)) {
+function buildPrimarySegmentsPrompt({ settings, cache, subtitleText, mode, guided, customPrompts, taskContext, promptTaskContext, forceFull = false }) {
+    if (!forceFull && shouldUseCompactSegmentsFirst(settings)) {
         const compactSubtitle = buildCompactSegmentsSubtitlePayload(cache, 40000) || subtitleText;
         return {
             prompt: buildCompactSegmentsPrompt({ subtitle: compactSubtitle, taskContext: promptTaskContext }),
@@ -3863,7 +4042,8 @@ async function retrySegmentsWithPrimaryPrompt({
         guided,
         customPrompts,
         taskContext,
-        promptTaskContext
+        promptTaskContext,
+        forceFull: shouldUseCompactSegmentsFirst(settings)
     });
     logAI.warn("segments_primary_retry_start", {
         bvid,
@@ -5651,12 +5831,12 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
         const res = options?.bypassQueue ? await requestRunner() : await runQueued(requestRunner);
         const latencyMs = Math.round(performance.now() - start);
         const tokenInfo = resolveTokenInfo(res.usage, res.text, messages);
-        const modelScopeRemaining = res.headers?.get?.("modelscope-ratelimit-model-requests-remaining") ?? null;
+        const rateLimitInfo = resolveRateLimitInfo(settings, res.headers);
         logAI.debug("provider_response", {
             provider: settings.provider,
             model: settings.model || "",
             duration_ms: latencyMs,
-            detail: { ...tokenInfo, has_text: !!res.text }
+            detail: { ...tokenInfo, has_text: !!res.text, rate_limit: rateLimitInfo }
         });
         logAIResponseText({
             provider: settings.provider,
@@ -5664,7 +5844,7 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
             durationMs: latencyMs,
             text: res.text || ""
         });
-        return { text: res.text || "", metrics: { latencyMs, tokens: tokenInfo.total, inputTokens: tokenInfo.input, outputTokens: tokenInfo.output, modelScopeRemaining } };
+        return { text: res.text || "", metrics: buildRequestMetrics(settings, tokenInfo, latencyMs, rateLimitInfo) };
     } catch (error) {
         logAI.error("ai_request_failed", buildFailureLog(error, {
             task: "ai",
@@ -5752,14 +5932,14 @@ async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, e
         }
         const latencyMs = Math.round(performance.now() - start);
         const tokenInfo = resolveTokenInfo(res.usage, res.text, messages);
-        const modelScopeRemaining = res.headers?.get?.("modelscope-ratelimit-model-requests-remaining") ?? null;
+        const rateLimitInfo = resolveRateLimitInfo(settings, res.headers);
         logAIResponseText({
             provider: settings.provider,
             model: settings.model || "",
             durationMs: latencyMs,
             text: res.text || ""
         });
-        return { text: res.text || "", metrics: { latencyMs, tokens: tokenInfo.total, inputTokens: tokenInfo.input, outputTokens: tokenInfo.output, modelScopeRemaining } };
+        return { text: res.text || "", metrics: buildRequestMetrics(settings, tokenInfo, latencyMs, rateLimitInfo) };
     } catch (error) {
         if (controller.signal.aborted) {
             if (controller.signal.reason === "aborted") {
@@ -5791,6 +5971,49 @@ async function callAIWithTimeoutStream(settings, messages, timeoutMs, onDelta, e
     }
 }
 
+function readHeaderNumber(headers, name) {
+    const value = headers?.get?.(name);
+    return parseHeaderNumber(value);
+}
+
+function parseHeaderNumber(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function resolveRateLimitInfo(settings, headers) {
+    if (String(settings?.provider || "").toLowerCase() !== "modelscope") return null;
+    const direct = {
+        modelLimit: readHeaderNumber(headers, "modelscope-ratelimit-model-requests-limit"),
+        modelRemaining: readHeaderNumber(headers, "modelscope-ratelimit-model-requests-remaining"),
+        userLimit: readHeaderNumber(headers, "modelscope-ratelimit-requests-limit"),
+        userRemaining: readHeaderNumber(headers, "modelscope-ratelimit-requests-remaining")
+    };
+    if ([direct.modelLimit, direct.modelRemaining, direct.userLimit, direct.userRemaining].some((value) => value !== null)) {
+        return direct;
+    }
+    if (latestModelScopeRateLimitInfo && Date.now() - Number(latestModelScopeRateLimitInfo.capturedAt || 0) < 30000) {
+        return { ...latestModelScopeRateLimitInfo };
+    }
+    return direct;
+}
+
+function buildRequestMetrics(settings, tokenInfo, latencyMs, rateLimitInfo = null) {
+    return {
+        latencyMs,
+        tokens: tokenInfo.total,
+        inputTokens: tokenInfo.input,
+        outputTokens: tokenInfo.output,
+        provider: String(settings?.provider || ""),
+        model: String(settings?.model || ""),
+        modelScopeRemaining: rateLimitInfo?.modelRemaining ?? null,
+        modelScopeModelLimit: rateLimitInfo?.modelLimit ?? null,
+        modelScopeUserRemaining: rateLimitInfo?.userRemaining ?? null,
+        modelScopeUserLimit: rateLimitInfo?.userLimit ?? null
+    };
+}
+
 function resolveTokenInfo(usage, text, messages) {
     // Try to get explicit input/output
     const input = Number(usage?.prompt_tokens || usage?.input_tokens || usage?.promptTokens || 0);
@@ -5816,7 +6039,7 @@ function resolveTokenInfo(usage, text, messages) {
 }
 
 function abortChatForPort(port, msg) {
-    const tabId = port?.sender?.tab?.id;
+    const tabId = Number(msg?.tabId || port?.sender?.tab?.id || 0);
     const messageId = String(msg?.messageId || "");
     if (!tabId || !messageId) return;
     const abortKey = `${tabId}|${messageId}`;
@@ -6084,6 +6307,13 @@ function normalizeSettings(settings) {
         String(key || "").trim(),
         String(value || "").trim()
     ]).filter(([key]) => key));
+    const rawModel = String(base.model || DEFAULT_SETTINGS.model || "").trim();
+    const model = provider === "modelscope" && LEGACY_MODELSCOPE_MODELS.has(rawModel)
+        ? DEFAULT_SETTINGS.model
+        : rawModel;
+    if (LEGACY_MODELSCOPE_MODELS.has(String(providerModels.modelscope || "").trim())) {
+        providerModels.modelscope = DEFAULT_SETTINGS.model;
+    }
     const asrProvider = String(base.asrProvider || DEFAULT_SETTINGS.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
     const apiKey = String(providerApiKeys[provider] || base.apiKey || "").trim();
     if (apiKey) providerApiKeys[provider] = apiKey;
@@ -6112,6 +6342,7 @@ function normalizeSettings(settings) {
         apiKey,
         providerApiKeys,
         providerModels,
+        model,
         sentryEnabled,
         sentryDsn,
         customProtocol,

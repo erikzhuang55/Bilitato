@@ -12,8 +12,20 @@ describe("contentChat", () => {
       tokens: 30,
       inputTokens: 10,
       outputTokens: 20,
-      modelScopeRemaining: 5
-    })).toBe("用时 1.2s · Tokens 30 (In 10 / Out 20) · 该模型当天剩余次数 5");
+      provider: "modelscope",
+      modelScopeRemaining: 5,
+      modelScopeModelLimit: 50,
+      modelScopeUserRemaining: 1995,
+      modelScopeUserLimit: 2000
+    })).toBe("用时 1.2s · Tokens 30 (In 10 / Out 20) · 模型剩余 5/50 · 账号剩余 1995/2000");
+  });
+
+  it("omits ModelScope quota text for non-ModelScope providers", () => {
+    expect(chat.formatMetricText({
+      latencyMs: 1000,
+      tokens: 7,
+      provider: "openai"
+    })).toBe("用时 1.0s · Tokens 7");
   });
 
   it("renders user chat items with escaped content", () => {

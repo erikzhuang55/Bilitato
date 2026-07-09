@@ -552,7 +552,9 @@ function resolveThemeMode(settings = state.settings || {}) {
 
 function applyThemeMode() {
     const box = document.querySelector(".ai-summary-plugin-box");
-    if (box) box.dataset.theme = resolveThemeMode();
+    const theme = resolveThemeMode();
+    if (box) box.dataset.theme = theme;
+    document.querySelector(".release-notice-overlay")?.setAttribute("data-theme", theme);
 }
 
 window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", () => {

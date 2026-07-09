@@ -5348,6 +5348,55 @@ function buildProcessedSubtitlePayload(cache, maxChars = MAX_SUBTITLE_CHARS) {
     return "";
 }
 
+function normalizeSubtitleLanguageKeyForCache(value = {}) {
+    const text = [
+        value?.language,
+        value?.subtitleLanguage,
+        value?.languageLabel,
+        value?.subtitleLanguageLabel,
+        value?.id,
+        value?.label
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (/中文|汉语|简体|繁體|繁体|chinese|zh-cn|zh-tw|zh-hans|zh_hans|zh-hant|zh_hant|\bzh\b|\bchi\b|\bzho\b/.test(text)) return "zh";
+    return text.replace(/[（(].*?[）)]/g, "").replace(/\s+/g, "").trim();
+}
+
+function createSubtitleVariantKeyForCache({ bvid, cid, language = "default" } = {}) {
+    return [
+        normalizeBvid(bvid),
+        String(cid || "").trim(),
+        String(language || "default").trim()
+    ].join("::");
+}
+
+function getChineseSubtitleCache(cache = {}) {
+    if (!cache || typeof cache !== "object") return cache;
+    const bvid = normalizeBvid(cache?.bvid || "");
+    const cid = Number(cache?.cid || 0);
+    const variants = cache.subtitleVariants && typeof cache.subtitleVariants === "object" ? cache.subtitleVariants : {};
+    const zhKey = createSubtitleVariantKeyForCache({ bvid, cid, language: "zh" });
+    const direct = variants[zhKey];
+    const picked = direct || Object.values(variants).find((entry) => (
+        entry &&
+        typeof entry === "object" &&
+        Number(entry.cid || 0) === cid &&
+        normalizeSubtitleLanguageKeyForCache(entry) === "zh" &&
+        Array.isArray(entry.rawSubtitle) &&
+        entry.rawSubtitle.length
+    ));
+    if (picked?.rawSubtitle?.length) {
+        return {
+            ...cache,
+            rawSubtitle: cloneData(picked.rawSubtitle),
+            processedSubtitle: Array.isArray(picked.processedSubtitle) ? cloneData(picked.processedSubtitle) : [],
+            subtitleLanguage: "zh",
+            subtitleLanguageLabel: String(picked.languageLabel || picked.subtitleLanguageLabel || "中文"),
+            subtitleUrl: String(picked.subtitleUrl || cache.subtitleUrl || "")
+        };
+    }
+    return cache;
+}
+
 function buildRawAdEvidencePayload(cache, maxChars = 8000) {
     const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
     if (!raw.length) return "";
@@ -5433,10 +5482,11 @@ function getSegmentsSubtitlePayload(cache, options = {}) {
 }
 
 function getSubtitlePayload(cache, options = {}) {
-    if (options?.purpose === "segments") return getSegmentsSubtitlePayload(cache, options);
-    const processedText = buildProcessedSubtitlePayload(cache);
+    const aiCache = getChineseSubtitleCache(cache);
+    if (options?.purpose === "segments") return getSegmentsSubtitlePayload(aiCache, options);
+    const processedText = buildProcessedSubtitlePayload(aiCache);
     if (processedText) return processedText;
-    return buildRawSubtitlePayload(cache);
+    return buildRawSubtitlePayload(aiCache);
 }
 
 function getSubtitlePayloadMeta(cache, text, options = {}) {

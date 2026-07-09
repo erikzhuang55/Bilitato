@@ -2185,6 +2185,12 @@ button {
     color: #cbd3df;
 }
 
+.ai-summary-plugin-box[data-theme="dark"] .metrics-box {
+    background: #20242c;
+    color: #cbd3df;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
 .ai-summary-plugin-box[data-theme="dark"] .chat-suggest-link {
     border-color: rgba(255, 255, 255, 0.12);
     background: #20242c;

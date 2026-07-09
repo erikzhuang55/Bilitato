@@ -7,7 +7,7 @@
     "1.5.0": {
       title: "Bilitato 已更新至 v1.5",
       displayVersion: "v1.5",
-      subtitle: "这版重点修复 B 站分 P 字幕串线和字幕语言切换问题，同时补齐深色模式、侧边栏和调用指标的细节体验。",
+      subtitle: "这版把近期侧边栏、缓存、版本提醒和主题能力统一整理到 v1.5，同时重点修复 B 站分 P 字幕串线和字幕语言切换问题。",
       groups: [
         {
           tag: "修复",
@@ -32,8 +32,21 @@
           tag: "新增",
           items: [
             {
+              title: "新增浏览器侧边栏模式",
+              desc: "可以把 Bilitato 打开到浏览器侧边栏里使用，字幕、总结、聊天、验真和设置都能在更宽的空间里操作。",
+              highlight: true,
+            },
+            {
               title: "新增深色 / 浅色模式",
               desc: "设置页新增跟随系统、浅色模式和深色模式，内嵌面板与侧边栏都能使用。",
+            },
+            {
+              title: "新增缓存管理",
+              desc: "设置页可以删除当前视频或所有视频的 AI 结果缓存，并按需关闭云端缓存拉取。",
+            },
+            {
+              title: "新增可用版本更新提醒",
+              desc: "检测到新版本时会在标题旁显示提示，点击即可打开浏览器扩展管理页更新。",
             },
           ],
         },
@@ -56,6 +69,114 @@
         },
       ],
       privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。字幕与总结缓存仍保存在浏览器本地；分 P 隔离只用于避免不同选集内容互相覆盖。",
+    },
+    "1.4.x": {
+      title: "Bilitato v1.4 系列更新回顾",
+      displayVersion: "v1.4",
+      subtitle: "v1.4 系列主要打磨侧边栏、缓存、模型选项、更新提醒和错误恢复体验。新增能力已统一归入 v1.5，这里保留各版本的优化与修复重点。",
+      groups: [
+        {
+          tag: "v1.4.3",
+          sections: [
+            {
+              tag: "修复",
+              items: [
+                {
+                  title: "修复侧边栏切回内嵌偶发无效",
+                  desc: "修复点击切回内嵌面板后，侧边栏关闭了但页面仍保持侧边栏状态的问题。",
+                  highlight: true,
+                },
+                {
+                  title: "修复更新导览显示细节",
+                  desc: "更新导览弹层不再被页面右上角按钮干扰，阅读更新内容更干净。",
+                },
+              ],
+            },
+            {
+              tag: "优化",
+              items: [
+                {
+                  title: "优化缓存管理区域",
+                  desc: "缓存删除和云端缓存拉取开关的排版更舒展，宽侧边栏里不再显得拥挤。",
+                },
+                {
+                  title: "补充测试入口",
+                  desc: "测试页新增可用版本更新入口，方便确认更新提示和跳转是否正常。",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          tag: "v1.4.2",
+          sections: [
+            {
+              tag: "修复",
+              items: [
+                {
+                  title: "修复侧边栏体验不一致",
+                  desc: "侧边栏的字幕、总结、聊天、验真和设置样式进一步对齐内嵌面板，复制、下载、提示气泡和滚动表现更一致。",
+                  highlight: true,
+                },
+                {
+                  title: "修复聊天和总结滚动异常",
+                  desc: "修复流式输出时页面跳到顶部、切换新视频后聊天引导缺失、复制后无反馈等问题。",
+                },
+                {
+                  title: "修复下载兼容问题",
+                  desc: "针对部分浏览器直接下载 B 站音视频时的跨域失败，改为更兼容的下载链路。",
+                },
+              ],
+            },
+            {
+              tag: "优化",
+              items: [
+                {
+                  title: "更新 ModelScope 模型选项",
+                  desc: "根据 ModelScope 当前可直接调用的模型范围更新默认选项，并补充更清晰的额度提示。",
+                },
+                {
+                  title: "优化侧边栏与内嵌面板切换",
+                  desc: "打开侧边栏后自动隐藏内嵌面板，切回内嵌时再恢复，页面不再同时出现两套入口。",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          tag: "v1.4.1 / v1.4.0",
+          sections: [
+            {
+              tag: "修复",
+              items: [
+                {
+                  title: "修复 B 站原生字幕默认露出和黑框残留",
+                  desc: "针对 B 站字幕懒加载，改为自动触发后只做无感隐藏，并在用户手动碰字幕按钮时立刻恢复。",
+                  highlight: true,
+                },
+                {
+                  title: "优化错误面板恢复路径",
+                  desc: "限额、限流和请求失败时提供更明确的重试、返回或设置入口，减少卡在错误状态的情况。",
+                },
+              ],
+            },
+            {
+              tag: "优化",
+              items: [
+                {
+                  title: "优化反馈中心与使用数据",
+                  desc: "反馈入口降级更稳，调用耗时、Token 和额度提示也更清楚。",
+                },
+                {
+                  title: "优化原生字幕接管",
+                  desc: "字幕抓取、隐藏和恢复逻辑更稳定，减少默认开字幕时的闪动和误触。",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。缓存管理只影响浏览器本机保存的数据，不会删除您的 B 站数据。",
     },
     "1.4.3": {
       title: "Bilitato 已更新至 v1.4.3",
@@ -649,6 +770,7 @@
 
     const overlay = document.createElement("div");
     overlay.className = "release-notice-overlay";
+    overlay.dataset.theme = box.dataset.theme || "light";
 
     overlay.innerHTML = `
       <div class="release-notice-card" role="dialog" aria-modal="true">
@@ -809,15 +931,15 @@
   function buildReleasePageVersions(version) {
     const majorHistory = [];
     if (version === "1.5.0") {
-      majorHistory.push("1.5.0", "1.4.3", "1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");
+      majorHistory.push("1.5.0", "1.4.x", "1.3.x", "1.2.x");
     } else if (version === "1.4.3") {
-      majorHistory.push("1.4.3", "1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");
+      majorHistory.push("1.4.x", "1.3.x", "1.2.x");
     } else if (version === "1.4.2") {
-      majorHistory.push("1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");
+      majorHistory.push("1.4.x", "1.3.x", "1.2.x");
     } else if (version === "1.4.1") {
-      majorHistory.push("1.4.1", "1.4.0", "1.3.x", "1.2.x");
+      majorHistory.push("1.4.x", "1.3.x", "1.2.x");
     } else if (version === "1.4.0") {
-      majorHistory.push("1.4.0", "1.3.x", "1.2.x");
+      majorHistory.push("1.4.x", "1.3.x", "1.2.x");
     } else if (version === "1.3.1" || version === "1.3.0" || version === "1.3.x") {
       majorHistory.push("1.3.x", "1.2.x");
     } else {

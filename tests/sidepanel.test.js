@@ -5,6 +5,7 @@ const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta
 const buildScript = readFileSync(new URL("../scripts/build-release.js", import.meta.url), "utf8");
 const background = readFileSync(new URL("../background.js", import.meta.url), "utf8");
 const content = readFileSync(new URL("../content.js", import.meta.url), "utf8");
+const contentCss = readFileSync(new URL("../content.css", import.meta.url), "utf8");
 const releaseNotice = readFileSync(new URL("../content/contentReleaseNotice.js", import.meta.url), "utf8");
 const sidepanel = readFileSync(new URL("../sidepanel.js", import.meta.url), "utf8");
 const sidepanelHtml = readFileSync(new URL("../sidepanel.html", import.meta.url), "utf8");
@@ -76,7 +77,20 @@ describe("native side panel", () => {
     expect(releaseNotice).toContain("Bilitato 已更新至 v1.5");
     expect(releaseNotice).toContain("修复同一视频不同分 P 字幕串线");
     expect(releaseNotice).toContain("修复字幕语言回切失败");
-    expect(releaseNotice).toContain('majorHistory.push("1.5.0", "1.4.3"');
+    expect(releaseNotice).toContain("新增浏览器侧边栏模式");
+    expect(releaseNotice).toContain('"1.4.x"');
+    expect(releaseNotice).toContain("Bilitato v1.4 系列更新回顾");
+    expect(releaseNotice).toContain('majorHistory.push("1.5.0", "1.4.x"');
+  });
+
+  it("applies theme settings to release notice and setup guide overlays", () => {
+    expect(releaseNotice).toContain('overlay.dataset.theme = box.dataset.theme || "light"');
+    expect(content).toContain('guideOverlay.dataset.theme = theme');
+    expect(content).toContain('releaseOverlay.dataset.theme = theme');
+    expect(content).toContain('overlay.dataset.theme = resolveThemeMode()');
+    expect(contentCss).toContain('#setup-guide-overlay[data-theme="dark"] .guide-card');
+    expect(contentCss).toContain('.release-notice-overlay[data-theme="dark"] .release-notice-card');
+    expect(sidepanel).toContain('document.querySelector(".release-notice-overlay")?.setAttribute("data-theme", theme)');
   });
 
   it("keeps the ModelScope preset list aligned with currently supported models", () => {
@@ -135,6 +149,8 @@ describe("native side panel", () => {
     expect(content).toContain("function applyOfficialSubtitleVariantToLocalCache");
     expect(content).toContain("function syncBiliSubtitleDomLanguage");
     expect(content).toContain("syncBiliSubtitleDomLanguage(targetOption)");
+    expect(content).toContain("function getLocalZhSubtitleRows");
+    expect(content).toContain('if (targetKey === "zh")');
     expect(content).toContain("subtitleVariants: variants");
     expect(content).toContain("rawSubtitle: rows");
     expect(content).not.toContain("if (!rows.length && option?.domLabel)");
@@ -146,12 +162,15 @@ describe("native side panel", () => {
     expect(content).toContain("BILI_ALLOW_SUBTITLE_RECAPTURE");
     expect(inject).toContain('event.data?.type === "BILI_ALLOW_SUBTITLE_RECAPTURE"');
     expect(background).toContain("subtitleLanguage");
+    expect(background).toContain("function getChineseSubtitleCache");
+    expect(background).toContain("const aiCache = getChineseSubtitleCache(cache)");
     expect(background).toContain("clearDerived");
     expect(sidepanel).toContain('contentAction("switch-subtitle-language"');
     expect(content).toContain("const canSwitchOfficialSubtitle = rows.length > 0 && !isAsrSubtitle && !running");
     expect(sidepanel).toContain("const languageButton = canSwitchOfficialSubtitle");
     expect(sidepanel).toContain("showSubtitleLanguageMenu");
     expect(sidepanelCss).toContain(".subtitle-language-option.active");
+    expect(sidepanelCss).toContain('.ai-summary-plugin-box[data-theme="dark"] .metrics-box');
   });
 
   it("stores ASR subtitles with the current part cid resolved from playurl", () => {

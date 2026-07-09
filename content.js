@@ -1120,15 +1120,14 @@ async function onInjectMessage(event) {
         pendingPayload.subtitleLanguageLabel = String(languageSwitch.label || "");
         pendingPayload.clearDerived = true;
         appState.activeSubtitleId = String(languageSwitch.id || "");
-    } else if (!pendingPayload.subtitleLanguage) {
-        const selectedSubtitleOption = appState.subtitleOptions.find((item) => getSubtitleOptionId(item) === appState.activeSubtitleId)
+    } else {
+        const selectedSubtitleOption = findSubtitleOption(appState.subtitleOptions, appState.activeSubtitleId)
             || pickSubtitle(appState.subtitleOptions);
-        if (selectedSubtitleOption) {
-            pendingPayload.subtitleLanguage = normalizeSubtitleLanguageKey(selectedSubtitleOption) || getSubtitleOptionId(selectedSubtitleOption);
-            pendingPayload.subtitleLanguageLabel = selectedSubtitleOption.label || getSubtitleOptionId(selectedSubtitleOption);
-            pendingPayload.subtitleUrl = selectedSubtitleOption.url || pendingPayload.subtitleUrl;
-            appState.activeSubtitleId = pendingPayload.subtitleLanguage || appState.activeSubtitleId;
-        }
+        pendingPayload.source = "official";
+        pendingPayload.subtitleLanguage = "zh";
+        pendingPayload.subtitleLanguageLabel = "中文";
+        pendingPayload.subtitleUrl = selectedSubtitleOption?.url || pendingPayload.subtitleUrl;
+        appState.activeSubtitleId = "zh";
     }
     if (!pendingPayload.bvid) {
         appState.pendingSubtitle = pendingPayload;
@@ -1139,6 +1138,14 @@ async function onInjectMessage(event) {
         return;
     }
     await forwardSubtitlePayload(pendingPayload, "inject_message_forwarded");
+    if (!languageSwitch) {
+        applyOfficialSubtitleVariantToLocalCache({
+            bvid,
+            option: { id: "zh", label: "中文", url: pendingPayload.subtitleUrl || "" },
+            rows: subtitles,
+            languageKey: "zh"
+        });
+    }
     if (languageSwitch) appState.pendingSubtitleLanguageSwitch = null;
     const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
     const currentCid = resolveCid();
@@ -1831,6 +1838,10 @@ function applyThemeMode() {
     const box = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
     if (box) box.dataset.theme = theme;
     if (panelShadowRoot?.host) panelShadowRoot.host.dataset.theme = theme;
+    const guideOverlay = panelShadowRoot?.getElementById("setup-guide-overlay");
+    if (guideOverlay) guideOverlay.dataset.theme = theme;
+    const releaseOverlay = panelShadowRoot?.querySelector(".release-notice-overlay");
+    if (releaseOverlay) releaseOverlay.dataset.theme = theme;
 }
 
 window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", () => {
@@ -3915,6 +3926,7 @@ function showSetupGuide() {
     _guideStep = 1;
     const overlay = document.createElement("div");
     overlay.id = "setup-guide-overlay";
+    overlay.dataset.theme = resolveThemeMode();
     const box = panelShadowRoot.querySelector(".ai-summary-plugin-box");
     if (!box) return;
     box.appendChild(overlay);
@@ -6802,7 +6814,9 @@ async function triggerDefaultSubtitleCapture() {
             });
             return;
         }
-        const selectedSubtitleOption = appState.subtitleOptions.find((item) => getSubtitleOptionId(item) === appState.activeSubtitleId) || null;
+        const selectedSubtitleOption = findSubtitleOption(appState.subtitleOptions, "zh")
+            || findSubtitleOption(appState.subtitleOptions, appState.activeSubtitleId)
+            || pickSubtitle(appState.subtitleOptions);
         await chrome.runtime.sendMessage({
             action: "SUBTITLE_CAPTURED",
             payload: {
@@ -6812,9 +6826,16 @@ async function triggerDefaultSubtitleCapture() {
                 title: cleanBilibiliTitle(document.title),
                 subtitle: payload,
                 source: "official",
-                subtitleLanguage: getSubtitleOptionId(selectedSubtitleOption),
-                subtitleLanguageLabel: selectedSubtitleOption?.label || ""
+                subtitleLanguage: "zh",
+                subtitleLanguageLabel: "中文",
+                subtitleUrl: selectedSubtitleOption?.url || ""
             }
+        });
+        applyOfficialSubtitleVariantToLocalCache({
+            bvid,
+            option: { ...(selectedSubtitleOption || {}), id: "zh", label: "中文" },
+            rows: payload,
+            languageKey: "zh"
         });
         appState.subtitleCapturedBvid = bvid;
         appState.lastSubtitleForwardAt = Date.now();
@@ -7405,6 +7426,50 @@ function getCachedSubtitleRowsForLanguage(option) {
     return { key, rows, entry };
 }
 
+function getLocalZhSubtitleRows() {
+    const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    const cid = resolveCid();
+    const variants = appState.cache?.subtitleVariants && typeof appState.cache.subtitleVariants === "object"
+        ? appState.cache.subtitleVariants
+        : {};
+    const key = createSubtitleCacheKey({ bvid, cid, language: "zh" });
+    const direct = variants[key];
+    if (Array.isArray(direct?.rawSubtitle) && direct.rawSubtitle.length) return { key, rows: direct.rawSubtitle, entry: direct };
+    const candidate = Object.entries(variants).find(([variantKey, entry]) => (
+        String(variantKey || "").startsWith(`${String(bvid || "").toLowerCase()}::${String(cid || "")}::`) &&
+        normalizeSubtitleLanguageKey({
+            id: entry?.language,
+            label: entry?.languageLabel,
+            lan: entry?.language
+        }) === "zh" &&
+        Array.isArray(entry?.rawSubtitle) &&
+        entry.rawSubtitle.length
+    ));
+    if (candidate) return { key: candidate[0], rows: candidate[1].rawSubtitle, entry: candidate[1] };
+    const cacheLanguage = normalizeSubtitleLanguageKey({
+        id: appState.cache?.subtitleLanguage,
+        label: appState.cache?.subtitleLanguageLabel
+    });
+    const rawRows = Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle : [];
+    const isOfficial = String(appState.cache?.subtitleSource || "").toLowerCase() === "official";
+    if (rawRows.length && isOfficial && (!cacheLanguage || cacheLanguage === "zh" || String(appState.cache?.subtitleLanguage || "") === "default")) {
+        return {
+            key,
+            rows: rawRows,
+            entry: {
+                bvid,
+                cid,
+                language: "zh",
+                languageLabel: appState.cache?.subtitleLanguageLabel || "中文",
+                subtitleUrl: appState.cache?.subtitleUrl || "",
+                rawSubtitle: rawRows,
+                processedSubtitle: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle : []
+            }
+        };
+    }
+    return null;
+}
+
 function findSubtitleOption(options, optionId) {
     const targetId = String(optionId || "").trim();
     const targetKey = normalizeSubtitleLanguageKey({ id: targetId, label: targetId, domLabel: targetId });
@@ -7549,6 +7614,27 @@ function applyOfficialSubtitleVariantToLocalCache({ bvid, option, rows, cached =
 async function switchOfficialSubtitleLanguage(optionId) {
     const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
     if (!bvid) throw new Error("未获取到当前视频");
+    const targetKey = normalizeSubtitleLanguageKey({ id: optionId, label: optionId, domLabel: optionId });
+    if (targetKey === "zh") {
+        const zhCached = getLocalZhSubtitleRows();
+        if (zhCached?.rows?.length) {
+            const zhOption = {
+                id: "zh",
+                label: zhCached.entry?.languageLabel || "中文",
+                url: zhCached.entry?.subtitleUrl || ""
+            };
+            applyOfficialSubtitleVariantToLocalCache({
+                bvid,
+                option: zhOption,
+                rows: zhCached.rows,
+                cached: zhCached,
+                languageKey: "zh"
+            });
+            renderContent();
+            showToast("已切换为中文");
+            return;
+        }
+    }
     const options = await refreshSubtitleOptionsForCurrentVideo({ force: !getOfficialSubtitleOptionsForCurrentVideo().length });
     const option = findSubtitleOption(options, optionId);
     if (!option) throw new Error("未找到该字幕语种");

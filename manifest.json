@@ -19,11 +19,9 @@
     "webRequest",
     "downloads",
     "offscreen",
-    "sidePanel",
-    "tabs"
+    "sidePanel"
   ],
   "host_permissions": [
-    "https://api.bilibili.com/*",
     "*://*.bilibili.com/*",
     "*://*.bilivideo.com/*",
     "*://*.bilivideo.cn/*",

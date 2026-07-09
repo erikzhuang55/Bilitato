@@ -13,10 +13,11 @@ const inject = readFileSync(new URL("../inject.js", import.meta.url), "utf8");
 describe("native side panel", () => {
   it("declares the Chrome side panel entry and permissions", () => {
     expect(manifest.permissions).toContain("sidePanel");
-    expect(manifest.permissions).toContain("tabs");
     expect(manifest.permissions).toContain("webRequest");
+    expect(manifest.permissions).not.toContain("tabs");
     expect(manifest.side_panel?.default_path).toBe("sidepanel.html");
-    expect(manifest.host_permissions).toContain("https://api.bilibili.com/*");
+    expect(manifest.host_permissions).toContain("*://*.bilibili.com/*");
+    expect(manifest.host_permissions).not.toContain("https://api.bilibili.com/*");
   });
 
   it("includes side panel files in release packages", () => {

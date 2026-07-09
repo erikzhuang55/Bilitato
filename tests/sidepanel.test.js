@@ -5,6 +5,7 @@ const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta
 const buildScript = readFileSync(new URL("../scripts/build-release.js", import.meta.url), "utf8");
 const background = readFileSync(new URL("../background.js", import.meta.url), "utf8");
 const content = readFileSync(new URL("../content.js", import.meta.url), "utf8");
+const releaseNotice = readFileSync(new URL("../content/contentReleaseNotice.js", import.meta.url), "utf8");
 const sidepanel = readFileSync(new URL("../sidepanel.js", import.meta.url), "utf8");
 const sidepanelHtml = readFileSync(new URL("../sidepanel.html", import.meta.url), "utf8");
 const sidepanelCss = readFileSync(new URL("../sidepanel.css", import.meta.url), "utf8");
@@ -43,8 +44,38 @@ describe("native side panel", () => {
     expect(content).toContain("function setEmbeddedPanelVisible");
     expect(sidepanel).toContain("hideEmbeddedForActiveTab");
     expect(sidepanel).toContain("restoreHiddenEmbedded");
+    expect(sidepanel).toContain("switchingToEmbedded");
+    expect(sidepanel).toContain("if (!state.switchingToEmbedded)");
     expect(sidepanel).toContain('command: "set-embedded-visible"');
     expect(sidepanel).toContain('window.addEventListener("pagehide"');
+  });
+
+  it("checks database driven update availability without frequent polling", () => {
+    expect(manifest.version).toBe("1.4.3");
+    expect(background).toContain('msg.action === "CHECK_LATEST_VERSION"');
+    expect(background).toContain('msg.action === "OPEN_EXTENSION_MANAGEMENT"');
+    expect(background).toContain("VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000");
+    expect(background).toContain("SUPABASE_DEFAULT_VERSION_TABLE");
+    expect(background).toContain("extension_versions");
+    expect(content).toContain("version-update-badge");
+    expect(content).toContain('action: "CHECK_LATEST_VERSION"');
+    expect(content).toContain('action: "OPEN_EXTENSION_MANAGEMENT"');
+    expect(content).toContain("showDebugVersionUpdateBadge");
+    expect(content).toContain('data-action="debug-show-version-update"');
+    expect(content).toContain(">有可用版本更新</button>");
+    expect(content).not.toContain("有可用版本更新 v${latest}");
+    expect(sidepanel).toContain("version-update-badge");
+    expect(sidepanel).toContain("checkLatestVersionAvailability");
+    expect(sidepanel).toContain(">有可用版本更新</button>");
+    expect(sidepanel).not.toContain("有可用版本更新 v${latest}");
+  });
+
+  it("ships the 1.4.3 release notice page", () => {
+    expect(releaseNotice).toContain('"1.4.3"');
+    expect(releaseNotice).toContain("Bilitato 已更新至 v1.4.3");
+    expect(releaseNotice).toContain("新增可用版本更新提醒");
+    expect(releaseNotice).toContain("修复侧边栏切回内嵌偶发无效");
+    expect(releaseNotice).toContain('majorHistory.push("1.4.3", "1.4.2"');
   });
 
   it("keeps the ModelScope preset list aligned with currently supported models", () => {

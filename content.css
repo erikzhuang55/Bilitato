@@ -129,6 +129,23 @@ body::-webkit-scrollbar {
     padding-left: 5px;
 }
 
+.version-update-badge {
+    height: 20px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(251, 114, 153, 0.12);
+    color: #fb7299;
+    font-size: 11px;
+    line-height: 20px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.version-update-badge:hover {
+    background: rgba(251, 114, 153, 0.2);
+}
+
 .logo-remaining-container {
     display: flex;
     align-items: center;

@@ -4,6 +4,51 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.4.3": {
+      title: "Bilitato 已更新至 v1.4.3",
+      displayVersion: "v1.4.3",
+      subtitle: "这版继续打磨侧边栏和更新体验：切回内嵌面板更稳定，缓存管理更清楚，也能在有新版可用时更早提醒你。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "新增可用版本更新提醒",
+              desc: "当插件检测到有新版本可用时，会在标题旁显示小提示，点击即可打开浏览器扩展管理页进行更新。",
+              highlight: true,
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "修复侧边栏切回内嵌偶发无效",
+              desc: "修复点击切回内嵌面板后，侧边栏关闭了但页面仍保持侧边栏状态的问题。",
+              highlight: true,
+            },
+            {
+              title: "修复更新导览显示细节",
+              desc: "更新导览弹层现在不会再被页面右上角按钮干扰，阅读更新内容更干净。",
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "优化缓存管理区域",
+              desc: "缓存删除和云端缓存拉取开关的排版更舒展，宽侧边栏里不再显得拥挤。",
+            },
+            {
+              title: "补充测试入口",
+              desc: "测试页新增可用版本更新入口，方便确认更新提示和跳转是否正常。",
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。版本检查只读取插件最新版本号，不包含视频内容、字幕、聊天或个人配置。",
+    },
     "1.4.2": {
       title: "Bilitato 已更新至 v1.4.2",
       displayVersion: "v1.4.2",
@@ -710,7 +755,9 @@
 
   function buildReleasePageVersions(version) {
     const majorHistory = [];
-    if (version === "1.4.2") {
+    if (version === "1.4.3") {
+      majorHistory.push("1.4.3", "1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");
+    } else if (version === "1.4.2") {
       majorHistory.push("1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");
     } else if (version === "1.4.1") {
       majorHistory.push("1.4.1", "1.4.0", "1.3.x", "1.2.x");

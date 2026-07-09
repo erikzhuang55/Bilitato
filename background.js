@@ -43,6 +43,8 @@ const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 let offscreenDocumentPromise = null;
 const MAX_ASR_BOUNDARY_DIAGNOSTICS = 8;
 const USAGE_EVENT_SESSION_ID = createUsageEventSessionId();
+const VERSION_CHECK_STORAGE_KEY = "latestVersionState";
+const VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000;
 
 function syncRuntimeDebugFlag(enabled) {
     IS_DEBUG_MODE = !!enabled;
@@ -509,6 +511,7 @@ const BILI_PLAYURL_API = "https://api.bilibili.com/x/player/playurl";
 const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
 const SUPABASE_DEFAULT_FEEDBACK_TABLE = "feedback";
 const SUPABASE_DEFAULT_USAGE_DAILY_RPC = "increment_feature_usage_daily";
+const SUPABASE_DEFAULT_VERSION_TABLE = "extension_versions";
 const DEFAULT_SENTRY_DSN = "https://04879b2bd5fc72eba741a402e26c4790@o4511384082055168.ingest.de.sentry.io/4511384299634768";
 const TASK_KEYS = ["summary", "segments", "rumors"];
 const CLOUD_CACHE_KEYS = ["subtitle", ...TASK_KEYS];
@@ -537,6 +540,7 @@ const DEFAULT_SETTINGS = {
     supabaseVideoCacheTable: SUPABASE_DEFAULT_VIDEO_CACHE_TABLE,
     supabaseFeedbackTable: SUPABASE_DEFAULT_FEEDBACK_TABLE,
     supabaseUsageDailyRpcName: SUPABASE_DEFAULT_USAGE_DAILY_RPC,
+    supabaseVersionTable: SUPABASE_DEFAULT_VERSION_TABLE,
     prefMode: "quality",
     segmentPromptVariant: "test",
     debugMode: false,
@@ -850,6 +854,14 @@ async function handleMessage(msg, sender) {
         const tabId = Number(msg.tabId || sender?.tab?.id || 0);
         if (!tabId || !chrome.sidePanel?.open) throw new Error("当前浏览器不支持侧边栏");
         return chrome.sidePanel.open({ tabId }).then(() => ({ tabId }));
+    }
+    if (msg.action === "OPEN_EXTENSION_MANAGEMENT") {
+        await chrome.tabs.create({ url: "chrome://extensions/", active: true });
+        return {};
+    }
+    if (msg.action === "CHECK_LATEST_VERSION") {
+        const settings = await getResolvedSettings();
+        return { versionState: await getLatestVersionState(settings, { force: !!msg.force }) };
     }
     if (msg.action === "REPORT_ERROR") {
         await captureBackgroundError(msg.error || "Content error", {
@@ -6243,6 +6255,75 @@ function buildDerivedCacheClearPatch() {
     };
 }
 
+function compareSemver(left, right) {
+    const parse = (value) => String(value || "").trim().replace(/^v/i, "").split(".").map((part) => {
+        const num = Number(String(part || "").match(/\d+/)?.[0] || 0);
+        return Number.isFinite(num) ? num : 0;
+    });
+    const a = parse(left);
+    const b = parse(right);
+    for (let i = 0; i < Math.max(a.length, b.length, 3); i++) {
+        const delta = Number(a[i] || 0) - Number(b[i] || 0);
+        if (delta !== 0) return delta > 0 ? 1 : -1;
+    }
+    return 0;
+}
+
+function normalizeVersionState(raw = {}) {
+    const manifest = chrome.runtime.getManifest();
+    const currentVersion = String(manifest?.version || "").trim();
+    const latestVersion = String(raw.latestVersion || raw.latest_version || raw.version || "").trim();
+    return {
+        currentVersion,
+        latestVersion,
+        hasUpdate: !!latestVersion && compareSemver(latestVersion, currentVersion) > 0,
+        releaseUrl: String(raw.releaseUrl || raw.release_url || "").trim(),
+        checkedAt: Number(raw.checkedAt || raw.checked_at || 0) || 0
+    };
+}
+
+async function fetchLatestVersionState(settings) {
+    if (!isSupabaseEnabled(settings)) return normalizeVersionState({ checkedAt: Date.now() });
+    const table = String(settings.supabaseVersionTable || SUPABASE_DEFAULT_VERSION_TABLE).trim() || SUPABASE_DEFAULT_VERSION_TABLE;
+    const rows = await supabaseSelect(settings, table, {
+        select: "id,latest_version,version,release_url,enabled",
+        id: "eq.bilitato",
+        limit: "1"
+    }, {
+        requestName: "extension_version_fetch",
+        errorMessage: "版本信息查询失败"
+    });
+    const row = Array.isArray(rows) && rows.length ? rows[0] : {};
+    if (row?.enabled === false) return normalizeVersionState({ checkedAt: Date.now() });
+    return normalizeVersionState({
+        latestVersion: row?.latest_version || row?.version || "",
+        releaseUrl: row?.release_url || "",
+        checkedAt: Date.now()
+    });
+}
+
+async function getLatestVersionState(settings, { force = false } = {}) {
+    const cached = await chrome.storage.local.get([VERSION_CHECK_STORAGE_KEY]);
+    const cachedState = normalizeVersionState(cached?.[VERSION_CHECK_STORAGE_KEY] || {});
+    const freshEnough = cachedState.checkedAt && Date.now() - cachedState.checkedAt < VERSION_CHECK_INTERVAL_MS;
+    if (!force && freshEnough) return cachedState;
+    try {
+        const nextState = await fetchLatestVersionState(settings);
+        await chrome.storage.local.set({ [VERSION_CHECK_STORAGE_KEY]: nextState });
+        return nextState;
+    } catch (error) {
+        logBackground.warn("extension_version_fetch_failed", {
+            task: "version",
+            error: error?.message || String(error)
+        });
+        const fallback = {
+            ...cachedState,
+            checkedAt: cachedState.checkedAt || Date.now()
+        };
+        return fallback;
+    }
+}
+
 async function getCloudCacheReadPrefs(bvid, settingsInput = null) {
     const normalizedBvid = normalizeBvid(bvid);
     const settings = settingsInput || await getResolvedSettings();
@@ -6393,6 +6474,7 @@ function normalizeSettings(settings) {
     const supabaseVideoCacheTable = String(base.supabaseVideoCacheTable || DEFAULT_SETTINGS.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE).trim() || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE;
     const supabaseFeedbackTable = String(base.supabaseFeedbackTable || DEFAULT_SETTINGS.supabaseFeedbackTable || SUPABASE_DEFAULT_FEEDBACK_TABLE).trim() || SUPABASE_DEFAULT_FEEDBACK_TABLE;
     const supabaseUsageDailyRpcName = String(base.supabaseUsageDailyRpcName || DEFAULT_SETTINGS.supabaseUsageDailyRpcName || SUPABASE_DEFAULT_USAGE_DAILY_RPC).trim() || SUPABASE_DEFAULT_USAGE_DAILY_RPC;
+    const supabaseVersionTable = String(base.supabaseVersionTable || DEFAULT_SETTINGS.supabaseVersionTable || SUPABASE_DEFAULT_VERSION_TABLE).trim() || SUPABASE_DEFAULT_VERSION_TABLE;
     const prefModeRaw = String(base.prefMode || DEFAULT_SETTINGS.prefMode || "quality").toLowerCase();
     const prefMode = prefModeRaw === "efficiency" ? "efficiency" : "quality";
     const segmentPromptVariantRaw = String(base.segmentPromptVariant || DEFAULT_SETTINGS.segmentPromptVariant || "test").toLowerCase();
@@ -6427,6 +6509,7 @@ function normalizeSettings(settings) {
         supabaseVideoCacheTable,
         supabaseFeedbackTable,
         supabaseUsageDailyRpcName,
+        supabaseVersionTable,
         prefMode,
         segmentPromptVariant,
         disableCloudCacheRead

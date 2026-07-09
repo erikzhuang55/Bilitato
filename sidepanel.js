@@ -29,10 +29,14 @@ const state = {
     feedbackDraft: { type: "bug", title: "", content: "", includeLogs: true },
     cloudCachePrefs: { all: false, current: false },
     releaseChecked: false,
+    versionState: null,
+    versionCheckInFlight: false,
+    versionCheckedAt: 0,
     summaryRatio: 0.6,
     segmentsExpanded: false,
     initialized: false,
-    activeBvid: ""
+    activeBvid: "",
+    switchingToEmbedded: false
 };
 
 const app = document.getElementById("app");
@@ -95,6 +99,30 @@ function normalizeCloudCachePrefs(value = {}) {
     };
 }
 
+function renderVersionUpdateBadge() {
+    if (!state.versionState?.hasUpdate) return "";
+    return `<button type="button" class="version-update-badge" data-action="open-extension-management" title="打开扩展管理页更新">有可用版本更新</button>`;
+}
+
+async function checkLatestVersionAvailability({ force = false } = {}) {
+    if (state.versionCheckInFlight) return;
+    const stale = Date.now() - Number(state.versionCheckedAt || 0) > 60 * 60 * 1000;
+    if (!force && state.versionCheckedAt && !stale) return;
+    state.versionCheckInFlight = true;
+    try {
+        const result = await chrome.runtime.sendMessage({ action: "CHECK_LATEST_VERSION", force });
+        if (result?.ok) {
+            state.versionState = result.versionState || null;
+            state.versionCheckedAt = Date.now();
+            render();
+        }
+    } catch (_) {
+        state.versionCheckedAt = Date.now();
+    } finally {
+        state.versionCheckInFlight = false;
+    }
+}
+
 function isBiliTab(tab) {
     return /^https:\/\/www\.bilibili\.com\/(video|list)\//i.test(String(tab?.url || ""));
 }
@@ -117,7 +145,9 @@ async function refreshState({ quiet = false, hydrate = false } = {}) {
             return;
         }
         state.tabId = tab.id;
-        await hideEmbeddedForActiveTab(tab.id);
+        if (!state.switchingToEmbedded) {
+            await hideEmbeddedForActiveTab(tab.id);
+        }
         const result = await chrome.runtime.sendMessage({
             action: "GET_BOOTSTRAP",
             tabId: tab.id,
@@ -174,6 +204,7 @@ async function refreshState({ quiet = false, hydrate = false } = {}) {
             state.renderSignature = nextSignature;
             render();
         }
+        checkLatestVersionAvailability().catch(() => {});
     } catch (error) {
         if (!quiet) state.error = error?.message || "读取失败";
         render();
@@ -208,6 +239,7 @@ async function setEmbeddedVisibleForTab(tabId, visible) {
 }
 
 async function hideEmbeddedForActiveTab(tabId) {
+    if (state.switchingToEmbedded) return;
     const id = Number(tabId || 0);
     if (!id) return;
     if (state.hiddenEmbeddedTabId && state.hiddenEmbeddedTabId !== id) {
@@ -465,6 +497,7 @@ function renderShell(content) {
                 <div class="plugin-brand">
                     <img src="assets/icons/icon38.png" alt="">
                     <span class="logo-title">Bilitato B站视频小助手</span>
+                    ${renderVersionUpdateBadge()}
                 </div>
                 <div class="plugin-top-actions">
                     <div class="metric-trigger">
@@ -1227,9 +1260,17 @@ async function handleAction(actionNode) {
     const action = actionNode.dataset.action;
     if (action === "refresh") return refreshState({ hydrate: true });
     if (action === "switch-to-embedded") {
-        await restoreHiddenEmbedded();
-        await contentAction("switch-to-embedded");
-        window.close();
+        state.switchingToEmbedded = true;
+        const targetTabId = state.tabId || state.hiddenEmbeddedTabId;
+        try {
+            if (targetTabId) await setEmbeddedVisibleForTab(targetTabId, true);
+            if (state.tabId) await contentAction("switch-to-embedded");
+            state.hiddenEmbeddedTabId = 0;
+            setTimeout(() => window.close(), 80);
+        } catch (error) {
+            state.switchingToEmbedded = false;
+            throw error;
+        }
         return;
     }
     if (action === "seek") return contentAction("seek", { time: Number(actionNode.dataset.time || 0) });
@@ -1373,6 +1414,10 @@ async function handleAction(actionNode) {
     if (action === "open-external-url") {
         const url = String(actionNode.dataset.url || "").trim();
         if (url) return chrome.tabs.create({ url });
+        return;
+    }
+    if (action === "open-extension-management") {
+        await runtimeMessage({ action: "OPEN_EXTENSION_MANAGEMENT" });
         return;
     }
     if (action === "refresh-page") {

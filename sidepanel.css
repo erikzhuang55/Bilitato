@@ -76,6 +76,24 @@ button {
     white-space: nowrap;
 }
 
+.version-update-badge {
+    flex: 0 0 auto;
+    height: 20px;
+    padding: 0 7px;
+    border: 0;
+    border-radius: 999px;
+    background: rgba(251, 114, 153, 0.12);
+    color: #fb7299;
+    font-size: 11px;
+    line-height: 20px;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.version-update-badge:hover {
+    background: rgba(251, 114, 153, 0.2);
+}
+
 .header-icon-btn {
     width: 28px;
     height: 28px;
@@ -1574,17 +1592,21 @@ button {
 .settings-action-row {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+    gap: 10px;
 }
 
 .settings-action-row .btn {
     width: 100%;
+    min-height: 36px;
+    padding: 0 12px;
+    line-height: 1.35;
 }
 
 .settings-check-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px 12px;
+    gap: 10px 16px;
+    margin: 4px 0 12px;
 }
 
 .settings-check-row {
@@ -1605,6 +1627,20 @@ button {
 .settings-check-row span {
     min-width: 0;
     line-height: 1.35;
+}
+
+.settings-check-row input:disabled + span {
+    color: #8a94a6;
+}
+
+.release-notice-overlay {
+    position: fixed;
+    z-index: 2147483000;
+    border-radius: 0;
+}
+
+.release-notice-card {
+    max-height: calc(100vh - 36px);
 }
 
 .real-page-shell {

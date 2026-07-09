@@ -464,6 +464,8 @@ const appState = {
     feedbackSeenTimer: null,
     feedbackVisibleUnreadIds: new Set(),
     cloudCachePrefs: { all: false, current: false },
+    versionState: null,
+    versionCheckTimer: null,
     lastSettingsUsageEventSignature: "",
     playInfo: null,
     playInfoUpdatedAt: 0,
@@ -491,6 +493,51 @@ function normalizeCloudCachePrefs(value = {}) {
         all: !!value?.all,
         current: !!value?.current
     };
+}
+
+function renderVersionUpdateBadge() {
+    const state = appState.versionState || {};
+    if (!state.hasUpdate) return "";
+    return `<button type="button" class="version-update-badge" data-action="open-extension-management" title="打开扩展管理页更新">有可用版本更新</button>`;
+}
+
+function showDebugVersionUpdateBadge() {
+    appState.versionState = {
+        currentVersion: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.3",
+        latestVersion: "1.4.4-test",
+        hasUpdate: true,
+        releaseUrl: "",
+        checkedAt: Date.now()
+    };
+    const badgeHost = panelShadowRoot?.querySelector(".plugin-brand-title");
+    if (badgeHost) {
+        badgeHost.querySelector(".version-update-badge")?.remove();
+        badgeHost.insertAdjacentHTML("beforeend", renderVersionUpdateBadge());
+    } else {
+        renderApp();
+    }
+    showToast("已显示可用版本更新入口");
+}
+
+async function checkLatestVersionAvailability({ force = false } = {}) {
+    try {
+        const res = await chrome.runtime.sendMessage({ action: "CHECK_LATEST_VERSION", force });
+        if (!res?.ok) return;
+        appState.versionState = res.versionState || null;
+        const badgeHost = panelShadowRoot?.querySelector(".plugin-brand-title");
+        if (badgeHost) badgeHost.querySelector(".version-update-badge")?.remove();
+        if (badgeHost && appState.versionState?.hasUpdate) {
+            badgeHost.insertAdjacentHTML("beforeend", renderVersionUpdateBadge());
+        }
+    } catch (_) {}
+}
+
+function scheduleVersionAvailabilityCheck() {
+    if (appState.versionCheckTimer) return;
+    checkLatestVersionAvailability();
+    appState.versionCheckTimer = setInterval(() => {
+        checkLatestVersionAvailability();
+    }, 12 * 60 * 60 * 1000);
 }
 
 function reportUsageEvent(payload = {}) {
@@ -1256,9 +1303,10 @@ async function waitPanelMount() {
         const sidebarActiveIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/active/sidebar.png`);
         panel.innerHTML = `
             <div class="plugin-top-logo">
-                <div style="display:flex; align-items:center; gap:8px;">
+                <div class="plugin-brand-title" style="display:flex; align-items:center; gap:8px;">
                     <img src="${logoIconSrc}" style="width:38px;height:38px;object-fit:contain;" />
                     <span class="logo-title">Bilitato B站视频小助手</span>
+                    ${renderVersionUpdateBadge()}
                 </div>
                 <div class="plugin-top-actions">
                     <div class="logo-remaining-container">
@@ -1750,6 +1798,7 @@ function renderApp() {
     renderNav();
     renderContent();
     renderTopRemaining();
+    scheduleVersionAvailabilityCheck();
     maybeAutoShowSetupGuideOnFirstRun();
     globalThis.BilitatoReleaseNotice?.maybeShowReleaseNotice({
         root: panelShadowRoot,
@@ -2021,6 +2070,12 @@ function bindPanelDelegatedEvents() {
             deleteAllVideoCacheFromPanel();
             return;
         }
+        if (action === "open-extension-management") {
+            chrome.runtime.sendMessage({ action: "OPEN_EXTENSION_MANAGEMENT" }).catch(() => {
+                showToast("请打开浏览器扩展管理页更新");
+            });
+            return;
+        }
         if (action === "export-srt") {
             handleExportSrt(actionNode);
             return;
@@ -2177,8 +2232,12 @@ function bindPanelDelegatedEvents() {
         if (action === "debug-show-release-notice") {
             globalThis.BilitatoReleaseNotice?.renderReleaseNotice?.({
                 root: panelShadowRoot,
-                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.2"
+                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.3"
             });
+            return;
+        }
+        if (action === "debug-show-version-update") {
+            showDebugVersionUpdateBadge();
             return;
         }
         if (action === "follow-now") {
@@ -4505,7 +4564,7 @@ function renderSettings(panel) {
 }
 
 function renderErrorDemoControls() {
-    const currentVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.2";
+    const currentVersion = globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.3";
     const panelErrors = [
         ["HTTP_401", "401 Key 无效", "summary"],
         ["ALIYUN_REALNAME_REQUIRED", "阿里云未实名", "summary"],
@@ -4561,6 +4620,7 @@ function renderErrorDemoControls() {
             <div class="error-demo-grid">${toastErrors.map(renderButton).join("")}</div>
             <div class="error-demo-label">更新导览</div>
             <button type="button" class="panel-btn ghost" data-action="debug-show-release-notice">显示 v${escapeHtml(currentVersion)} 更新导览</button>
+            <button type="button" class="panel-btn ghost" data-action="debug-show-version-update">显示可用版本更新入口</button>
             <button type="button" class="panel-btn ghost error-demo-clear" data-action="debug-clear-errors">清空测试状态</button>
         </div>
     `;

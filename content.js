@@ -7553,7 +7553,11 @@ async function switchOfficialSubtitleLanguage(optionId) {
     const option = findSubtitleOption(options, optionId);
     if (!option) throw new Error("未找到该字幕语种");
     const { option: targetOption, rows, cached } = await resolveSubtitleRowsForOption(option, { forceRefresh: true });
-    if (!rows.length && !targetOption?.url) throw new Error("该语种暂不支持直接切换");
+    if (!rows.length && !targetOption?.url && (targetOption?.domLabel || targetOption?.label)) {
+        await switchSubtitleLanguageByDom(targetOption);
+        return;
+    }
+    if (!rows.length && !targetOption?.url) throw new Error("未能读取该语种字幕");
     if (!rows.length) throw new Error("该语种字幕为空");
     await saveOfficialSubtitleRows(targetOption, rows, cached);
     syncBiliSubtitleDomLanguage(targetOption);

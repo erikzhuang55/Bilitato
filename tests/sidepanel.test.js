@@ -138,7 +138,8 @@ describe("native side panel", () => {
     expect(content).toContain("subtitleVariants: variants");
     expect(content).toContain("rawSubtitle: rows");
     expect(content).not.toContain("if (!rows.length && option?.domLabel)");
-    expect(content).toContain("该语种暂不支持直接切换");
+    expect(content).toContain("await switchSubtitleLanguageByDom(targetOption)");
+    expect(content).not.toContain("该语种暂不支持直接切换");
     expect(content).toContain("BILI_SWITCH_SUBTITLE_LANGUAGE");
     expect(inject).toContain('event.data?.type === "BILI_SWITCH_SUBTITLE_LANGUAGE"');
     expect(inject).toContain("switchSubtitleLanguageByLabel");

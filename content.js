@@ -1105,7 +1105,13 @@ async function onInjectMessage(event) {
         cid: Number.isFinite(cid) && cid > 0 ? cid : (appState.injectCid || 0),
         tid: getTidFromUrl(location.href),
         title: cleanBilibiliTitle(document.title),
-        subtitle: subtitles
+        subtitle: subtitles,
+        p: Number(event.data?.p || 0) || undefined,
+        part: String(event.data?.part || ""),
+        duration: Number(event.data?.duration || 0) || 0,
+        subtitleLanguage: String(event.data?.language || ""),
+        subtitleLanguageLabel: String(event.data?.languageLabel || ""),
+        subtitleUrl: String(event.data?.subtitleUrl || "")
     };
     const languageSwitch = appState.pendingSubtitleLanguageSwitch;
     if (languageSwitch && (!languageSwitch.bvid || normalizeBvidCase(languageSwitch.bvid) === bvid)) {
@@ -1125,6 +1131,18 @@ async function onInjectMessage(event) {
     }
     await forwardSubtitlePayload(pendingPayload, "inject_message_forwarded");
     if (languageSwitch) appState.pendingSubtitleLanguageSwitch = null;
+    const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    const currentCid = resolveCid();
+    if ((currentBvid && normalizeBvidCase(pendingPayload.bvid) !== currentBvid) || (currentCid > 0 && pendingPayload.cid > 0 && currentCid !== pendingPayload.cid)) {
+        logContent.warn("subtitle_detected", {
+            source: "stale_ui_skip",
+            bvid: pendingPayload.bvid,
+            cid: pendingPayload.cid,
+            current_bvid: currentBvid,
+            current_cid: currentCid
+        });
+        return;
+    }
     if (appState.activePage === "CC") {
         const container = document.getElementById("page-CC");
         if (container) renderCC(container, subtitles);
@@ -1303,13 +1321,13 @@ async function waitPanelMount() {
         const sidebarActiveIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/active/sidebar.png`);
         panel.innerHTML = `
             <div class="plugin-top-logo">
-                <div class="plugin-brand-title" style="display:flex; align-items:center; gap:8px;">
+                <div class="plugin-brand-title">
                     <img src="${logoIconSrc}" style="width:38px;height:38px;object-fit:contain;" />
                     <span class="logo-title">Bilitato B站视频小助手</span>
                     ${renderVersionUpdateBadge()}
                 </div>
                 <div class="plugin-top-actions">
-                    <div class="logo-remaining-container">
+                    <div class="logo-remaining-container" data-button-tooltip="Checking...">
                         <img src="${usageIconSrc}" class="logo-info-icon" />
                         <div class="logo-remaining-tooltip" id="logo-remaining">Checking...</div>
                     </div>
@@ -1793,8 +1811,26 @@ async function loadBootstrapData() {
     }
 }
 
+function resolveThemeMode(settings = appState.settings || {}) {
+    const mode = String(settings.themeMode || "system").toLowerCase();
+    if (mode === "dark" || mode === "light") return mode;
+    return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+}
+
+function applyThemeMode() {
+    const theme = resolveThemeMode();
+    const box = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
+    if (box) box.dataset.theme = theme;
+    if (panelShadowRoot?.host) panelShadowRoot.host.dataset.theme = theme;
+}
+
+window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", () => {
+    if (String(appState.settings?.themeMode || "system") === "system") applyThemeMode();
+});
+
 function renderApp() {
     bindPanelDelegatedEvents();
+    applyThemeMode();
     renderNav();
     renderContent();
     renderTopRemaining();
@@ -2017,6 +2053,33 @@ function bindPanelDelegatedEvents() {
             logUI.info("ui_generate_rumor", { tab_id: appState.tabId || null });
             reportRetryClickIfNeeded(["rumors"], action);
             runTasks(["rumors"]);
+            return;
+        }
+        if (action === "go-summary") {
+            appState.activePage = "summary";
+            chrome.runtime.sendMessage({ action: "CLEAR_TASK_ERRORS", tasks: ["summary", "segments"] }).catch(() => {});
+            appState.panelErrors = {
+                ...(appState.panelErrors || {}),
+                summary: null,
+                segments: null
+            };
+            if (appState.tabState?.taskStatus) {
+                appState.tabState = {
+                    ...(appState.tabState || {}),
+                    taskStatus: {
+                        ...(appState.tabState.taskStatus || {}),
+                        summary: "idle",
+                        segments: "idle"
+                    },
+                    taskErrors: {
+                        ...(appState.tabState.taskErrors || {}),
+                        summary: null,
+                        segments: null
+                    }
+                };
+            }
+            renderNav();
+            renderContent();
             return;
         }
         if (action === "summary-copy") {
@@ -3221,7 +3284,7 @@ function renderCC(panel, rowsOverride) {
     const refreshIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/refresh.png`);
     const languageIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/default/language.png`);
     const languageActiveIconSrc = chrome.runtime.getURL(`${UI_ICON_BASE_DIR}/active/language.png`);
-    const canSwitchOfficialSubtitle = false;
+    const canSwitchOfficialSubtitle = rows.length > 0 && !isAsrSubtitle && !running;
     const languageBtnHtml = canSwitchOfficialSubtitle
         ? `<button class="panel-icon-btn cc-language-btn" data-action="cc-language-menu" data-button-tooltip="切换字幕语言" aria-label="切换字幕语言"><img class="icon-default" src="${languageIconSrc}" alt=""><img class="icon-active" src="${languageActiveIconSrc}" alt=""></button>`
         : "";
@@ -4242,6 +4305,19 @@ function renderSettings(panel) {
                 </div>
                 <button type="button" class="panel-btn ghost" data-action="settings-reset-prompts">恢复默认</button>
                 <div class="settings-group-title">调用与显示模式</div>
+                <label>深/浅模式</label>
+                ${renderCustomSelect("settings-theme-mode", [
+                    { value: "system", label: "跟随系统" },
+                    { value: "light", label: "浅色模式" },
+                    { value: "dark", label: "深色模式" }
+                ], ["system", "light", "dark"].includes(String(settings.themeMode || "system")) ? String(settings.themeMode || "system") : "system")}
+                <label>默认开屏页</label>
+                ${renderCustomSelect("settings-default-open-page", [
+                    { value: "CC", label: "字幕" },
+                    { value: "summary", label: "总结" },
+                    { value: "chat", label: "聊天" },
+                    { value: "real", label: "验真" }
+                ], defaultOpenPage)}
                 <label class="settings-label-with-info">
                     <span>调用模式</span>
                     <span class="settings-info-icon" data-tooltip="高速：总结和分段分别调用，速度更快但消耗 2 次。省流：一次调用同时生成总结和分段，更省次数。">i</span>
@@ -4250,13 +4326,6 @@ function renderSettings(panel) {
                     { value: "quality", label: "高速模式" },
                     { value: "efficiency", label: "省流模式" }
                 ], settings.prefMode === "quality" ? "quality" : "efficiency")}
-                <label>默认开屏页</label>
-                ${renderCustomSelect("settings-default-open-page", [
-                    { value: "CC", label: "字幕" },
-                    { value: "summary", label: "总结" },
-                    { value: "chat", label: "聊天" },
-                    { value: "real", label: "验真" }
-                ], defaultOpenPage)}
                 <div class="settings-group-title">异常诊断</div>
                 <label>允许上报异常</label>
                 ${renderCustomSelect("settings-sentry-enabled", [
@@ -5003,6 +5072,8 @@ async function runTasks(tasks, options = {}) {
         const durationMeta = resolveVideoDurationMeta();
         const taskContext = {
             ...(durationMeta ? { videoDuration: durationMeta } : {}),
+            cid: resolveCid(),
+            tid: getTidFromUrl(location.href),
             ...((options && typeof options === "object" && options.taskContext) ? options.taskContext : {})
         };
         const runtimeAction = String(options?.overrideAction || "RUN_TASKS");
@@ -5107,17 +5178,23 @@ function renderAssistantBubble(text, metrics) {
 
 function renderTopRemaining() {
     const holder = panelShadowRoot ? panelShadowRoot.getElementById("logo-remaining") : null;
+    const trigger = holder?.closest?.(".logo-remaining-container") || null;
+    const setMetricText = (text) => {
+        if (holder) {
+            holder.textContent = text;
+            holder.title = text;
+        }
+        if (trigger) trigger.dataset.buttonTooltip = text;
+    };
     if (!holder) return;
     if (shouldHideRuntimeMetrics()) {
-        holder.textContent = "任务运行中...";
-        holder.title = "任务运行中...";
+        setMetricText("任务运行中...");
         return;
     }
     const metrics = Array.isArray(appState.cache?.metrics) ? appState.cache.metrics : [];
     const latest = metrics[metrics.length - 1];
     if (!latest) {
-        holder.textContent = "暂无调用指标";
-        holder.title = "暂无调用指标";
+        setMetricText("暂无调用指标");
         return;
     }
     const total = Number(latest.tokens || 0);
@@ -5133,14 +5210,13 @@ function renderTopRemaining() {
         );
     }
     const metricLine = parts.join(" · ");
-    holder.textContent = metricLine;
-    holder.title = metricLine;
+    setMetricText(metricLine);
 }
 
 function formatMetricQuotaValue(remaining, limit) {
     const hasRemaining = remaining !== null && remaining !== undefined && remaining !== "";
     const hasLimit = limit !== null && limit !== undefined && limit !== "";
-    if (!hasRemaining) return "未返回";
+    if (!hasRemaining) return hasLimit ? `官网未返回/${limit}` : "官网未返回";
     return hasLimit ? `${remaining}/${limit}` : String(remaining);
 }
 
@@ -5529,6 +5605,7 @@ function toggleCopyMenu(buttonNode) {
     const overlay = document.createElement("div");
     overlay.id = "copy-option-menu";
     overlay.className = "copy-menu-overlay";
+    overlay.dataset.theme = resolveThemeMode();
     overlay.innerHTML = `<div class="copy-option-menu"><button type="button" class="copy-option-btn" data-action="copy-with-time">复制（带时间戳）</button><button type="button" class="copy-option-btn" data-action="copy-without-time">复制（纯文本）</button></div>`;
     const menu = overlay.querySelector(".copy-option-menu");
     overlay.addEventListener("click", (event) => {
@@ -5569,22 +5646,32 @@ function toggleSubtitleLanguageMenu(buttonNode) {
         existing.remove();
         return;
     }
+    const rect = buttonNode?.getBoundingClientRect?.();
+    if (!buttonNode?.isConnected || !rect || rect.width <= 0 || rect.height <= 0) {
+        showToast("字幕语言按钮尚未就绪");
+        return;
+    }
     const options = getOfficialSubtitleOptionsForCurrentVideo();
     if (options.length <= 1) {
         refreshSubtitleOptionsForCurrentVideo({ force: true })
             .then(() => {
                 renderContent();
-                const freshOptions = getOfficialSubtitleOptionsForCurrentVideo();
-                if (freshOptions.length > 1) toggleSubtitleLanguageMenu(buttonNode);
-                else showToast("当前视频暂无可切换字幕语种");
+                requestAnimationFrame(() => {
+                    requestAnimationFrame(() => {
+                        const freshButton = panelShadowRoot?.querySelector('[data-action="cc-language-menu"]');
+                        const freshOptions = getOfficialSubtitleOptionsForCurrentVideo();
+                        if (freshOptions.length > 1 && freshButton?.isConnected) toggleSubtitleLanguageMenu(freshButton);
+                        else showToast("当前视频暂无可切换字幕语种");
+                    });
+                });
             })
             .catch(() => showToast("读取字幕语种失败"));
         return;
     }
-    const rect = buttonNode?.getBoundingClientRect?.();
     const overlay = document.createElement("div");
     overlay.id = "subtitle-language-menu";
     overlay.className = "copy-menu-overlay";
+    overlay.dataset.theme = resolveThemeMode();
     const activeId = String(appState.activeSubtitleId || appState.cache?.subtitleLanguage || "");
     overlay.innerHTML = `<div class="copy-option-menu subtitle-language-menu">${options.map((item) => {
         const id = getSubtitleOptionId(item);
@@ -5592,20 +5679,32 @@ function toggleSubtitleLanguageMenu(buttonNode) {
         return `<button type="button" class="copy-option-btn subtitle-language-option ${active ? "active" : ""}" data-action="cc-switch-language" data-language-id="${escapeHtmlAttr(id)}">${escapeHtml(item.label || id)}${active ? " · 当前" : ""}</button>`;
     }).join("")}</div>`;
     const menu = overlay.querySelector(".copy-option-menu");
+    if (menu) menu.style.visibility = "hidden";
     overlay.addEventListener("click", (event) => {
+        const switchButton = event.target.closest?.("[data-action='cc-switch-language']");
+        if (switchButton) {
+            event.preventDefault();
+            event.stopPropagation();
+            closeSubtitleLanguageMenu();
+            switchOfficialSubtitleLanguage(switchButton.dataset.languageId).catch((error) => {
+                showToast(error?.message || "切换字幕失败");
+            });
+            return;
+        }
         if (event.target === overlay) closeSubtitleLanguageMenu();
     });
-    if (rect) {
-        const left = Math.max(8, Math.min(rect.right + 8, window.innerWidth - 180));
-        const top = Math.max(8, rect.top);
-        overlay.style.setProperty("--copy-menu-left", `${left}px`);
-        overlay.style.setProperty("--copy-menu-top", `${top}px`);
-        if (menu) {
-            menu.style.left = "var(--copy-menu-left)";
-            menu.style.top = "var(--copy-menu-top)";
-        }
-    }
     document.body.appendChild(overlay);
+    if (rect && menu) {
+        requestAnimationFrame(() => {
+            const padding = 8;
+            const menuRect = menu.getBoundingClientRect();
+            const left = Math.max(padding, Math.min(rect.right + 8, window.innerWidth - menuRect.width - padding));
+            const top = Math.max(padding, Math.min(rect.top, window.innerHeight - menuRect.height - padding));
+            menu.style.left = `${Math.round(left)}px`;
+            menu.style.top = `${Math.round(top)}px`;
+            menu.style.visibility = "visible";
+        });
+    }
 }
 
 function closeSubtitleLanguageMenu() {
@@ -6154,6 +6253,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         siliconFlowApiKey: String(panel.querySelector("#settings-siliconflow-api-key")?.value || "").trim(),
         siliconFlowAsrModel: String(panel.querySelector("#settings-siliconflow-asr-model")?.value || "").trim(),
         prefMode: panel.querySelector("#settings-pref-mode")?.value || "quality",
+        themeMode: panel.querySelector("#settings-theme-mode")?.value || "system",
         defaultOpenPage,
         sentryEnabled: panel.querySelector("#settings-sentry-enabled")?.value === "true",
         disableCloudCacheRead: panel.querySelector("#settings-disable-cloud-all")?.checked === true,
@@ -6210,6 +6310,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         const res = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: payload });
         if (!res?.ok) throw new Error(res?.error || "保存失败");
         appState.settings = res.settings || payload;
+        applyThemeMode();
         appState.settingsPromptDraft = normalizePromptSettingsState(appState.settings?.promptSettings || payload.promptSettings);
         reportSettingsSavedUsageEvent(appState.settings || payload, isAutoSave ? "autosave" : "manual");
         
@@ -7097,8 +7198,9 @@ async function fetchSubtitleByPlayerApi(bvid) {
     if (!subtitles.length) return [];
     appState.subtitleOptions = normalizeSubtitleOptions(subtitles);
     appState.subtitleOptionsBvid = normalizeBvidCase(bvid);
+    appState.subtitleOptionsKey = `${normalizeBvidCase(bvid)}::${cid}`;
     const picked = pickSubtitle(subtitles);
-    appState.activeSubtitleId = getSubtitleOptionId(picked);
+    appState.activeSubtitleId = normalizeSubtitleLanguageKey(picked) || getSubtitleOptionId(picked);
     const rawUrl = String(picked?.url || picked?.subtitle_url || "").trim();
     if (!rawUrl) return [];
     const subtitleUrl = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
@@ -7127,26 +7229,49 @@ function getSubtitleOptionId(option) {
     return String(option?.id || option?.lan || option?.lan_doc || "").trim();
 }
 
+function normalizeSubtitleLanguageKey(option) {
+    const text = [
+        option?.id,
+        option?.lan,
+        option?.label,
+        option?.lanDoc,
+        option?.domLabel
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (/中文|汉语|简体|zh-cn|zh-hans|zh_hans|\bzh\b/.test(text)) return "zh";
+    if (/english|英语|英文|en-us|en-gb|\ben\b/.test(text)) return "en";
+    return text.replace(/[（(].*?[）)]/g, "").replace(/\s+/g, "").trim();
+}
+
+function createSubtitleCacheKey({ bvid, cid, language = "default" } = {}) {
+    return [
+        String(bvid || "").trim().toLowerCase(),
+        String(cid || "").trim(),
+        String(language || "default").trim()
+    ].join("::");
+}
+
 function mergeSubtitleOptions(...groups) {
     const output = [];
     groups.flat().forEach((item) => {
         const id = getSubtitleOptionId(item);
         const label = String(item?.label || item?.lanDoc || item?.lan || id || "").trim();
         if (!id && !label) return;
-        const normalized = { ...item, id: id || label, label: label || id };
-        const labelKey = label.toLowerCase();
-        const existingIndex = output.findIndex((option) => String(option.label || "").toLowerCase() === labelKey);
+        const normalized = { ...item, id: normalizeSubtitleLanguageKey(item) || id || label, label: label || id };
+        const languageKey = normalizeSubtitleLanguageKey(normalized);
+        const existingIndex = output.findIndex((option) => normalizeSubtitleLanguageKey(option) === languageKey);
         if (existingIndex >= 0) {
             const existing = output[existingIndex];
             output[existingIndex] = {
-                ...normalized,
                 ...existing,
+                ...normalized,
+                id: languageKey || existing.id || normalized.id,
+                label: existing.label || normalized.label,
                 url: existing.url || normalized.url || "",
                 domLabel: existing.domLabel || normalized.domLabel || ""
             };
             return;
         }
-        output.push(normalized);
+        output.push({ ...normalized, id: languageKey || normalized.id });
     });
     return output;
 }
@@ -7159,12 +7284,17 @@ function collectSubtitleOptionsFromDom() {
     return nodes.map((node, index) => {
         const label = String(node?.textContent || node?.innerText || "").replace(/\s+/g, " ").trim();
         if (!label || /关闭|字幕设置|自动/i.test(label)) return null;
+        const item = node?.closest?.(".bpx-player-ctrl-subtitle-language-item") || node;
+        const dataset = item?.dataset || {};
+        const rawUrl = String(dataset.subtitleUrl || dataset.url || dataset.href || "").trim();
+        const url = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
         return {
             id: `dom:${label}`,
             label,
             domLabel: label,
             domIndex: index,
-            source: "dom"
+            source: "dom",
+            url
         };
     }).filter(Boolean);
 }
@@ -7190,7 +7320,9 @@ async function refreshSubtitleOptionsFromDom() {
 
 function getOfficialSubtitleOptionsForCurrentVideo() {
     const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
-    if (!currentBvid || normalizeBvidCase(appState.subtitleOptionsBvid || "") !== currentBvid) return [];
+    const currentCid = resolveCid();
+    const currentKey = currentBvid && currentCid ? `${currentBvid}::${currentCid}` : "";
+    if (!currentKey || String(appState.subtitleOptionsKey || "") !== currentKey) return [];
     return Array.isArray(appState.subtitleOptions) ? appState.subtitleOptions : [];
 }
 
@@ -7198,7 +7330,8 @@ async function refreshSubtitleOptionsForCurrentVideo({ force = false } = {}) {
     const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
     const cid = resolveCid();
     if (!bvid || !cid) return [];
-    if (!force && normalizeBvidCase(appState.subtitleOptionsBvid || "") === bvid && Array.isArray(appState.subtitleOptions) && appState.subtitleOptions.length) {
+    const optionsKey = `${bvid}::${cid}`;
+    if (!force && String(appState.subtitleOptionsKey || "") === optionsKey && Array.isArray(appState.subtitleOptions) && appState.subtitleOptions.length) {
         return appState.subtitleOptions;
     }
     let apiOptions = [];
@@ -7214,6 +7347,7 @@ async function refreshSubtitleOptionsForCurrentVideo({ force = false } = {}) {
     const domOptions = await refreshSubtitleOptionsFromDom().catch(() => []);
     appState.subtitleOptions = mergeSubtitleOptions(apiOptions, domOptions);
     appState.subtitleOptionsBvid = bvid;
+    appState.subtitleOptionsKey = optionsKey;
     if (!appState.activeSubtitleId && appState.subtitleOptions.length) {
         const picked = pickSubtitle(appState.subtitleOptions);
         appState.activeSubtitleId = getSubtitleOptionId(picked);
@@ -7229,19 +7363,37 @@ async function fetchSubtitleBody(subtitleUrl) {
     return Array.isArray(body) ? body : [];
 }
 
+function getCachedSubtitleRowsForLanguage(option) {
+    const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    const cid = resolveCid();
+    const language = normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default";
+    const key = createSubtitleCacheKey({ bvid, cid, language });
+    const variants = appState.cache?.subtitleVariants && typeof appState.cache.subtitleVariants === "object"
+        ? appState.cache.subtitleVariants
+        : {};
+    const entry = variants[key];
+    const rows = Array.isArray(entry?.rawSubtitle) ? entry.rawSubtitle : [];
+    if (!rows.length) return null;
+    return { key, rows, entry };
+}
+
 async function switchOfficialSubtitleLanguage(optionId) {
     const bvid = normalizeBvidCase(resolveCurrentBvid() || "");
     if (!bvid) throw new Error("未获取到当前视频");
     const options = await refreshSubtitleOptionsForCurrentVideo({ force: !getOfficialSubtitleOptionsForCurrentVideo().length });
     const targetId = String(optionId || "").trim();
-    const option = options.find((item) => getSubtitleOptionId(item) === targetId);
+    const option = options.find((item) => getSubtitleOptionId(item) === targetId || normalizeSubtitleLanguageKey(item) === targetId);
     if (!option) throw new Error("未找到该字幕语种");
-    if (!option?.url && option?.domLabel) {
+    const languageKey = normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default";
+    const cached = getCachedSubtitleRowsForLanguage(option);
+    const rows = cached?.rows?.length
+        ? cached.rows
+        : (option?.url ? await fetchSubtitleBody(option.url) : []);
+    if (!rows.length && option?.domLabel) {
         await switchSubtitleLanguageByDom(option);
         return;
     }
-    if (!option?.url) throw new Error("未找到该字幕语种");
-    const rows = await fetchSubtitleBody(option.url);
+    if (!rows.length && !option?.url) throw new Error("该语种暂不支持直接切换");
     if (!rows.length) throw new Error("该语种字幕为空");
     const res = await chrome.runtime.sendMessage({
         action: "SUBTITLE_CAPTURED",
@@ -7252,16 +7404,18 @@ async function switchOfficialSubtitleLanguage(optionId) {
             title: cleanBilibiliTitle(document.title),
             subtitle: rows,
             source: "official",
-            subtitleLanguage: getSubtitleOptionId(option),
+            subtitleLanguage: languageKey,
             subtitleLanguageLabel: option.label || getSubtitleOptionId(option),
+            subtitleUrl: option.url || cached?.entry?.subtitleUrl || "",
             clearDerived: true
         }
     });
     if (!res?.ok) throw new Error(res?.error || "切换字幕失败");
-    appState.activeSubtitleId = getSubtitleOptionId(option);
+    appState.activeSubtitleId = languageKey;
     appState.subtitleCapturedBvid = bvid;
     appState.lastSubtitleForwardAt = Date.now();
     await syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true });
+    if (appState.activePage === "CC") renderContent();
     showToast(`已切换为${option.label || option.id}`);
 }
 
@@ -7276,6 +7430,7 @@ async function switchSubtitleLanguageByDom(option) {
         bvid,
         startedAt: marker
     };
+    appState.subtitleCapturedBvid = "";
     window.postMessage({ type: "BILI_ALLOW_SUBTITLE_RECAPTURE" }, "*");
     const clicked = await clickSubtitleLanguageDomOption(label);
     if (!clicked) {
@@ -7284,24 +7439,44 @@ async function switchSubtitleLanguageByDom(option) {
     }
     await waitForSubtitleSwitchForward(marker);
     await syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true });
+    if (appState.activePage === "CC") renderContent();
     showToast(`已切换为${label}`);
 }
 
 async function clickSubtitleLanguageDomOption(label) {
-    let nodes = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
-    if (!nodes.some((node) => String(node?.textContent || node?.innerText || "").trim() === label)) {
-        openSubtitleLanguageDomMenu();
-        await new Promise((resolve) => setTimeout(resolve, 160));
-        nodes = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
-    }
-    const node = nodes.find((item) => String(item?.textContent || item?.innerText || "").replace(/\s+/g, " ").trim() === label);
-    const target = node?.closest?.(".bpx-player-ctrl-subtitle-language-item") || node;
-    if (!target) return false;
-    target.click();
-    return true;
+    const normalizedLabel = String(label || "").replace(/\s+/g, " ").trim();
+    if (!normalizedLabel) return false;
+    const requestId = `subtitle_switch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const resultPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            window.removeEventListener("message", onMessage);
+            resolve({ clicked: false, matchedText: "" });
+        }, 1500);
+        function onMessage(event) {
+            if (event?.data?.type !== "BILI_SUBTITLE_LANGUAGE_SWITCH_RESULT") return;
+            if (String(event.data?.requestId || "") !== requestId) return;
+            clearTimeout(timer);
+            window.removeEventListener("message", onMessage);
+            resolve({
+                clicked: !!event.data?.clicked,
+                matchedText: String(event.data?.matchedText || "")
+            });
+        }
+        window.addEventListener("message", onMessage);
+    });
+    window.postMessage({ type: "BILI_SWITCH_SUBTITLE_LANGUAGE", label: normalizedLabel, requestId }, "*");
+    const result = await resultPromise;
+    logContent.info("subtitle_detected", {
+        source: "dom_language_click_result",
+        request_id: requestId,
+        label: normalizedLabel,
+        clicked: !!result.clicked,
+        matched_text: result.matchedText || ""
+    });
+    return !!result.clicked;
 }
 
-function waitForSubtitleSwitchForward(marker, timeoutMs = 5000) {
+function waitForSubtitleSwitchForward(marker, timeoutMs = 8000) {
     return new Promise((resolve, reject) => {
         const startedAt = Date.now();
         const timer = setInterval(() => {
@@ -7320,7 +7495,7 @@ function waitForSubtitleSwitchForward(marker, timeoutMs = 5000) {
 }
 
 function resolveCid() {
-    return resolveCidFromState(appState);
+    return getCurrentRouteCid() || resolveCidFromState(appState);
 }
 
 function resolveCurrentBvid() {
@@ -7401,6 +7576,18 @@ function getRoutePartId() {
     }
 }
 
+function getCurrentRouteCid() {
+    const candidates = [
+        appState.injectCid,
+        appState.tabState?.activeCid
+    ];
+    for (const value of candidates) {
+        const cid = Number(value || 0);
+        if (Number.isFinite(cid) && cid > 0) return cid;
+    }
+    return 0;
+}
+
 function isCacheForCurrentRouteVideo(cache, targetBvid = "") {
     if (!cache) return false;
     const target = normalizeBvidCase(targetBvid || resolveCurrentBvid() || "");
@@ -7409,7 +7596,10 @@ function isCacheForCurrentRouteVideo(cache, targetBvid = "") {
 
     const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
     const routeTid = getRoutePartId();
+    const routeCid = getCurrentRouteCid();
+    const cacheCid = Number(cache?.cid || 0);
     if (routeBvid && cacheBvid && routeBvid !== cacheBvid) return false;
+    if (routeCid > 0 && cacheCid > 0 && routeCid !== cacheCid) return false;
     if (!routeTid) return true;
 
     const cacheTid = String(cache?.tid || "").trim();
@@ -8112,6 +8302,8 @@ async function syncCacheFromBackground(bvid, options = {}) {
         const res = await chrome.runtime.sendMessage({
             action: "GET_CACHE",
             bvid: target,
+            cid: resolveCid(),
+            tid: getTidFromUrl(location.href),
             skipCloud: options.skipCloud !== false
         });
         if (!res?.ok) return;
@@ -8562,6 +8754,7 @@ function toggleExportMenu(buttonNode) {
     const overlay = document.createElement("div");
     overlay.id = "export-option-menu";
     overlay.className = "copy-menu-overlay";
+    overlay.dataset.theme = resolveThemeMode();
     
     const menu = document.createElement("div");
     menu.className = "copy-option-menu export-menu";

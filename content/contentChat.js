@@ -51,7 +51,7 @@
     function formatQuotaValue(remaining, limit) {
         const hasRemaining = remaining !== null && remaining !== undefined && remaining !== "";
         const hasLimit = limit !== null && limit !== undefined && limit !== "";
-        if (!hasRemaining) return "未返回";
+        if (!hasRemaining) return hasLimit ? `官网未返回/${limit}` : "官网未返回";
         return hasLimit ? `${remaining}/${limit}` : String(remaining);
     }
 

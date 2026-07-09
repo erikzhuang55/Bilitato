@@ -69,6 +69,17 @@ function getBvid() {
     return String(state.tabState?.activeBvid || state.cache?.bvid || "").trim();
 }
 
+function isCacheForActiveVideo(cache, tabState) {
+    if (!cache) return false;
+    const activeBvid = String(tabState?.activeBvid || "").trim().toLowerCase();
+    const cacheBvid = String(cache?.bvid || "").trim().toLowerCase();
+    if (activeBvid && cacheBvid && activeBvid !== cacheBvid) return false;
+    const activeCid = Number(tabState?.activeCid || 0);
+    const cacheCid = Number(cache?.cid || 0);
+    if (activeCid > 0 && cacheCid > 0 && activeCid !== cacheCid) return false;
+    return true;
+}
+
 function getLatestMetricText() {
     const metrics = Array.isArray(state.cache?.metrics) ? state.cache.metrics : [];
     const latest = metrics[metrics.length - 1];
@@ -88,7 +99,7 @@ function getLatestMetricText() {
 function formatMetricQuotaValue(remaining, limit) {
     const hasRemaining = remaining !== null && remaining !== undefined && remaining !== "";
     const hasLimit = limit !== null && limit !== undefined && limit !== "";
-    if (!hasRemaining) return "未返回";
+    if (!hasRemaining) return hasLimit ? `官网未返回/${limit}` : "官网未返回";
     return hasLimit ? `${remaining}/${limit}` : String(remaining);
 }
 
@@ -173,7 +184,7 @@ async function refreshState({ quiet = false, hydrate = false } = {}) {
         }
         state.activeBvid = nextBvid;
         state.tabState = result.tabState || null;
-        state.cache = result.cache || null;
+        state.cache = isCacheForActiveVideo(result.cache, state.tabState) ? result.cache : null;
         state.settings = result.settings || {};
         state.cloudCachePrefs = normalizeCloudCachePrefs(result.cloudCachePrefs);
         if (!state.initialized) {
@@ -392,6 +403,7 @@ function showSubtitleLanguageMenu(anchor) {
     const overlay = document.createElement("div");
     overlay.id = "side-action-menu";
     overlay.className = "copy-menu-overlay";
+    overlay.dataset.theme = resolveThemeMode();
     const menu = document.createElement("div");
     menu.className = "copy-option-menu subtitle-language-menu";
     menu.style.left = `${Math.max(52, rect.right + 8)}px`;
@@ -422,7 +434,7 @@ function showSubtitleLanguageMenu(anchor) {
         render();
         try {
             await contentAction("switch-subtitle-language", { languageId: action.dataset.languageId });
-            await refreshState({ hydrate: false });
+            await refreshState({ hydrate: true });
             showToast("已切换字幕语言");
         } catch (error) {
             showToast(error?.message || "切换字幕失败");
@@ -440,6 +452,7 @@ function showActionMenu(kind, anchor) {
     const overlay = document.createElement("div");
     overlay.id = "side-action-menu";
     overlay.className = "copy-menu-overlay";
+    overlay.dataset.theme = resolveThemeMode();
     const menu = document.createElement("div");
     menu.className = "copy-option-menu";
     menu.style.left = `${Math.max(52, rect.right + 8)}px`;
@@ -491,8 +504,9 @@ function showActionMenu(kind, anchor) {
 }
 
 function renderShell(content) {
+    const theme = resolveThemeMode();
     app.innerHTML = `
-        <section class="ai-summary-plugin-box">
+        <section class="ai-summary-plugin-box" data-theme="${escapeHtml(theme)}">
             <header class="plugin-top-logo">
                 <div class="plugin-brand">
                     <img src="assets/icons/icon38.png" alt="">
@@ -529,6 +543,21 @@ function renderShell(content) {
         </section>
     `;
 }
+
+function resolveThemeMode(settings = state.settings || {}) {
+    const mode = String(settings.themeMode || "system").toLowerCase();
+    if (mode === "dark" || mode === "light") return mode;
+    return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+}
+
+function applyThemeMode() {
+    const box = document.querySelector(".ai-summary-plugin-box");
+    if (box) box.dataset.theme = resolveThemeMode();
+}
+
+window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change", () => {
+    if (String(state.settings?.themeMode || "system") === "system") applyThemeMode();
+});
 
 function statusHtml() {
     if (state.error) return `<div class="status error">${escapeHtml(state.error)}</div>`;
@@ -595,7 +624,7 @@ function renderCC() {
     const sourceText = subtitleCacheSource === "cloud" ? "云端缓存" : (isAsrSubtitle ? "ASR转录生成" : "官方AI字幕");
     const running = Number(state.tabState?.transcriptionProgress || 0) > 0;
     const canSwitchOfficialSubtitle = rows.length > 0 && !isAsrSubtitle && !running;
-    const languageButton = false && canSwitchOfficialSubtitle
+    const languageButton = canSwitchOfficialSubtitle
         ? `<button class="panel-icon-btn cc-language-btn" data-action="subtitle-language-menu" data-tooltip="切换字幕语言" data-tooltip-placement="bottom" aria-label="切换字幕语言"><img class="icon-default" src="assets/ui/default/language.png" alt=""><img class="icon-active" src="assets/ui/active/language.png" alt=""></button>`
         : "";
     const list = filtered.map(({ row, index }) => {
@@ -854,8 +883,9 @@ function renderSettings() {
             </div>
             <div class="settings-group">
                 <div class="settings-group-title">调用与显示</div>
-                <div class="field"><label>调用模式</label><select id="setting-pref-mode"><option value="quality" ${settings.prefMode !== "efficiency" ? "selected" : ""}>高速模式</option><option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>省流模式</option></select></div>
+                <div class="field"><label>深/浅模式</label><select id="setting-theme-mode"><option value="system" ${settings.themeMode !== "light" && settings.themeMode !== "dark" ? "selected" : ""}>跟随系统</option><option value="light" ${settings.themeMode === "light" ? "selected" : ""}>浅色模式</option><option value="dark" ${settings.themeMode === "dark" ? "selected" : ""}>深色模式</option></select></div>
                 <div class="field"><label>默认页面</label><select id="setting-default-page">${["CC", "summary", "chat", "real"].map((key) => `<option value="${key}" ${settings.defaultOpenPage === key ? "selected" : ""}>${{CC:"字幕",summary:"总结",chat:"聊天",real:"验真"}[key]}</option>`).join("")}</select></div>
+                <div class="field"><label>调用模式</label><select id="setting-pref-mode"><option value="quality" ${settings.prefMode !== "efficiency" ? "selected" : ""}>高速模式</option><option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>省流模式</option></select></div>
                 <div class="field"><label>异常上报</label><select id="setting-sentry"><option value="true" ${settings.sentryEnabled ? "selected" : ""}>开启</option><option value="false" ${!settings.sentryEnabled ? "selected" : ""}>关闭</option></select></div>
                 <div class="settings-group-title">缓存管理</div>
                 <div class="settings-action-row"><button class="btn secondary" data-action="delete-current-cache">删除当前视频 AI 结果缓存</button><button class="btn secondary" data-action="delete-all-cache">删除所有视频 AI 结果缓存</button></div>
@@ -1118,7 +1148,16 @@ async function runTask(tasks, label) {
     state.error = "";
     render();
     try {
-        await runtimeMessage({ action: "RUN_TASKS", tasks, force: true, bvid: getBvid() });
+        await runtimeMessage({
+            action: "RUN_TASKS",
+            tasks,
+            force: true,
+            bvid: getBvid(),
+            taskContext: {
+                cid: Number(state.tabState?.activeCid || state.cache?.cid || 0),
+                tid: String(state.tabState?.activeTid || state.cache?.tid || "")
+            }
+        });
         await refreshState({ quiet: true });
     } finally {
         state.busy = "";
@@ -1217,6 +1256,7 @@ async function saveSettings({ silent = false } = {}) {
         groqModel: document.getElementById("setting-groq-model")?.value.trim() || "whisper-large-v3-turbo",
         siliconFlowApiKey: document.getElementById("setting-siliconflow-key")?.value.trim() || "",
         siliconFlowAsrModel: document.getElementById("setting-siliconflow-model")?.value.trim() || "FunAudioLLM/SenseVoiceSmall",
+        themeMode: document.getElementById("setting-theme-mode")?.value || "system",
         prefMode: document.getElementById("setting-pref-mode")?.value || "quality",
         defaultOpenPage: document.getElementById("setting-default-page")?.value || "CC",
         sentryEnabled: document.getElementById("setting-sentry")?.value === "true",
@@ -1240,6 +1280,7 @@ async function saveSettings({ silent = false } = {}) {
     const result = await runtimeMessage({ action: "SAVE_SETTINGS", settings: payload });
     state.settings = result.settings || payload;
     state.renderSignature = "";
+    applyThemeMode();
     const status = document.getElementById("settings-save-status");
     if (status) {
         status.textContent = "已保存";
@@ -1320,6 +1361,27 @@ async function handleAction(actionNode) {
     if (action === "retranscribe") return contentAction("retranscribe");
     if (action === "subtitle-language-menu") return showSubtitleLanguageMenu(actionNode);
     if (action === "run-summary") return runTask(["summary", "segments"], "生成总结");
+    if (action === "go-summary") {
+        state.activePage = "summary";
+        runtimeMessage({ action: "CLEAR_TASK_ERRORS", tasks: ["summary", "segments"] }).catch(() => {});
+        if (state.tabState?.taskErrors) {
+            state.tabState = {
+                ...state.tabState,
+                taskStatus: {
+                    ...(state.tabState.taskStatus || {}),
+                    summary: "idle",
+                    segments: "idle"
+                },
+                taskErrors: {
+                    ...(state.tabState.taskErrors || {}),
+                    summary: null,
+                    segments: null
+                }
+            };
+        }
+        render();
+        return;
+    }
     if (action === "run-rumors") return runTask(["rumors"], "验真");
     if (action === "copy-summary") {
         await copyText(state.cache?.summary, "暂无总结");

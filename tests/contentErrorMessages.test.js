@@ -33,6 +33,7 @@ describe("contentErrorMessages", () => {
     expect(html).toContain("ModelScope 绑定阿里云账号示意");
     expect(html).toContain('data-action="goto-setup-guide"');
     expect(html).toContain('data-action="run-summary"');
+    expect(html).toContain('data-action="go-summary"');
   });
 
   it("maps retryable errors to panel guidance", () => {

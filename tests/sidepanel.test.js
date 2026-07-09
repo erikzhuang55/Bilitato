@@ -29,6 +29,7 @@ describe("native side panel", () => {
 
   it("connects opening, state reads, and page actions", () => {
     expect(background).toContain('msg.action === "OPEN_SIDE_PANEL"');
+    expect(background).toContain('msg.action === "CLEAR_TASK_ERRORS"');
     expect(background).toContain("setPanelBehavior({ openPanelOnActionClick: true })");
     expect(content).toContain('"SIDE_PANEL_CONTENT_ACTION"');
     expect(sidepanel).toContain('action: "GET_BOOTSTRAP"');
@@ -51,7 +52,7 @@ describe("native side panel", () => {
   });
 
   it("checks database driven update availability without frequent polling", () => {
-    expect(manifest.version).toBe("1.4.3");
+    expect(manifest.version).toBe("1.5.0");
     expect(background).toContain('msg.action === "CHECK_LATEST_VERSION"');
     expect(background).toContain('msg.action === "OPEN_EXTENSION_MANAGEMENT"');
     expect(background).toContain("VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000");
@@ -70,12 +71,12 @@ describe("native side panel", () => {
     expect(sidepanel).not.toContain("有可用版本更新 v${latest}");
   });
 
-  it("ships the 1.4.3 release notice page", () => {
-    expect(releaseNotice).toContain('"1.4.3"');
-    expect(releaseNotice).toContain("Bilitato 已更新至 v1.4.3");
-    expect(releaseNotice).toContain("新增可用版本更新提醒");
-    expect(releaseNotice).toContain("修复侧边栏切回内嵌偶发无效");
-    expect(releaseNotice).toContain('majorHistory.push("1.4.3", "1.4.2"');
+  it("ships the 1.5 release notice page", () => {
+    expect(releaseNotice).toContain('"1.5.0"');
+    expect(releaseNotice).toContain("Bilitato 已更新至 v1.5");
+    expect(releaseNotice).toContain("修复同一视频不同分 P 字幕串线");
+    expect(releaseNotice).toContain("修复字幕语言回切失败");
+    expect(releaseNotice).toContain('majorHistory.push("1.5.0", "1.4.3"');
   });
 
   it("keeps the ModelScope preset list aligned with currently supported models", () => {
@@ -98,9 +99,13 @@ describe("native side panel", () => {
 
   it("tracks ModelScope quota headers and uses compact segments first", () => {
     expect(background).toContain("modelscope-ratelimit-model-requests-limit");
+    expect(background).toContain("x-modelscope-ratelimit-model-requests-limit");
+    expect(background).toContain("x-ratelimit-model-requests-remaining");
     expect(background).toContain("modelscope-ratelimit-model-requests-remaining");
     expect(background).toContain("modelscope-ratelimit-requests-limit");
     expect(background).toContain("modelscope-ratelimit-requests-remaining");
+    expect(background).toContain("getModelScopeDailyRequestLimit");
+    expect(background).toContain('"deepseek-ai/deepseek-v4-flash": 50');
     expect(background).toContain("onHeadersReceived");
     expect(background).toContain('provider === "modelscope"');
     expect(content).toContain("模型剩余");
@@ -120,16 +125,22 @@ describe("native side panel", () => {
     expect(content).toContain('data-action="cc-language-menu"');
     expect(content).toContain('command === "get-subtitle-options"');
     expect(content).toContain('command === "switch-subtitle-language"');
+    expect(content).toContain("[data-action='cc-switch-language']");
     expect(content).toContain("clearDerived: true");
     expect(content).toContain(".bpx-player-ctrl-subtitle-major-inner");
     expect(content).toContain("switchSubtitleLanguageByDom");
+    expect(content).toContain("mergeSubtitleOptions(apiOptions, domOptions)");
+    expect(content).toContain("该语种暂不支持直接切换");
+    expect(content).toContain("BILI_SWITCH_SUBTITLE_LANGUAGE");
+    expect(inject).toContain('event.data?.type === "BILI_SWITCH_SUBTITLE_LANGUAGE"');
+    expect(inject).toContain("switchSubtitleLanguageByLabel");
     expect(content).toContain("BILI_ALLOW_SUBTITLE_RECAPTURE");
     expect(inject).toContain('event.data?.type === "BILI_ALLOW_SUBTITLE_RECAPTURE"');
     expect(background).toContain("subtitleLanguage");
     expect(background).toContain("clearDerived");
-    expect(sidepanel).toContain("false && canSwitchOfficialSubtitle");
     expect(sidepanel).toContain('contentAction("switch-subtitle-language"');
-    expect(content).toContain("const canSwitchOfficialSubtitle = false");
+    expect(content).toContain("const canSwitchOfficialSubtitle = rows.length > 0 && !isAsrSubtitle && !running");
+    expect(sidepanel).toContain("const languageButton = canSwitchOfficialSubtitle");
     expect(sidepanel).toContain("showSubtitleLanguageMenu");
     expect(sidepanelCss).toContain(".subtitle-language-option.active");
   });
@@ -194,6 +205,11 @@ describe("native side panel", () => {
     expect(sidepanel).toContain("showActionMenu(nav.dataset.nav, nav)");
     expect(sidepanel).toContain("个性化");
     expect(sidepanel).toContain("settings-action-row");
+    expect(content).toContain("settings-theme-mode");
+    expect(sidepanel).toContain("setting-theme-mode");
+    expect(content).toContain("dataset.theme");
+    expect(sidepanel).toContain("data-theme");
+    expect(background).toContain('themeMode: "system"');
     expect(sidepanel).toContain("syncSubtitlePlayback");
     expect(sidepanel).toContain('data-action="follow-now"');
     expect(content).toContain('command === "get-playback-state"');

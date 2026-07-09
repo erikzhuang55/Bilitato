@@ -42,6 +42,15 @@
             emitLog("subtitle_recapture_enabled", { source: "content" });
             return;
         }
+        if (event.data?.type === "BILI_SWITCH_SUBTITLE_LANGUAGE") {
+            const label = String(event.data?.label || "").trim();
+            const requestId = String(event.data?.requestId || "");
+            isSubtitleCaptured = false;
+            subtitleStringCache = [];
+            removeStealthMask();
+            switchSubtitleLanguageByLabel(label, requestId);
+            return;
+        }
         if (event.data && (event.data.type === "RE_EMIT_PLAYINFO" || event.data.type === "REFRESH_PLAYINFO" || event.data.type === "PLAYER_WAKE_UP")) {
             emitPlayInfo();
         }
@@ -49,12 +58,14 @@
 
     window.fetch = async function (...args) {
         const url = typeof args[0] === "string" ? args[0] : args[0]?.url || "";
+        const requestMeta = resolveCurrentVideoMeta();
         const response = await originalFetch.apply(this, args);
         if (isSubtitleRequest(url)) {
-            emitLog("subtitle_detected", { source: "fetch", url });
+            emitLog("subtitle_request_start", { source: "fetch", url, requestMeta });
             scheduleAutoTriggerFlow("fetch_detected");
             response.clone().text().then((text) => {
-                emitSubtitlePayload(text, url);
+                emitLog("subtitle_response_done", { source: "fetch", url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
+                emitSubtitlePayload(text, url, requestMeta);
             }).catch(() => {});
         }
         return response;
@@ -66,6 +77,7 @@
             latestAudioProbe = rawUrl;
         }
         this.__biliUrl = url;
+        this.__biliRequestMeta = resolveCurrentVideoMeta();
         return originalOpen.apply(this, arguments);
     };
 
@@ -73,10 +85,12 @@
         const url = this.__biliUrl || "";
 
         if (isSubtitleRequest(url)) {
-            emitLog("subtitle_detected", { source: "xhr", url });
+            const requestMeta = this.__biliRequestMeta || resolveCurrentVideoMeta();
+            emitLog("subtitle_request_start", { source: "xhr", url, requestMeta });
             scheduleAutoTriggerFlow("xhr_detected");
             this.addEventListener("load", () => {
-                emitSubtitlePayload(this.responseText, url);
+                emitLog("subtitle_response_done", { source: "xhr", url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
+                emitSubtitlePayload(this.responseText, url, requestMeta);
             });
         }
 
@@ -101,7 +115,7 @@
         return originalSend.apply(this, arguments);
     };
 
-    function emitSubtitlePayload(rawText, url) {
+    function emitSubtitlePayload(rawText, url, requestMeta = null) {
         syncCaptureStateWithRoute();
         if (isSubtitleCaptured) return;
         subtitleStringCache.push(String(rawText || ""));
@@ -115,14 +129,14 @@
         }
         const body = data?.body || data?.data?.body || data?.content || data?.result?.body || (Array.isArray(data) ? data : null);
         if (!Array.isArray(body) || !body.length) return;
-        const routeBvid = String(getBvidFromUrl(location.href) || "").trim();
+        const routeBvid = String(requestMeta?.bvid || getBvidFromUrl(location.href) || "").trim();
         isSubtitleCaptured = true;
         capturedBvid = routeBvid || capturedBvid;
         stopAutoTriggerFlow();
         hackSubtitleOff();
         const delay = Math.max(0, Number(routeMetaReadyAt || 0) - Date.now());
         setTimeout(() => {
-            postSubtitleData(body);
+            postSubtitleData(body, url, requestMeta);
         }, delay);
     }
 
@@ -260,6 +274,80 @@
         return clicked;
     }
 
+    function normalizeSubtitleLabel(value) {
+        return String(value || "").replace(/\s+/g, " ").trim();
+    }
+
+    function dispatchSubtitleClick(target) {
+        if (!target) return false;
+        ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+            try {
+                target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+            } catch (_) {}
+        });
+        try {
+            target.click?.();
+        } catch (_) {}
+        return true;
+    }
+
+    function openSubtitleMenuForSwitch() {
+        const trigger = document.querySelector(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
+        if (!trigger) return false;
+        ["mouseenter", "mouseover", "mousemove"].forEach((type) => {
+            try {
+                trigger.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+            } catch (_) {}
+        });
+        return true;
+    }
+
+    function clickSubtitleLanguageLabel(label) {
+        const targetLabel = normalizeSubtitleLabel(label);
+        if (!targetLabel) return { clicked: false, matchedText: "" };
+        const nodes = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
+        const node = nodes.find((item) => normalizeSubtitleLabel(item?.textContent || item?.innerText) === targetLabel)
+            || nodes.find((item) => normalizeSubtitleLabel(item?.textContent || item?.innerText).includes(targetLabel));
+        const target = node?.closest?.(".bpx-player-ctrl-subtitle-language-item") || node;
+        const clicked = dispatchSubtitleClick(target);
+        return { clicked, matchedText: normalizeSubtitleLabel(node?.textContent || node?.innerText || "") };
+    }
+
+    function emitSubtitleLanguageSwitchResult(requestId, label, result) {
+        const payload = {
+            type: "BILI_SUBTITLE_LANGUAGE_SWITCH_RESULT",
+            requestId,
+            label,
+            clicked: !!result?.clicked,
+            matchedText: String(result?.matchedText || "")
+        };
+        window.postMessage(payload, "*");
+        emitLog("subtitle_language_switch", payload);
+    }
+
+    function switchSubtitleLanguageByLabel(label, requestId) {
+        const first = clickSubtitleLanguageLabel(label);
+        if (first.clicked) {
+            emitSubtitleLanguageSwitchResult(requestId, label, first);
+            return;
+        }
+        openSubtitleMenuForSwitch();
+        let done = false;
+        [160, 360, 700].forEach((delay) => {
+            setTimeout(() => {
+                if (done) return;
+                const result = clickSubtitleLanguageLabel(label);
+                emitLog("subtitle_language_switch_retry", { label, clicked: result.clicked, matchedText: result.matchedText, delay });
+                if (result.clicked) {
+                    done = true;
+                    emitSubtitleLanguageSwitchResult(requestId, label, result);
+                } else if (delay === 700) {
+                    emitSubtitleLanguageSwitchResult(requestId, label, result);
+                }
+            }, delay);
+        });
+    }
+
     function syncCaptureStateWithRoute() {
         const current = String(getBvidFromUrl(location.href) || "").trim();
         const currentKey = getRouteVideoKey();
@@ -303,7 +391,7 @@
             if (currentKey && currentKey === capturedRouteKey) return;
             
             // Immediately dispatch postMessage on detection without delay
-            const meta = resolvePageMeta();
+            const meta = resolveCurrentVideoMeta();
             window.postMessage({ type: "BILI_ROUTE_SWITCH", bvid: current, cid: meta.cid || 0, tid: getRouteTid() }, "*");
             
             routeMetaReadyAt = Date.now() + 800;
@@ -312,8 +400,12 @@
         }, 300);
     }
 
-    function postSubtitleData(body) {
-        const meta = resolvePageMeta();
+    function postSubtitleData(body, subtitleUrl = "", requestMeta = null) {
+        const meta = requestMeta || resolveCurrentVideoMeta();
+        const currentMeta = resolveCurrentVideoMeta();
+        if (meta?.bvid && currentMeta?.bvid && meta.bvid !== currentMeta.bvid) {
+            emitLog("subtitle_stale_ui_skip", { requestedMeta: meta, currentMeta });
+        }
         const routeBvid = String(getBvidFromUrl(location.href) || "").trim();
         const bvid = String(meta.bvid || routeBvid || "").trim();
         if (!bvid) {
@@ -324,7 +416,18 @@
         emitLog("subtitle_parsed", { count: body.length, bvid, cid });
         window.postMessage({ type: "BILI_SUBTITLE_HANDSHAKE", bvid, cid }, "*");
         setTimeout(() => {
-            window.postMessage({ type: "BILI_SUBTITLE_DATA", data: body, bvid, cid }, "*");
+            window.postMessage({
+                type: "BILI_SUBTITLE_DATA",
+                data: body,
+                bvid,
+                cid,
+                p: meta.p || 1,
+                part: meta.part || "",
+                duration: meta.duration || 0,
+                language: meta.language || "",
+                languageLabel: meta.languageLabel || "",
+                subtitleUrl: String(subtitleUrl || "")
+            }, "*");
         }, 0);
     }
 
@@ -346,36 +449,24 @@
         }, true);
     }
 
-    function resolvePageMeta() {
+    function resolveCurrentVideoMeta() {
         const state = window.__INITIAL_STATE__ || {};
-        const playInfo = window.__playinfo__ || {};
-        const bvidFromPath = getBvidFromUrl(location.href);
-        const pageCid = getCidFromPages(state?.videoData?.pages);
-        const bvid = String(
-            state?.bvid ||
-            state?.videoData?.bvid ||
-            state?.videoData?.aidBvid ||
-            playInfo?.data?.bvid ||
-            bvidFromPath ||
-            ""
-        ).trim();
-        const cid = Number(
-            pageCid ||
-            state?.cid ||
-            state?.epInfo?.cid ||
-            playInfo?.data?.cid ||
-            state?.videoData?.cid ||
-            0
-        );
-        return { bvid, cid: Number.isFinite(cid) ? cid : 0 };
-    }
-
-    function getCidFromPages(pages) {
-        const list = Array.isArray(pages) ? pages : [];
-        if (!list.length) return 0;
-        const page = Number(new URL(location.href).searchParams.get("p") || 1);
-        const matched = list.find((item) => Number(item?.page || 0) === page);
-        return Number(matched?.cid || list[0]?.cid || 0);
+        const videoData = state.videoData || {};
+        const pages = Array.isArray(videoData.pages) ? videoData.pages : [];
+        const url = new URL(location.href);
+        const bvid = location.pathname.match(/\/video\/(BV[a-zA-Z0-9]+)/)?.[1] || videoData.bvid || state.bvid || "";
+        const p = Math.max(1, Number(url.searchParams.get("p") || state.p || 1));
+        const currentPage = pages.find((item) => Number(item?.page) === p) || pages[p - 1] || null;
+        const video = document.querySelector("video");
+        const duration = Number(currentPage?.duration) || Number(video?.duration) || 0;
+        const cid = Number(currentPage?.cid) || Number(state.cid) || 0;
+        return {
+            bvid: String(bvid || "").trim(),
+            p,
+            cid: Number.isFinite(cid) ? cid : 0,
+            part: String(currentPage?.part || ""),
+            duration: Number.isFinite(duration) ? duration : 0
+        };
     }
 
     function getBvidFromUrl(url) {
@@ -389,8 +480,8 @@
     }
 
     function getRouteVideoKey() {
-        const bvid = String(getBvidFromUrl(location.href) || "").trim();
-        return bvid ? `${bvid}|${getRouteTid()}` : "";
+        const meta = resolveCurrentVideoMeta();
+        return meta.bvid ? `${meta.bvid}::${meta.cid || getRouteTid()}` : "";
     }
 
     function emitPlayInfo() {

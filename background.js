@@ -541,6 +541,7 @@ const DEFAULT_SETTINGS = {
     supabaseFeedbackTable: SUPABASE_DEFAULT_FEEDBACK_TABLE,
     supabaseUsageDailyRpcName: SUPABASE_DEFAULT_USAGE_DAILY_RPC,
     supabaseVersionTable: SUPABASE_DEFAULT_VERSION_TABLE,
+    themeMode: "system",
     prefMode: "quality",
     segmentPromptVariant: "test",
     debugMode: false,
@@ -677,11 +678,18 @@ function captureModelScopeRateLimitHeaders(details = {}) {
         const item = headers.find((header) => String(header?.name || "").toLowerCase() === target);
         return item?.value ?? null;
     };
+    const getAnyHeader = (...names) => {
+        for (const name of names) {
+            const value = getHeader(name);
+            if (value !== null && value !== undefined && value !== "") return value;
+        }
+        return null;
+    };
     const info = {
-        modelLimit: parseHeaderNumber(getHeader("modelscope-ratelimit-model-requests-limit")),
-        modelRemaining: parseHeaderNumber(getHeader("modelscope-ratelimit-model-requests-remaining")),
-        userLimit: parseHeaderNumber(getHeader("modelscope-ratelimit-requests-limit")),
-        userRemaining: parseHeaderNumber(getHeader("modelscope-ratelimit-requests-remaining")),
+        modelLimit: parseHeaderNumber(getAnyHeader("modelscope-ratelimit-model-requests-limit", "x-modelscope-ratelimit-model-requests-limit", "x-ratelimit-model-requests-limit")),
+        modelRemaining: parseHeaderNumber(getAnyHeader("modelscope-ratelimit-model-requests-remaining", "x-modelscope-ratelimit-model-requests-remaining", "x-ratelimit-model-requests-remaining")),
+        userLimit: parseHeaderNumber(getAnyHeader("modelscope-ratelimit-requests-limit", "x-modelscope-ratelimit-requests-limit", "x-ratelimit-requests-limit", "ratelimit-limit")),
+        userRemaining: parseHeaderNumber(getAnyHeader("modelscope-ratelimit-requests-remaining", "x-modelscope-ratelimit-requests-remaining", "x-ratelimit-requests-remaining", "ratelimit-remaining")),
         capturedAt: Date.now()
     };
     if ([info.modelLimit, info.modelRemaining, info.userLimit, info.userRemaining].some((value) => value !== null)) {
@@ -1089,7 +1097,11 @@ async function handleMessage(msg, sender) {
         if (tabState?.activeBvid && msg?.skipCloud !== true) {
             await hydrateCloudCacheIfNeeded(tabState.activeBvid, CLOUD_CACHE_KEYS, settings);
         }
-        const cache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
+        const rawCache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
+        const cache = selectCachePart(rawCache, {
+            bvid: tabState?.activeBvid || "",
+            cid: Number(tabState?.activeCid || 0)
+        });
         const feedback = await fetchFeedbackState(settings).catch(() => ({ rows: [], unreadCount: 0, enabled: false }));
         const cloudCachePrefs = await getCloudCacheReadPrefs(tabState?.activeBvid, settings);
         return { tabId, tabState, cache, settings, providers: PROVIDERS, feedback, cloudCachePrefs };
@@ -1104,15 +1116,23 @@ async function handleMessage(msg, sender) {
             if (bvid && msg?.skipCloud !== true) {
                 await hydrateCloudCacheIfNeeded(bvid, CLOUD_CACHE_KEYS, settings);
             }
-            const cache = bvid ? await getCache(bvid) : null;
+            const rawCache = bvid ? await getCache(bvid) : null;
+            const cache = selectCachePart(rawCache, {
+                bvid,
+                cid: Number(tabState?.activeCid || 0)
+            });
             return { bvid, cache, tabState, cloudCachePrefs: await getCloudCacheReadPrefs(bvid, settings) };
         }
         const settings = await getResolvedSettings();
         if (msg?.skipCloud !== true) {
             await hydrateCloudCacheIfNeeded(expected, CLOUD_CACHE_KEYS, settings);
         }
-        const cache = await getCache(expected);
+        const rawCache = await getCache(expected);
         const tabState = tabId ? await getTabState(tabId) : null;
+        const cache = selectCachePart(rawCache, {
+            bvid: expected,
+            cid: Number(msg.cid || tabState?.activeCid || 0)
+        });
         return { bvid: expected, cache, tabState, cloudCachePrefs: await getCloudCacheReadPrefs(expected, settings) };
     }
     if (msg.action === "RUN_TASKS") {
@@ -1150,6 +1170,20 @@ async function handleMessage(msg, sender) {
         if (tabId) await updateTabState(tabId, { transcriptionProgress: 0, updatedAt: Date.now() }).catch(() => {});
         logBackground.info("transcription_aborted", { tab_id: tabId || 0, detail: { controller_count: count } });
         return { aborted: count };
+    }
+    if (msg.action === "CLEAR_TASK_ERRORS") {
+        if (!tabId) return {};
+        const tasks = (Array.isArray(msg.tasks) ? msg.tasks : []).filter((task) => TASK_KEYS.includes(task));
+        if (!tasks.length) return {};
+        const current = await getTabState(tabId);
+        const taskStatus = { ...(current?.taskStatus || {}) };
+        const taskErrors = { ...(current?.taskErrors || {}) };
+        tasks.forEach((task) => {
+            taskStatus[task] = "idle";
+            delete taskErrors[task];
+        });
+        await updateTabState(tabId, { taskStatus, taskErrors, lastError: "", updatedAt: Date.now() });
+        return {};
     }
     if (msg.action === "SAVE_SETTINGS") {
         const incoming = msg.settings || {};
@@ -2799,12 +2833,24 @@ async function handleSubtitleCaptured(tabId, payload) {
         logBackground.debug("subtitle_duplicate_ignore", { bvid, tab_id: tabId, raw_hash: rawHash });
         const existingSource = String(existing?.subtitleSource || "");
         const existingLanguage = String(existing?.subtitleLanguage || "");
+        const existingCid = Number(existing?.cid || 0);
+        const existingTid = String(existing?.tid || "").trim();
+        const nextTid = String(tid || "").trim();
         let nextCache = existing;
-        if ((subtitleSource && existingSource !== subtitleSource) || (subtitleLanguage && existingLanguage !== subtitleLanguage)) {
+        if (
+            (subtitleSource && existingSource !== subtitleSource)
+            || (subtitleLanguage && existingLanguage !== subtitleLanguage)
+            || (Number.isFinite(cid) && cid > 0 && existingCid !== cid)
+            || (nextTid && existingTid !== nextTid)
+        ) {
             await mergeCacheByBvid(bvid, {
+                cid: Number.isFinite(cid) ? cid : 0,
+                tid,
+                title: payload.title || existing?.title || "",
                 subtitleSource,
                 subtitleLanguage,
                 subtitleLanguageLabel,
+                subtitleUrl: String(payload?.subtitleUrl || existing?.subtitleUrl || ""),
                 ...(clearDerived ? {
                     summary: "",
                     segments: [],
@@ -2859,6 +2905,7 @@ async function handleSubtitleCaptured(tabId, payload) {
         subtitleSource,
         subtitleLanguage,
         subtitleLanguageLabel,
+        subtitleUrl: String(payload?.subtitleUrl || ""),
         rawSubtitle,
         processedSubtitle,
         rawHash,
@@ -2963,12 +3010,66 @@ function normalizeTaskContext(raw) {
     const duration = source.videoDuration && typeof source.videoDuration === "object" ? source.videoDuration : {};
     const totalSeconds = Number(duration.totalSeconds);
     const formattedTime = String(duration.formattedTime || "").trim();
+    const cid = Number(source.cid || 0);
     return {
+        cid: Number.isFinite(cid) && cid > 0 ? cid : 0,
+        tid: String(source.tid || "").trim(),
         videoDuration: {
             totalSeconds: Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0,
             formattedTime
         }
     };
+}
+
+function isCacheForTaskContext(cache = {}, taskContext = {}) {
+    const contextCid = Number(taskContext?.cid || 0);
+    const cacheCid = Number(cache?.cid || 0);
+    if (contextCid > 0 && cacheCid > 0 && contextCid !== cacheCid) return false;
+    const contextTid = String(taskContext?.tid || "").trim();
+    const cacheTid = String(cache?.tid || "").trim();
+    if (contextTid && cacheTid && contextTid !== cacheTid) return false;
+    return true;
+}
+
+function createVideoCachePartKey(bvid, cid) {
+    const normalizedBvid = normalizeBvid(bvid);
+    const normalizedCid = String(cid || "").trim();
+    return normalizedBvid && normalizedCid ? `${normalizedBvid}::${normalizedCid}` : "";
+}
+
+function createSubtitleCacheKey({ bvid, cid, language = "default" } = {}) {
+    return [
+        normalizeBvid(bvid),
+        String(cid || "").trim(),
+        String(language || "default").trim()
+    ].join("::");
+}
+
+function getPartCacheFields(cache = {}) {
+    const fields = [
+        "bvid", "cid", "tid", "title",
+        "rawSubtitle", "processedSubtitle", "rawHash", "processedHash",
+        "subtitleSource", "subtitleLanguage", "subtitleLanguageLabel",
+        "summary", "segments", "rumors", "history", "metrics",
+        "summaryCacheSource", "segmentsCacheSource", "rumorsCacheSource",
+        "summaryModel", "segmentsModel", "rumorsModel"
+    ];
+    return fields.reduce((acc, key) => {
+        if (Object.prototype.hasOwnProperty.call(cache, key)) acc[key] = cloneData(cache[key]);
+        return acc;
+    }, {});
+}
+
+function selectCachePart(cache = {}, context = {}) {
+    if (!cache || typeof cache !== "object") return cache;
+    const cid = Number(context?.cid || 0);
+    if (!(cid > 0)) return cache;
+    const partKey = createVideoCachePartKey(cache.bvid || context.bvid, cid);
+    const part = partKey && cache.parts && typeof cache.parts === "object" ? cache.parts[partKey] : null;
+    if (part && typeof part === "object") return { ...cache, ...cloneData(part), parts: cache.parts, subtitleVariants: cache.subtitleVariants };
+    const cacheCid = Number(cache?.cid || 0);
+    if (cacheCid > 0 && cacheCid !== cid) return null;
+    return cache;
 }
 
 function makeSubtitleHash(list) {
@@ -2982,8 +3083,14 @@ async function runTasksForTab(tabId, tasks, force, taskContext = {}, requestedBv
     const tabState = await getTabState(tabId);
     const bvid = normalizeBvid(requestedBvid || tabState?.activeBvid);
     if (!bvid) throw new Error("未获取到视频字幕");
-    if (normalizeBvid(tabState?.activeBvid) !== bvid) {
-        await updateTabState(tabId, { activeBvid: bvid, updatedAt: Date.now() });
+    const contextCid = Number(taskContext?.cid || 0);
+    const contextTid = String(taskContext?.tid || "").trim();
+    const tabPatch = { updatedAt: Date.now() };
+    if (normalizeBvid(tabState?.activeBvid) !== bvid) tabPatch.activeBvid = bvid;
+    if (contextCid > 0 && Number(tabState?.activeCid || 0) !== contextCid) tabPatch.activeCid = contextCid;
+    if (contextTid && String(tabState?.activeTid || "") !== contextTid) tabPatch.activeTid = contextTid;
+    if (Object.keys(tabPatch).length > 1) {
+        await updateTabState(tabId, tabPatch);
     }
     const resolvedSettings = settingsOverride || await getResolvedSettings();
     const hydrateTasks = [...new Set([
@@ -3030,6 +3137,8 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
     try {
         const result = await runWithDedup(key, () => requestTaskResult(bvid, task, settings, { ...taskContext, tabId }));
         await mergeCacheByBvid(bvid, {
+            ...(Number(taskContext?.cid || 0) > 0 ? { cid: Number(taskContext.cid) } : {}),
+            ...(String(taskContext?.tid || "").trim() ? { tid: String(taskContext.tid).trim() } : {}),
             [task]: result,
             ...buildTaskSourcePatch([task], "local"),
             updatedAt: Date.now()
@@ -3411,7 +3520,9 @@ async function runChatForPort(port, msg) {
 async function requestTaskResult(bvid, task, settings, taskContext = {}) {
     const cloudTasks = ["summary", "segments", "rumors"].includes(task) ? ["subtitle", task] : [task];
     await hydrateCloudCacheIfNeeded(bvid, cloudTasks, settings);
-    const cache = await getCache(bvid);
+    const rawCache = await getCache(bvid);
+    const cache = selectCachePart(rawCache, { bvid, cid: Number(taskContext?.cid || 0) }) || rawCache;
+    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
     const subtitlePayloadOptions = task === "segments"
         ? { purpose: "segments", mode: "quality" }
         : { purpose: "general" };
@@ -3658,6 +3769,11 @@ function sanitizeSummaryOutput(text) {
     let value = String(text || "").trim();
     if (!value) return "";
     value = value
+        .replace(/<think\b[^>]*>[\s\S]*?<\/think>/gi, "")
+        .replace(/<thinking\b[^>]*>[\s\S]*?<\/thinking>/gi, "")
+        .replace(/<think\b[^>]*>[\s\S]*$/gi, "")
+        .replace(/<thinking\b[^>]*>[\s\S]*$/gi, "")
+        .replace(/^\s*(?:思考过程|思考|推理过程|推理|Reasoning|Thinking)\s*[:：][\s\S]*?(?=\n{2,}|(?:\*\*[^*\n]{2,40}\*\*)|(?:#{1,6}\s+\S)|$)/i, "")
         .replace(/<<<\s*SUMMARY_START\s*>>>/gi, "")
         .replace(/<<<\s*SUMMARY_END\s*>>>/gi, "")
         .replace(/<<<\s*SEGMENTS_START\s*>>>[\s\S]*$/gi, "")
@@ -4303,6 +4419,11 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
     const statusMap = {};
     const errorMap = {};
     const cachePatch = {};
+    const tabState = tabId ? await getTabState(tabId).catch(() => null) : null;
+    const contextCid = Number(options?.taskContext?.cid || tabState?.activeCid || 0);
+    const contextTid = String(options?.taskContext?.tid || tabState?.activeTid || "").trim();
+    if (contextCid > 0) cachePatch.cid = contextCid;
+    if (contextTid) cachePatch.tid = contextTid;
     let lastError = "";
 
     if (summaryResult) {
@@ -4342,7 +4463,9 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
 }
 
 async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskContext = {}) {
-    const cache = await getCache(bvid);
+    const rawCache = await getCache(bvid);
+    const cache = selectCachePart(rawCache, { bvid, cid: Number(taskContext?.cid || 0) }) || rawCache;
+    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
     const summarySubtitleOptions = { purpose: "general" };
     const segmentsSubtitleOptions = { purpose: "segments", mode: "quality" };
     const summarySubtitleText = getSubtitlePayload(cache, summarySubtitleOptions);
@@ -4356,7 +4479,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
     const customPrompts = settings.promptSettings?.custom || {};
     const results = createSummarySegmentsResult();
     async function writeStreamingSummaryPartial(text, state, forceWrite = false) {
-        const value = String(text || "").trim();
+        const value = sanitizeSummaryOutput(text);
         if (!value) return;
         const now = Date.now();
         if (!forceWrite && now - Number(state.lastWriteAt || 0) < 350) return;
@@ -4690,7 +4813,9 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
 }
 
 async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, taskContext = {}) {
-    const cache = await getCache(bvid);
+    const rawCache = await getCache(bvid);
+    const cache = selectCachePart(rawCache, { bvid, cid: Number(taskContext?.cid || 0) }) || rawCache;
+    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
     const subtitlePayloadOptions = { purpose: "segments", mode: "efficiency" };
     const subtitleText = getSubtitlePayload(cache, subtitlePayloadOptions);
     if (!subtitleText) throw createMissingSubtitleError();
@@ -6020,6 +6145,14 @@ function readHeaderNumber(headers, name) {
     return parseHeaderNumber(value);
 }
 
+function readAnyHeaderNumber(headers, names = []) {
+    for (const name of names) {
+        const value = readHeaderNumber(headers, name);
+        if (value !== null) return value;
+    }
+    return null;
+}
+
 function parseHeaderNumber(value) {
     if (value === null || value === undefined || value === "") return null;
     const number = Number(value);
@@ -6029,10 +6162,10 @@ function parseHeaderNumber(value) {
 function resolveRateLimitInfo(settings, headers) {
     if (String(settings?.provider || "").toLowerCase() !== "modelscope") return null;
     const direct = {
-        modelLimit: readHeaderNumber(headers, "modelscope-ratelimit-model-requests-limit"),
-        modelRemaining: readHeaderNumber(headers, "modelscope-ratelimit-model-requests-remaining"),
-        userLimit: readHeaderNumber(headers, "modelscope-ratelimit-requests-limit"),
-        userRemaining: readHeaderNumber(headers, "modelscope-ratelimit-requests-remaining")
+        modelLimit: readAnyHeaderNumber(headers, ["modelscope-ratelimit-model-requests-limit", "x-modelscope-ratelimit-model-requests-limit", "x-ratelimit-model-requests-limit"]),
+        modelRemaining: readAnyHeaderNumber(headers, ["modelscope-ratelimit-model-requests-remaining", "x-modelscope-ratelimit-model-requests-remaining", "x-ratelimit-model-requests-remaining"]),
+        userLimit: readAnyHeaderNumber(headers, ["modelscope-ratelimit-requests-limit", "x-modelscope-ratelimit-requests-limit", "x-ratelimit-requests-limit", "ratelimit-limit"]),
+        userRemaining: readAnyHeaderNumber(headers, ["modelscope-ratelimit-requests-remaining", "x-modelscope-ratelimit-requests-remaining", "x-ratelimit-requests-remaining", "ratelimit-remaining"])
     };
     if ([direct.modelLimit, direct.modelRemaining, direct.userLimit, direct.userRemaining].some((value) => value !== null)) {
         return direct;
@@ -6043,16 +6176,31 @@ function resolveRateLimitInfo(settings, headers) {
     return direct;
 }
 
+function getModelScopeDailyRequestLimit(model) {
+    const key = String(model || "").trim().toLowerCase();
+    const limits = {
+        "deepseek-ai/deepseek-v4-flash": 50,
+        "deepseek-ai/deepseek-v4-pro": 50,
+        "deepseek-ai/deepseek-v3.2": 20,
+        "zhipuai/glm-5.2": 50,
+        "stepfun-ai/step-3.7-flash": 50
+    };
+    return limits[key] || null;
+}
+
 function buildRequestMetrics(settings, tokenInfo, latencyMs, rateLimitInfo = null) {
+    const provider = String(settings?.provider || "");
+    const model = String(settings?.model || "");
+    const fallbackModelLimit = provider.toLowerCase() === "modelscope" ? getModelScopeDailyRequestLimit(model) : null;
     return {
         latencyMs,
         tokens: tokenInfo.total,
         inputTokens: tokenInfo.input,
         outputTokens: tokenInfo.output,
-        provider: String(settings?.provider || ""),
-        model: String(settings?.model || ""),
+        provider,
+        model,
         modelScopeRemaining: rateLimitInfo?.modelRemaining ?? null,
-        modelScopeModelLimit: rateLimitInfo?.modelLimit ?? null,
+        modelScopeModelLimit: rateLimitInfo?.modelLimit ?? fallbackModelLimit,
         modelScopeUserRemaining: rateLimitInfo?.userRemaining ?? null,
         modelScopeUserLimit: rateLimitInfo?.userLimit ?? null
     };
@@ -6383,6 +6531,36 @@ async function mergeCacheByBvid(bvid, patch) {
             ...current,
             ...patch
         };
+        const patchCid = Number(patch?.cid || merged.cid || 0);
+        if (patchCid > 0) {
+            const partKey = createVideoCachePartKey(normalized, patchCid);
+            const parts = current.parts && typeof current.parts === "object" ? cloneData(current.parts) : {};
+            parts[partKey] = {
+                ...(parts[partKey] && typeof parts[partKey] === "object" ? parts[partKey] : {}),
+                ...getPartCacheFields(merged),
+                bvid: normalized,
+                cid: patchCid
+            };
+            merged.parts = parts;
+            if (Array.isArray(patch?.rawSubtitle) && patch.rawSubtitle.length) {
+                const language = String(patch.subtitleLanguage || merged.subtitleLanguage || "default").trim() || "default";
+                const subtitleKey = createSubtitleCacheKey({ bvid: normalized, cid: patchCid, language });
+                const variants = current.subtitleVariants && typeof current.subtitleVariants === "object" ? cloneData(current.subtitleVariants) : {};
+                variants[subtitleKey] = {
+                    bvid: normalized,
+                    cid: patchCid,
+                    language,
+                    languageLabel: String(patch.subtitleLanguageLabel || merged.subtitleLanguageLabel || language),
+                    subtitleUrl: String(patch.subtitleUrl || ""),
+                    rawSubtitle: cloneData(patch.rawSubtitle),
+                    processedSubtitle: cloneData(Array.isArray(merged.processedSubtitle) ? merged.processedSubtitle : []),
+                    rawHash: String(merged.rawHash || ""),
+                    processedHash: String(merged.processedHash || ""),
+                    updatedAt: Date.now()
+                };
+                merged.subtitleVariants = variants;
+            }
+        }
         if (isEqualJSON(current, merged)) {
             cacheMemory.set(normalized, cloneData(merged));
             return merged;
@@ -6477,6 +6655,8 @@ function normalizeSettings(settings) {
     const supabaseVersionTable = String(base.supabaseVersionTable || DEFAULT_SETTINGS.supabaseVersionTable || SUPABASE_DEFAULT_VERSION_TABLE).trim() || SUPABASE_DEFAULT_VERSION_TABLE;
     const prefModeRaw = String(base.prefMode || DEFAULT_SETTINGS.prefMode || "quality").toLowerCase();
     const prefMode = prefModeRaw === "efficiency" ? "efficiency" : "quality";
+    const themeModeRaw = String(base.themeMode || DEFAULT_SETTINGS.themeMode || "system").toLowerCase();
+    const themeMode = ["system", "light", "dark"].includes(themeModeRaw) ? themeModeRaw : "system";
     const segmentPromptVariantRaw = String(base.segmentPromptVariant || DEFAULT_SETTINGS.segmentPromptVariant || "test").toLowerCase();
     const segmentPromptVariant = segmentPromptVariantRaw === "original" ? "original" : "test";
     const sentryDsn = String(base.sentryDsn || DEFAULT_SETTINGS.sentryDsn || "").trim();
@@ -6510,6 +6690,7 @@ function normalizeSettings(settings) {
         supabaseFeedbackTable,
         supabaseUsageDailyRpcName,
         supabaseVersionTable,
+        themeMode,
         prefMode,
         segmentPromptVariant,
         disableCloudCacheRead

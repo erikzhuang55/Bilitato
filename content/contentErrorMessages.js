@@ -483,6 +483,10 @@
             view.secondaryActionText = "重试";
             view.secondaryAction = "retry";
         }
+        if (view.presentation !== "toast" && !view.backActionText) {
+            view.backActionText = "返回";
+            view.backAction = "go-summary";
+        }
         return view;
     }
 
@@ -497,6 +501,9 @@
         const secondaryButton = secondaryAction && view.secondaryActionText
             ? `<button class="action-btn ghost" data-action="${safe(secondaryAction)}">${safe(view.secondaryActionText)}</button>`
             : "";
+        const backButton = view.backAction && view.backActionText
+            ? `<button class="action-btn ghost" data-action="${safe(view.backAction)}">${safe(view.backActionText)}</button>`
+            : "";
         const extraMessage = view.extraMessage
             ? `<div class="error-extra-message">${safe(view.extraMessage)}</div>`
             : "";
@@ -509,8 +516,8 @@
                     <button class="modelscope-bind-open" type="button" data-action="open-external-url" data-url="${safe(view.helper.url || "")}">打开 ModelScope 账号设置</button>
                 </div>`
             : "";
-        const buttons = primaryButton || secondaryButton
-            ? `<div class="error-actions">${primaryButton}${secondaryButton}</div>`
+        const buttons = primaryButton || secondaryButton || backButton
+            ? `<div class="error-actions">${primaryButton}${secondaryButton}${backButton}</div>`
             : "";
         return `
             <div class="page-body subtitle-empty-container error-empty-container">

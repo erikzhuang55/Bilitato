@@ -4,6 +4,59 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.5.0": {
+      title: "Bilitato 已更新至 v1.5",
+      displayVersion: "v1.5",
+      subtitle: "这版重点修复 B 站分 P 字幕串线和字幕语言切换问题，同时补齐深色模式、侧边栏和调用指标的细节体验。",
+      groups: [
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "修复同一视频不同分 P 字幕串线",
+              desc: "现在会按当前分 P 的真实 cid 区分字幕、总结和分段，切换选集后不再把上一集内容带到当前集。",
+              highlight: true,
+            },
+            {
+              title: "修复字幕语言回切失败",
+              desc: "中文、English 等语言会优先读取当前分 P 的可用字幕地址或本地语言缓存，切回已加载过的语言也能快速同步。",
+              highlight: true,
+            },
+            {
+              title: "修复字幕语言菜单首次定位异常",
+              desc: "首次打开语言菜单时会重新定位到当前按钮，不再出现在页面左上角。"
+            },
+          ],
+        },
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "新增深色 / 浅色模式",
+              desc: "设置页新增跟随系统、浅色模式和深色模式，内嵌面板与侧边栏都能使用。",
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "优化深色模式可读性",
+              desc: "字幕、总结、分段、聊天、验真和反馈中心在深色背景下更清楚，菜单与按钮也更容易辨认。",
+            },
+            {
+              title: "优化调用指标提示",
+              desc: "顶部调用指标改为独立浮层显示，长文本不会再被面板边缘裁切。",
+            },
+            {
+              title: "减少模型思考内容外露",
+              desc: "总结生成时会自动清理常见的思考标签，避免把无关推理过程展示给你。",
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。字幕与总结缓存仍保存在浏览器本地；分 P 隔离只用于避免不同选集内容互相覆盖。",
+    },
     "1.4.3": {
       title: "Bilitato 已更新至 v1.4.3",
       displayVersion: "v1.4.3",
@@ -755,7 +808,9 @@
 
   function buildReleasePageVersions(version) {
     const majorHistory = [];
-    if (version === "1.4.3") {
+    if (version === "1.5.0") {
+      majorHistory.push("1.5.0", "1.4.3", "1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");
+    } else if (version === "1.4.3") {
       majorHistory.push("1.4.3", "1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");
     } else if (version === "1.4.2") {
       majorHistory.push("1.4.2", "1.4.1", "1.4.0", "1.3.x", "1.2.x");

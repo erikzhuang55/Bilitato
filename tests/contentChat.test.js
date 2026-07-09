@@ -20,6 +20,15 @@ describe("contentChat", () => {
     })).toBe("用时 1.2s · Tokens 30 (In 10 / Out 20) · 模型剩余 5/50 · 账号剩余 1995/2000");
   });
 
+  it("marks missing quota headers without faking remaining usage", () => {
+    expect(chat.formatMetricText({
+      latencyMs: 1234,
+      tokens: 30,
+      provider: "modelscope",
+      modelScopeModelLimit: 50
+    })).toBe("用时 1.2s · Tokens 30 · 模型剩余 官网未返回/50 · 账号剩余 官网未返回");
+  });
+
   it("omits ModelScope quota text for non-ModelScope providers", () => {
     expect(chat.formatMetricText({
       latencyMs: 1000,

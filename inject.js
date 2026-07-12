@@ -61,9 +61,11 @@
         const requestMeta = resolveCurrentVideoMeta();
         const response = await originalFetch.apply(this, args);
         if (isSubtitleRequest(url)) {
+            logSubtitleDiagnostic("source_request", { source: "inject.fetch", subtitleUrl: url, requestMeta });
             emitLog("subtitle_request_start", { source: "fetch", url, requestMeta });
             scheduleAutoTriggerFlow("fetch_detected");
             response.clone().text().then((text) => {
+                logSubtitleDiagnostic("source_response", { source: "inject.fetch", subtitleUrl: url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
                 emitLog("subtitle_response_done", { source: "fetch", url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
                 emitSubtitlePayload(text, url, requestMeta);
             }).catch(() => {});
@@ -86,9 +88,11 @@
 
         if (isSubtitleRequest(url)) {
             const requestMeta = this.__biliRequestMeta || resolveCurrentVideoMeta();
+            logSubtitleDiagnostic("source_request", { source: "inject.xhr", subtitleUrl: url, requestMeta });
             emitLog("subtitle_request_start", { source: "xhr", url, requestMeta });
             scheduleAutoTriggerFlow("xhr_detected");
             this.addEventListener("load", () => {
+                logSubtitleDiagnostic("source_response", { source: "inject.xhr", subtitleUrl: url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
                 emitLog("subtitle_response_done", { source: "xhr", url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
                 emitSubtitlePayload(this.responseText, url, requestMeta);
             });
@@ -117,7 +121,27 @@
 
     function emitSubtitlePayload(rawText, url, requestMeta = null) {
         syncCaptureStateWithRoute();
-        if (isSubtitleCaptured) return;
+        if (isSubtitleCaptured) {
+            logSubtitleDiagnostic("source_ignored", { source: "inject", reason: "already_captured", subtitleUrl: url, requestMeta });
+            return;
+        }
+        const currentMeta = resolveCurrentVideoMeta();
+        const requestedBvid = String(requestMeta?.bvid || "").toLowerCase();
+        const currentBvid = String(currentMeta?.bvid || "").toLowerCase();
+        const requestedP = Number(requestMeta?.p || 0);
+        const currentP = Number(currentMeta?.p || 0);
+        if ((requestedBvid && currentBvid && requestedBvid !== currentBvid)
+            || (requestedP > 0 && currentP > 0 && requestedP !== currentP)) {
+            logSubtitleDiagnostic("source_ignored", {
+                source: "inject",
+                reason: "request_route_mismatch",
+                subtitleUrl: url,
+                requestMeta,
+                currentMeta
+            });
+            emitLog("subtitle_stale_ui_skip", { requestedMeta: requestMeta, currentMeta, reason: "request_route_mismatch" });
+            return;
+        }
         subtitleStringCache.push(String(rawText || ""));
         if (subtitleStringCache.length > 6) subtitleStringCache = subtitleStringCache.slice(-6);
         let data;
@@ -129,6 +153,12 @@
         }
         const body = data?.body || data?.data?.body || data?.content || data?.result?.body || (Array.isArray(data) ? data : null);
         if (!Array.isArray(body) || !body.length) return;
+        logSubtitleDiagnostic("source_received", {
+            source: "inject",
+            subtitleUrl: url,
+            requestMeta,
+            ...getSubtitleDiagnosticRowsMeta(body)
+        });
         const routeBvid = String(requestMeta?.bvid || getBvidFromUrl(location.href) || "").trim();
         isSubtitleCaptured = true;
         capturedBvid = routeBvid || capturedBvid;
@@ -165,6 +195,29 @@
 
     function emitLog(event, detail) {
         window.postMessage({ type: "BILI_INJECT_LOG", event, detail }, "*");
+    }
+
+    function getSubtitleDiagnosticRowsMeta(rows) {
+        const list = Array.isArray(rows) ? rows : [];
+        const preview = (row) => String(row?.text || row?.content || "").replace(/\s+/g, " ").trim().slice(0, 120);
+        return {
+            rowCount: list.length,
+            firstThreeLines: list.slice(0, 3).map(preview).join("\\n"),
+            firstLine: preview(list[0]),
+            secondLine: preview(list[1]),
+            thirdLine: preview(list[2])
+        };
+    }
+
+    function logSubtitleDiagnostic(event, detail = {}) {
+        try {
+            console.log("[SUBTITLE_DIAG]", {
+                event,
+                ts: Date.now(),
+                routeUrl: location.href,
+                ...detail
+            });
+        } catch (_) {}
     }
 
     function getUrlHost(url) {
@@ -403,8 +456,10 @@
     function postSubtitleData(body, subtitleUrl = "", requestMeta = null) {
         const meta = requestMeta || resolveCurrentVideoMeta();
         const currentMeta = resolveCurrentVideoMeta();
-        if (meta?.bvid && currentMeta?.bvid && meta.bvid !== currentMeta.bvid) {
-            emitLog("subtitle_stale_ui_skip", { requestedMeta: meta, currentMeta });
+        if ((meta?.bvid && currentMeta?.bvid && String(meta.bvid).toLowerCase() !== String(currentMeta.bvid).toLowerCase())
+            || (Number(meta?.p || 0) > 0 && Number(currentMeta?.p || 0) > 0 && Number(meta.p) !== Number(currentMeta.p))) {
+            emitLog("subtitle_stale_ui_skip", { requestedMeta: meta, currentMeta, reason: "post_route_mismatch" });
+            return;
         }
         const routeBvid = String(getBvidFromUrl(location.href) || "").trim();
         const bvid = String(meta.bvid || routeBvid || "").trim();
@@ -413,6 +468,14 @@
             return;
         }
         const cid = meta.cid || 0;
+        logSubtitleDiagnostic("source_forwarded", {
+            source: "inject",
+            bvid,
+            cid,
+            subtitleUrl,
+            requestMeta,
+            ...getSubtitleDiagnosticRowsMeta(body)
+        });
         emitLog("subtitle_parsed", { count: body.length, bvid, cid });
         window.postMessage({ type: "BILI_SUBTITLE_HANDSHAKE", bvid, cid }, "*");
         setTimeout(() => {

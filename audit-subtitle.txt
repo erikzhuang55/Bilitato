@@ -1,0 +1,1222 @@
+inject.js:7:    let isSubtitleCaptured = false;
+inject.js:17:    let subtitleStringCache = [];
+inject.js:39:            isSubtitleCaptured = false;
+inject.js:40:            subtitleStringCache = [];
+inject.js:42:            emitLog("subtitle_recapture_enabled", { source: "content" });
+inject.js:48:            isSubtitleCaptured = false;
+inject.js:49:            subtitleStringCache = [];
+inject.js:51:            switchSubtitleLanguageByLabel(label, requestId);
+inject.js:63:        if (isSubtitleRequest(url)) {
+inject.js:64:            logSubtitleDiagnostic("source_request", { source: "inject.fetch", subtitleUrl: url, requestMeta });
+inject.js:65:            emitLog("subtitle_request_start", { source: "fetch", url, requestMeta });
+inject.js:68:                logSubtitleDiagnostic("source_response", { source: "inject.fetch", subtitleUrl: url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
+inject.js:69:                emitLog("subtitle_response_done", { source: "fetch", url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
+inject.js:70:                emitSubtitlePayload(text, url, requestMeta);
+inject.js:89:        if (isSubtitleRequest(url)) {
+inject.js:91:            logSubtitleDiagnostic("source_request", { source: "inject.xhr", subtitleUrl: url, requestMeta });
+inject.js:92:            emitLog("subtitle_request_start", { source: "xhr", url, requestMeta });
+inject.js:95:                logSubtitleDiagnostic("source_response", { source: "inject.xhr", subtitleUrl: url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
+inject.js:96:                emitLog("subtitle_response_done", { source: "xhr", url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
+inject.js:97:                emitSubtitlePayload(this.responseText, url, requestMeta);
+inject.js:122:    function emitSubtitlePayload(rawText, url, requestMeta = null) {
+inject.js:124:        if (isSubtitleCaptured) {
+inject.js:125:            logSubtitleDiagnostic("source_ignored", { source: "inject", reason: "already_captured", subtitleUrl: url, requestMeta });
+inject.js:128:        subtitleStringCache.push(String(rawText || ""));
+inject.js:129:        if (subtitleStringCache.length > 6) subtitleStringCache = subtitleStringCache.slice(-6);
+inject.js:134:            emitLog("json_parse_error", { source: "inject_subtitle", url_host: getUrlHost(url) });
+inject.js:139:        logSubtitleDiagnostic("source_received", {
+inject.js:141:            subtitleUrl: url,
+inject.js:143:            ...getSubtitleDiagnosticRowsMeta(body)
+inject.js:146:        isSubtitleCaptured = true;
+inject.js:149:        hackSubtitleOff();
+inject.js:152:            postSubtitleData(body, url, requestMeta);
+inject.js:156:    function isSubtitleRequest(rawUrl) {
+inject.js:168:        if (/\/bfs\/(ai_)?subtitle\//i.test(path)) return true;
+inject.js:169:        if (/\/aisubtitle\//i.test(path)) return true;
+inject.js:170:        if (path.endsWith(".json") && path.includes("subtitle")) return true;
+inject.js:183:    function getSubtitleDiagnosticRowsMeta(rows) {
+inject.js:195:    function logSubtitleDiagnostic(event, detail = {}) {
+inject.js:216:        if (isSubtitleCaptured || autoTriggerStarted) return;
+inject.js:224:        if (isSubtitleCaptured) return;
+inject.js:225:        const toggle = document.querySelector(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
+inject.js:234:        emitLog("subtitle_autotrigger", { reason, attempts: autoTriggerAttempts });
+inject.js:250:            ".bpx-player-video-subtitle { visibility: hidden !important; }",
+inject.js:251:            ".bili-subtitle-x-subtitle-panel-position { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
+inject.js:252:            ".bpx-player-ctrl-subtitle-menu.bui.bui-panel.bui-dark { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
+inject.js:256:        emitLog("subtitle_stealth_applied", { source: "inject" });
+inject.js:265:        const containers = document.querySelectorAll(".bpx-player-video-subtitle");
+inject.js:274:        if (hadMask) emitLog("subtitle_stealth_released", { source: "manual_interaction" });
+inject.js:277:    function hackSubtitleOff() {
+inject.js:286:        if (isSubtitleCaptured) return;
+inject.js:288:        const allTextDivs = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
+inject.js:294:        const ccBtn = document.querySelector(".bpx-player-ctrl-subtitle");
+inject.js:305:            if (isSubtitleCaptured) return;
+inject.js:306:            const retryTrack = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"))
+inject.js:313:    function normalizeSubtitleLabel(value) {
+inject.js:317:    function dispatchSubtitleClick(target) {
+inject.js:330:    function openSubtitleMenuForSwitch() {
+inject.js:331:        const trigger = document.querySelector(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
+inject.js:341:    function clickSubtitleLanguageLabel(label) {
+inject.js:342:        const targetLabel = normalizeSubtitleLabel(label);
+inject.js:344:        const nodes = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
+inject.js:345:        const node = nodes.find((item) => normalizeSubtitleLabel(item?.textContent || item?.innerText) === targetLabel)
+inject.js:346:            || nodes.find((item) => normalizeSubtitleLabel(item?.textContent || item?.innerText).includes(targetLabel));
+inject.js:347:        const target = node?.closest?.(".bpx-player-ctrl-subtitle-language-item") || node;
+inject.js:348:        const clicked = dispatchSubtitleClick(target);
+inject.js:349:        return { clicked, matchedText: normalizeSubtitleLabel(node?.textContent || node?.innerText || "") };
+inject.js:352:    function emitSubtitleLanguageSwitchResult(requestId, label, result) {
+inject.js:354:            type: "BILI_SUBTITLE_LANGUAGE_SWITCH_RESULT",
+inject.js:361:        emitLog("subtitle_language_switch", payload);
+inject.js:364:    function switchSubtitleLanguageByLabel(label, requestId) {
+inject.js:365:        const first = clickSubtitleLanguageLabel(label);
+inject.js:367:            emitSubtitleLanguageSwitchResult(requestId, label, first);
+inject.js:370:        openSubtitleMenuForSwitch();
+inject.js:375:                const result = clickSubtitleLanguageLabel(label);
+inject.js:376:                emitLog("subtitle_language_switch_retry", { label, clicked: result.clicked, matchedText: result.matchedText, delay });
+inject.js:379:                    emitSubtitleLanguageSwitchResult(requestId, label, result);
+inject.js:381:                    emitSubtitleLanguageSwitchResult(requestId, label, result);
+inject.js:401:        isSubtitleCaptured = false;
+inject.js:405:        subtitleStringCache = [];
+inject.js:410:        emitLog("subtitle_route_reset", { bvid: capturedBvid, reason });
+inject.js:431:            window.postMessage({ type: "BILI_ROUTE_SWITCH", bvid: current, cid: meta.cid || 0, tid: getRouteTid() }, "*");
+inject.js:439:    function postSubtitleData(body, subtitleUrl = "", requestMeta = null) {
+inject.js:443:            emitLog("subtitle_stale_ui_skip", { requestedMeta: meta, currentMeta });
+inject.js:448:            emitLog("subtitle_detected", { source: "inject_drop_missing_bvid" });
+inject.js:452:        logSubtitleDiagnostic("source_forwarded", {
+inject.js:456:            subtitleUrl,
+inject.js:458:            ...getSubtitleDiagnosticRowsMeta(body)
+inject.js:460:        emitLog("subtitle_parsed", { count: body.length, bvid, cid });
+inject.js:461:        window.postMessage({ type: "BILI_SUBTITLE_HANDSHAKE", bvid, cid }, "*");
+inject.js:464:                type: "BILI_SUBTITLE_DATA",
+inject.js:473:                subtitleUrl: String(subtitleUrl || "")
+inject.js:480:            const target = event.target?.closest?.(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
+inject.js:482:            emitLog("subtitle_manual_intervention", { event: eventName });
+background.js:1:import SubtitleProcessor from "./utils/subtitleProcessor.js";
+background.js:179:        return { ...merged, ...buildSubtitleStatsContext(null, taskContext) };
+background.js:183:        return { ...merged, ...buildSubtitleStatsContext(cache, taskContext) };
+background.js:185:        return { ...merged, ...buildSubtitleStatsContext(null, taskContext) };
+background.js:189:function buildSubtitleStatsContext(cache = {}, taskContext = {}) {
+background.js:190:    const rawRows = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:191:    const processedRows = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+background.js:193:    const subtitleTotalChars = rows.reduce((sum, row) => sum + String(row?.text || "").length, 0);
+background.js:203:        subtitle_line_count: rows.length || undefined,
+background.js:204:        subtitle_total_chars: subtitleTotalChars || undefined
+background.js:209:    const rows = Array.isArray(cache?.rawSubtitle) && cache.rawSubtitle.length
+background.js:210:        ? cache.rawSubtitle
+background.js:211:        : (Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : []);
+background.js:517:const CLOUD_CACHE_KEYS = ["subtitle", ...TASK_KEYS];
+background.js:567:const lastSubtitleSync = new Map();
+background.js:616:const logSubtitle = loggerFactory.create("subtitle", {
+background.js:627:function createMissingSubtitleError(message = "无字幕可供分析") {
+background.js:1013:        await handleSubtitleCaptured(tabId, msg.payload);
+background.js:1034:            rawSubtitle: [],
+background.js:1035:            processedSubtitle: [],
+background.js:1042:                subtitleSource: "",
+background.js:1352:function isAsrSubtitleSource(source) {
+background.js:1357:function isNoTimestampSubtitleSource(source) {
+background.js:1362:function isNoTimestampSubtitleCache(cache = {}) {
+background.js:1363:    if (isNoTimestampSubtitleSource(cache?.subtitleSource)) return true;
+background.js:1364:    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:1882:        const subtitleSource = asrProvider === "siliconflow" ? "siliconflow" : "groq";
+background.js:1931:                subtitleSource,
+background.js:2102:            await handleSubtitleCaptured(tabId, {
+background.js:2107:                subtitle: rows,
+background.js:2108:                source: subtitleSource
+background.js:2114:                subtitleSource,
+background.js:2853:async function handleSubtitleCaptured(tabId, payload) {
+background.js:2858:            task: "subtitle_capture",
+background.js:2869:    const subtitleSource = String(payload?.source || "official");
+background.js:2870:    const subtitleLanguage = String(payload?.subtitleLanguage || "").trim();
+background.js:2871:    const subtitleLanguageLabel = String(payload?.subtitleLanguageLabel || subtitleLanguage || "").trim();
+background.js:2873:    logBackground.info("subtitle_detected", { tab_id: tabId, bvid, cid, tid });
+background.js:2875:    const rawSubtitle = normalizeRawSubtitle(payload.subtitle || []);
+background.js:2876:    const rawHash = makeSubtitleHash(rawSubtitle);
+background.js:2878:        logBackground.debug("subtitle_duplicate_ignore", { bvid, tab_id: tabId, raw_hash: rawHash });
+background.js:2879:        const existingSource = String(existing?.subtitleSource || "");
+background.js:2880:        const existingLanguage = String(existing?.subtitleLanguage || "");
+background.js:2886:            (subtitleSource && existingSource !== subtitleSource)
+background.js:2887:            || (subtitleLanguage && existingLanguage !== subtitleLanguage)
+background.js:2895:                subtitleSource,
+background.js:2896:                subtitleLanguage,
+background.js:2897:                subtitleLanguageLabel,
+background.js:2898:                subtitleUrl: String(payload?.subtitleUrl || existing?.subtitleUrl || ""),
+background.js:2913:            subtitleSource,
+background.js:2914:            subtitleLanguage,
+background.js:2915:            subtitleLanguageLabel,
+background.js:2916:            transcriptionProgress: isAsrSubtitleSource(subtitleSource) ? 100 : 0,
+background.js:2919:        if (isAsrSubtitleSource(subtitleSource)) {
+background.js:2921:            await persistCloudSubtitlePatch(bvid, settings, nextCache, {
+background.js:2923:                subtitleSource
+background.js:2926:        await pushSubtitleSyncToTab(tabId, bvid, nextCache, "duplicate");
+background.js:2929:    const processedSubtitle = isNoTimestampSubtitleSource(subtitleSource)
+background.js:2930:        ? rawSubtitle
+background.js:2931:        : SubtitleProcessor.process(rawSubtitle);
+background.js:2932:    const processedHash = makeSubtitleHash(processedSubtitle);
+background.js:2933:    if (rawSubtitle.length > 0 && processedSubtitle.length === 0) {
+background.js:2934:        const first = rawSubtitle[0] || {};
+background.js:2935:        logBackground.warn("subtitle_parsed", {
+background.js:2938:            raw_count: rawSubtitle.length,
+background.js:2944:    logBackground.info("subtitle_parsed", { bvid, raw_count: rawSubtitle.length, processed_count: processedSubtitle.length });
+background.js:2950:        subtitleSource,
+background.js:2951:        subtitleLanguage,
+background.js:2952:        subtitleLanguageLabel,
+background.js:2953:        subtitleUrl: String(payload?.subtitleUrl || ""),
+background.js:2954:        rawSubtitle,
+background.js:2955:        processedSubtitle,
+background.js:2970:        subtitleSource,
+background.js:2971:        subtitleLanguage,
+background.js:2972:        subtitleLanguageLabel,
+background.js:2973:        transcriptionProgress: isAsrSubtitleSource(subtitleSource) ? 100 : 0,
+background.js:2985:    if (isAsrSubtitleSource(subtitleSource)) {
+background.js:2987:        await persistCloudSubtitlePatch(bvid, settings, latestCache, {
+background.js:2989:            subtitleSource
+background.js:2992:    await pushSubtitleSyncToTab(tabId, bvid, latestCache, "fresh");
+background.js:2995:async function pushSubtitleSyncToTab(tabId, bvid, cache, reason) {
+background.js:2999:    const prev = lastSubtitleSync.get(key);
+background.js:3001:    lastSubtitleSync.set(key, { bvid: normalizedBvid, at: Date.now() });
+background.js:3010:            subtitle: Array.isArray(safeCache?.rawSubtitle) ? safeCache.rawSubtitle : [],
+background.js:3019:    const rawSubtitle = normalizeRawSubtitle(Array.isArray(cache.rawSubtitle) ? cache.rawSubtitle : []);
+background.js:3020:    const processedSubtitle = normalizeRawSubtitle(Array.isArray(cache.processedSubtitle) ? cache.processedSubtitle : []);
+background.js:3024:        rawSubtitle,
+background.js:3025:        processedSubtitle
+background.js:3029:function normalizeRawSubtitle(list) {
+background.js:3085:function createSubtitleCacheKey({ bvid, cid, language = "default" } = {}) {
+background.js:3096:        "rawSubtitle", "processedSubtitle", "rawHash", "processedHash",
+background.js:3097:        "subtitleSource", "subtitleLanguage", "subtitleLanguageLabel",
+background.js:3114:    if (part && typeof part === "object") return { ...cache, ...cloneData(part), parts: cache.parts, subtitleVariants: cache.subtitleVariants };
+background.js:3120:function makeSubtitleHash(list) {
+background.js:3143:        ...(tasks.some((task) => ["summary", "segments", "rumors"].includes(task)) ? ["subtitle"] : [])
+background.js:3351:    await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings);
+background.js:3371:            const subtitleText = getSubtitlePayload(cache);
+background.js:3372:            if (!subtitleText) throw createMissingSubtitleError();
+background.js:3375:            const prompt = `你是 B 站视频助手。基于字幕回答用户的问题，回答要准确、简洁。\n字幕：\n${subtitleText}\n历史：\n${conversation}\n用户问题：${text}`;
+background.js:3447:    await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings);
+background.js:3471:            const subtitleText = getSubtitlePayload(cache);
+background.js:3472:            if (!subtitleText) throw createMissingSubtitleError();
+background.js:3475:            const prompt = `你是 B 站视频助手。基于字幕回答用户的问题，回答要准确、简洁。\n字幕：\n${subtitleText}\n历史：\n${conversation}\n用户问题：${text}`;
+background.js:3566:    const cloudTasks = ["summary", "segments", "rumors"].includes(task) ? ["subtitle", task] : [task];
+background.js:3570:    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
+background.js:3571:    const subtitlePayloadOptions = task === "segments"
+background.js:3574:    const subtitleText = getSubtitlePayload(cache, subtitlePayloadOptions);
+background.js:3575:    if (!subtitleText) throw createMissingSubtitleError();
+background.js:3576:    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
+background.js:3577:    logSubtitlePayloadSelection(bvid, task, cache, subtitleText, subtitlePayloadOptions);
+background.js:3582:            subtitleText,
+background.js:3592:            subtitle: subtitleText,
+background.js:3612:            subtitle_chars: (segmentPromptPlan?.subtitleText || subtitleText).length,
+background.js:3660:                subtitleText,
+background.js:3680:            subtitle_chars: subtitleText.length,
+background.js:3733:                subtitleText,
+background.js:3762:                subtitleText,
+background.js:3777:        logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "single", subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions) });
+background.js:4119:function buildPrimarySegmentsPrompt({ settings, cache, subtitleText, mode, guided, customPrompts, taskContext, promptTaskContext, forceFull = false }) {
+background.js:4121:        const compactSubtitle = buildCompactSegmentsSubtitlePayload(cache, 40000) || subtitleText;
+background.js:4123:            prompt: buildCompactSegmentsPrompt({ subtitle: compactSubtitle, taskContext: promptTaskContext }),
+background.js:4124:            subtitleText: compactSubtitle,
+background.js:4130:            ? buildSegmentsAdTestPrompt({ subtitle: subtitleText, taskContext: promptTaskContext })
+background.js:4131:            : buildPrompt({ type: "segments", subtitle: subtitleText, mode, guided, customPrompts, taskContext: promptTaskContext }),
+background.js:4132:        subtitleText,
+background.js:4138:    const compactSubtitle = buildCompactSegmentsSubtitlePayload(cache, 40000);
+background.js:4139:    if (!compactSubtitle) throw originalError || createSegmentsParseError("");
+background.js:4140:    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
+background.js:4141:    const compactPrompt = buildCompactSegmentsPrompt({ subtitle: compactSubtitle, taskContext: promptTaskContext });
+background.js:4150:            subtitle_chars: compactSubtitle.length,
+background.js:4200:        subtitlePayload: {
+background.js:4204:            payload_chars: compactSubtitle.length,
+background.js:4206:            no_timestamp: isNoTimestampSubtitleCache(cache),
+background.js:4207:            raw_count: Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0,
+background.js:4208:            processed_count: Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle.length : 0
+background.js:4234:    subtitleText,
+background.js:4241:    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
+background.js:4245:        subtitleText,
+background.js:4261:            subtitle_chars: (segmentPromptPlan?.subtitleText || subtitleText).length,
+background.js:4333:    subtitleText,
+background.js:4349:            subtitleText,
+background.js:4513:    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
+background.js:4514:    const summarySubtitleOptions = { purpose: "general" };
+background.js:4515:    const segmentsSubtitleOptions = { purpose: "segments", mode: "quality" };
+background.js:4516:    const summarySubtitleText = getSubtitlePayload(cache, summarySubtitleOptions);
+background.js:4517:    const segmentsSubtitleText = getSubtitlePayload(cache, segmentsSubtitleOptions);
+background.js:4518:    if (!summarySubtitleText && !segmentsSubtitleText) throw createMissingSubtitleError();
+background.js:4519:    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
+background.js:4520:    logSubtitlePayloadSelection(bvid, "summary", cache, summarySubtitleText, summarySubtitleOptions);
+background.js:4521:    logSubtitlePayloadSelection(bvid, "segments", cache, segmentsSubtitleText, segmentsSubtitleOptions);
+background.js:4565:        const summaryPrompt = buildPrompt({ type: "summary", subtitle: summarySubtitleText, mode, guided, customPrompts, taskContext: promptTaskContext });
+background.js:4576:                        subtitle_chars: summarySubtitleText.length,
+background.js:4606:                            subtitle_chars: summarySubtitleText.length,
+background.js:4614:                    subtitleChars: summarySubtitleText.length,
+background.js:4634:                        subtitle_chars: summarySubtitleText.length,
+background.js:4649:                        subtitle_chars: summarySubtitleText.length,
+background.js:4664:            subtitleText: segmentsSubtitleText || summarySubtitleText,
+background.js:4672:        const effectiveSegmentsSubtitleText = segmentPromptPlan.subtitleText || segmentsSubtitleText || summarySubtitleText;
+background.js:4683:                        subtitle_chars: effectiveSegmentsSubtitleText.length,
+background.js:4755:                    subtitlePayload: segmentPromptPlan.compact
+background.js:4760:                            payload_chars: effectiveSegmentsSubtitleText.length,
+background.js:4762:                            no_timestamp: isNoTimestampSubtitleCache(cache),
+background.js:4763:                            raw_count: Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0,
+background.js:4764:                            processed_count: Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle.length : 0
+background.js:4766:                        : getSubtitlePayloadMeta(cache, segmentsSubtitleText || summarySubtitleText, segmentsSubtitleOptions)
+background.js:4783:                        subtitle_chars: effectiveSegmentsSubtitleText.length,
+background.js:4799:                            subtitleText: effectiveSegmentsSubtitleText,
+background.js:4831:                        subtitle_chars: (segmentsSubtitleText || summarySubtitleText).length,
+background.js:4863:    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
+background.js:4864:    const subtitlePayloadOptions = { purpose: "segments", mode: "efficiency" };
+background.js:4865:    const subtitleText = getSubtitlePayload(cache, subtitlePayloadOptions);
+background.js:4866:    if (!subtitleText) throw createMissingSubtitleError();
+background.js:4867:    const promptTaskContext = { ...taskContext, noSubtitleTimestamps: isNoTimestampSubtitleCache(cache) };
+background.js:4868:    logSubtitlePayloadSelection(bvid, "summary_segments_merged", cache, subtitleText, subtitlePayloadOptions);
+background.js:4882:        subtitle: subtitleText,
+background.js:4922:                subtitle_chars: subtitleText.length,
+background.js:5020:                        subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
+background.js:5053:                        subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
+background.js:5086:                    ? buildSegmentsAdTestPrompt({ subtitle: subtitleText, taskContext: promptTaskContext })
+background.js:5087:                    : buildPrompt({ type: "segments", subtitle: subtitleText, mode, guided, customPrompts, taskContext: promptTaskContext });
+background.js:5135:                            subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
+background.js:5188:                    subtitleText,
+background.js:5230:                subtitleChars: subtitleText.length,
+background.js:5252:                subtitle_chars: subtitleText.length,
+background.js:5281:                subtitle_chars: subtitleText.length,
+background.js:5290:function buildRawSubtitlePayload(cache, maxChars = MAX_SUBTITLE_CHARS) {
+background.js:5291:    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:5293:    const noTimestamp = isNoTimestampSubtitleCache(cache);
+background.js:5306:function formatSubtitleClock(totalSeconds) {
+background.js:5315:function buildIndexedRawSubtitlePayload(cache, maxChars = MAX_SUBTITLE_CHARS) {
+background.js:5316:    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:5318:    const noTimestamp = isNoTimestampSubtitleCache(cache);
+background.js:5330:                ? `[${formatSubtitleClock(start)}-${formatSubtitleClock(end)}]`
+background.js:5331:                : `[${formatSubtitleClock(start)}]`;
+background.js:5341:function buildProcessedSubtitlePayload(cache, maxChars = MAX_SUBTITLE_CHARS) {
+background.js:5342:    const processed = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+background.js:5344:        // processedSubtitle 的 text 已含内嵌时间戳，直接拼接
+background.js:5351:function normalizeSubtitleLanguageKeyForCache(value = {}) {
+background.js:5354:        value?.subtitleLanguage,
+background.js:5356:        value?.subtitleLanguageLabel,
+background.js:5364:function createSubtitleVariantKeyForCache({ bvid, cid, language = "default" } = {}) {
+background.js:5372:function getChineseSubtitleCache(cache = {}) {
+background.js:5376:    const variants = cache.subtitleVariants && typeof cache.subtitleVariants === "object" ? cache.subtitleVariants : {};
+background.js:5377:    const zhKey = createSubtitleVariantKeyForCache({ bvid, cid, language: "zh" });
+background.js:5383:        normalizeSubtitleLanguageKeyForCache(entry) === "zh" &&
+background.js:5384:        Array.isArray(entry.rawSubtitle) &&
+background.js:5385:        entry.rawSubtitle.length
+background.js:5387:    if (picked?.rawSubtitle?.length) {
+background.js:5390:            rawSubtitle: cloneData(picked.rawSubtitle),
+background.js:5391:            processedSubtitle: Array.isArray(picked.processedSubtitle) ? cloneData(picked.processedSubtitle) : [],
+background.js:5392:            subtitleLanguage: "zh",
+background.js:5393:            subtitleLanguageLabel: String(picked.languageLabel || picked.subtitleLanguageLabel || "中文"),
+background.js:5394:            subtitleUrl: String(picked.subtitleUrl || cache.subtitleUrl || "")
+background.js:5401:    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:5403:    const noTimestamp = isNoTimestampSubtitleCache(cache);
+background.js:5426:                ? `[${formatSubtitleClock(start)}-${formatSubtitleClock(end)}]`
+background.js:5427:                : `[${formatSubtitleClock(start)}]`;
+background.js:5434:function buildCompactSegmentsSubtitlePayload(cache, maxChars = 40000) {
+background.js:5435:    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:5463:function getSegmentsSubtitlePayload(cache, options = {}) {
+background.js:5465:    const indexedRawText = buildIndexedRawSubtitlePayload(cache, MAX_SEGMENTS_SUBTITLE_CHARS);
+background.js:5467:        if (isNoTimestampSubtitleCache(cache)) {
+background.js:5481:    return buildRawSubtitlePayload(cache, MAX_SEGMENTS_SUBTITLE_CHARS);
+background.js:5484:function getSubtitlePayload(cache, options = {}) {
+background.js:5485:    const aiCache = getChineseSubtitleCache(cache);
+background.js:5486:    if (options?.purpose === "segments") return getSegmentsSubtitlePayload(aiCache, options);
+background.js:5487:    const processedText = buildProcessedSubtitlePayload(aiCache);
+background.js:5489:    return buildRawSubtitlePayload(aiCache);
+background.js:5492:function getSubtitlePayloadMeta(cache, text, options = {}) {
+background.js:5493:    const rawCount = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0;
+background.js:5494:    const processedCount = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle.length : 0;
+background.js:5496:    const noTimestamp = isNoTimestampSubtitleCache(cache);
+background.js:5525:function logSubtitlePayloadSelection(bvid, task, cache, subtitleText, options = {}) {
+background.js:5526:    logAI.info("subtitle_payload_selected", {
+background.js:5529:        detail: getSubtitlePayloadMeta(cache, subtitleText, options)
+background.js:5534:    const noTimestamp = isNoTimestampSubtitleCache(cache);
+background.js:5555:function resolveSubtitleLine(rawRows, lineId) {
+background.js:5564:function getSubtitleEndTime(row, fallbackStart = 0) {
+background.js:5574:    const rawRows = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:5575:    const noTimestamp = isNoTimestampSubtitleCache(cache);
+background.js:5585:        const startLine = resolveSubtitleLine(rawRows, startLineId);
+background.js:5586:        const endLine = resolveSubtitleLine(rawRows, endLineId);
+background.js:5637:                    start_text: getSubtitleSnippet(startLine.row),
+background.js:5638:                    end_text: getSubtitleSnippet(endLine.row)
+background.js:5645:        const end = getSubtitleEndTime(endLine.row, endBase);
+background.js:5681:                start_text: getSubtitleSnippet(startLine.row),
+background.js:5682:                end_text: getSubtitleSnippet(endLine.row)
+background.js:5855:    if (!normalized || !isNoTimestampSubtitleCache(cache)) return normalized;
+background.js:5882:function getSubtitleLineCount(cache = {}) {
+background.js:5883:    const processed = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+background.js:5885:    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:5889:function getSubtitleRowsForDiagnostics(cache = {}) {
+background.js:5890:    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:5892:    return Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+background.js:5895:function countSubtitleMatchesForRange(rows, start, end) {
+background.js:5907:function getSubtitleTime(row) {
+background.js:5912:function getSubtitleSnippet(row) {
+background.js:5917:function findNearestSubtitleLine(rows, targetTime) {
+background.js:5922:        const time = getSubtitleTime(row);
+background.js:5929:                snippet: getSubtitleSnippet(row)
+background.js:5942:            const time = getSubtitleTime(row);
+background.js:5943:            const text = getSubtitleSnippet(row);
+background.js:5951:function buildAdDecisionDiagnostics(segments, subtitleRows) {
+background.js:5953:    const rows = Array.isArray(subtitleRows) ? subtitleRows : [];
+background.js:5960:            const startLine = findNearestSubtitleLine(rows, start);
+background.js:5961:            const endLine = findNearestSubtitleLine(rows, end);
+background.js:5987:    const subtitleChars = Number(context.subtitleChars || 0);
+background.js:5988:    const isTooShort = subtitleChars > 3000 && outputChars < 120;
+background.js:5995:            subtitle_chars: subtitleChars,
+background.js:6006:    const subtitleRows = getSubtitleRowsForDiagnostics(cache);
+background.js:6008:    const adDecisionDiagnostics = buildAdDecisionDiagnostics(list, subtitleRows);
+background.js:6012:        const matchCount = countSubtitleMatchesForRange(subtitleRows, start, end);
+background.js:6017:            subtitle_line_count: matchCount
+background.js:6030:            subtitle_line_count: getSubtitleLineCount(cache),
+background.js:6031:            subtitle_payload: context.subtitlePayload || null,
+background.js:6594:    const rawSubtitle = Array.isArray(merged?.rawSubtitle) ? merged.rawSubtitle : [];
+background.js:6595:    const processedSubtitle = Array.isArray(merged?.processedSubtitle) ? merged.processedSubtitle : [];
+background.js:6596:    if (!rawSubtitle.length || !processedSubtitle.length) return null;
+background.js:6599:        processedSubtitle: [],
+background.js:6616:            rawSubtitle: [],
+background.js:6617:            processedSubtitle: [],
+background.js:6640:            if (Array.isArray(patch?.rawSubtitle) && patch.rawSubtitle.length) {
+background.js:6641:                const language = String(patch.subtitleLanguage || merged.subtitleLanguage || "default").trim() || "default";
+background.js:6642:                const subtitleKey = createSubtitleCacheKey({ bvid: normalized, cid: patchCid, language });
+background.js:6643:                const variants = current.subtitleVariants && typeof current.subtitleVariants === "object" ? cloneData(current.subtitleVariants) : {};
+background.js:6644:                variants[subtitleKey] = {
+background.js:6648:                    languageLabel: String(patch.subtitleLanguageLabel || merged.subtitleLanguageLabel || language),
+background.js:6649:                    subtitleUrl: String(patch.subtitleUrl || ""),
+background.js:6650:                    rawSubtitle: cloneData(patch.rawSubtitle),
+background.js:6651:                    processedSubtitle: cloneData(Array.isArray(merged.processedSubtitle) ? merged.processedSubtitle : []),
+background.js:6656:                merged.subtitleVariants = variants;
+background.js:6679:                dropped_fields: ["processedSubtitle", "processedHash"],
+background.js:6680:                raw_count: Array.isArray(fallback.rawSubtitle) ? fallback.rawSubtitle.length : 0
+background.js:6684:                reason: "drop_processed_subtitle"
+background.js:6797:    if (task === "subtitle") {
+background.js:6798:        return (Array.isArray(cache.rawSubtitle) && cache.rawSubtitle.length > 0)
+background.js:6799:            || (Array.isArray(cache.processedSubtitle) && cache.processedSubtitle.length > 0);
+background.js:6817:        if (task === "subtitle") {
+background.js:6820:                "subtitle_source",
+background.js:6821:                "raw_subtitle",
+background.js:6822:                "processed_subtitle",
+background.js:6823:                "subtitle_upload_count",
+background.js:6824:                "subtitle_uploaded_at"
+background.js:6838:        if (task === "subtitle") {
+background.js:6839:            const rawSubtitle = normalizeRawSubtitle(Array.isArray(row?.raw_subtitle) ? row.raw_subtitle : []);
+background.js:6840:            const processedSubtitle = normalizeRawSubtitle(Array.isArray(row?.processed_subtitle) ? row.processed_subtitle : []);
+background.js:6841:            if (!rawSubtitle.length && !processedSubtitle.length) return;
+background.js:6843:            patch.rawSubtitle = rawSubtitle;
+background.js:6844:            patch.processedSubtitle = processedSubtitle;
+background.js:6845:            patch.rawHash = makeSubtitleHash(rawSubtitle);
+background.js:6846:            patch.processedHash = makeSubtitleHash(processedSubtitle);
+background.js:6847:            patch.subtitleSource = String(row?.subtitle_source || "");
+background.js:6848:            patch.subtitleUploadCount = Math.max(0, Number(row?.subtitle_upload_count || 0));
+background.js:6849:            patch.subtitleUploadedAt = String(row?.subtitle_uploaded_at || "");
+background.js:6885:        if (task === "subtitle") patch.subtitleCacheSource = source;
+background.js:6945:    if (Object.prototype.hasOwnProperty.call(patch, "rawSubtitle")) {
+background.js:6946:        row.raw_subtitle = normalizeRawSubtitle(Array.isArray(patch.rawSubtitle) ? patch.rawSubtitle : []);
+background.js:6948:    if (Object.prototype.hasOwnProperty.call(patch, "processedSubtitle")) {
+background.js:6949:        row.processed_subtitle = normalizeRawSubtitle(Array.isArray(patch.processedSubtitle) ? patch.processedSubtitle : []);
+background.js:6951:    if (Object.prototype.hasOwnProperty.call(patch, "subtitleSource")) {
+background.js:6952:        row.subtitle_source = String(patch.subtitleSource || "");
+background.js:6954:    if (Object.prototype.hasOwnProperty.call(patch, "subtitleUploadCount")) {
+background.js:6955:        row.subtitle_upload_count = Math.max(0, Number(patch.subtitleUploadCount || 0));
+background.js:6957:    if (Object.prototype.hasOwnProperty.call(patch, "subtitleUploadedAt")) {
+background.js:6958:        row.subtitle_uploaded_at = String(patch.subtitleUploadedAt || "");
+background.js:6984:function hasEnoughSubtitleRows(list, minRows = 10) {
+background.js:7143:async function persistCloudSubtitlePatch(bvid, settings, cache, extra = {}) {
+background.js:7147:    const rawSubtitle = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+background.js:7148:    const processedSubtitle = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
+background.js:7149:    const subtitleSource = String(extra.subtitleSource || cache?.subtitleSource || "");
+background.js:7150:    const minRows = isAsrSubtitleSource(subtitleSource) ? 1 : 10;
+background.js:7151:    if (!hasEnoughSubtitleRows(rawSubtitle, minRows) || !hasEnoughSubtitleRows(processedSubtitle, minRows)) {
+background.js:7152:        logCache.info("cloud_subtitle_skip", {
+background.js:7154:            raw_count: rawSubtitle.length,
+background.js:7155:            processed_count: processedSubtitle.length,
+background.js:7156:            reason: "subtitle_too_short",
+background.js:7157:            subtitle_source: subtitleSource,
+background.js:7163:        const current = await fetchVideoCacheMetaRow(normalizedBvid, settings, ["subtitle_upload_count"]);
+background.js:7166:            rawSubtitle,
+background.js:7167:            processedSubtitle,
+background.js:7168:            subtitleSource,
+background.js:7169:            subtitleUploadCount: Math.max(0, Number(current?.subtitle_upload_count || 0)) + 1,
+background.js:7170:            subtitleUploadedAt: new Date().toISOString()
+background.js:7174:        logCache.info("cloud_subtitle_write_start", {
+background.js:7179:                raw_count: rawSubtitle.length,
+background.js:7180:                processed_count: processedSubtitle.length,
+background.js:7181:                subtitle_source: subtitleSource,
+background.js:7182:                next_upload_count: row.subtitle_upload_count || 0
+background.js:7186:        logCache.info("cloud_subtitle_write", {
+background.js:7191:                raw_count: rawSubtitle.length,
+background.js:7192:                processed_count: processedSubtitle.length,
+background.js:7193:                subtitle_source: subtitleSource,
+background.js:7194:                upload_count: row.subtitle_upload_count || 0
+background.js:7199:        logBackground.error("cloud_subtitle_write_fail", {
+background.js:7201:            error: error.message || "cloud subtitle write failed"
+content.js:37:function isNoTimestampSubtitleCache(cache = {}) {
+content.js:38:    const source = String(cache?.subtitleSource || "").toLowerCase();
+content.js:40:    const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+content.js:45:function resolveSubtitleLineForSegment(rawRows, lineId) {
+content.js:54:function getSegmentSubtitleEndTime(row, fallbackStart = 0) {
+content.js:63:    if (isNoTimestampSubtitleCache(cache)) return null;
+content.js:69:    const rawRows = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
+content.js:72:    const startLine = resolveSubtitleLineForSegment(rawRows, startLineId);
+content.js:73:    const endLine = resolveSubtitleLineForSegment(rawRows, endLineId);
+content.js:77:    const mappedEnd = getSegmentSubtitleEndTime(endLine, endBase);
+content.js:88:    if (!isNoTimestampSubtitleCache(cache)) return list;
+content.js:276:    buildTimestampedSubtitleText,
+content.js:277:    getRawSubtitlePlainText: getRawSubtitlePlainTextFromCache,
+content.js:278:    getRawSubtitleRows: getRawSubtitleRowsFromCache
+content.js:279:} = globalThis.BilitatoContentSubtitle || {};
+content.js:286:    needsSubtitleForTasks
+content.js:290:    hasSubtitle: hasSubtitleInCache,
+content.js:298:    normalizeSubtitleOptions: normalizeSubtitleOptionsFromPage,
+content.js:299:    pickSubtitle: pickSubtitleFromPage,
+content.js:351:    renderedSubtitleIndex: -1,
+content.js:352:    subtitleCaptureLock: false,
+content.js:353:    subtitleCapturedBvid: "",
+content.js:369:    pendingSubtitle: null,
+content.js:380:    subtitleFallbackTimer: null,
+content.js:381:    lastSubtitleForwardAt: 0,
+content.js:385:    subtitleTimeline: [],
+content.js:386:    subtitleOptions: [],
+content.js:387:    subtitleOptionsBvid: "",
+content.js:388:    activeSubtitleId: "",
+content.js:389:    pendingSubtitleLanguageSwitch: null,
+content.js:409:    subtitleCheckDelayTimer: null,
+content.js:410:    subtitleDetectTimeoutTimer: null,
+content.js:411:    subtitleCheckTargetBvid: "",
+content.js:417:    subtitleObserver: null,
+content.js:418:    subtitleObserveUntil: 0,
+content.js:419:    subtitleDomDetected: false,
+content.js:477:function getSubtitleDiagnosticRowsMeta(rows) {
+content.js:489:function logSubtitleDiagnostic(event, detail = {}) {
+content.js:501:const subtitleUiCoordinator = {
+content.js:514:function isDuplicateSubtitleRouteSwitch(bvid, p) {
+content.js:517:    if (subtitleUiCoordinator.lastRouteSwitchKey === key && now - subtitleUiCoordinator.lastRouteSwitchAt < 1500) {
+content.js:518:        logSubtitleDiagnostic("route_switch_ignored", { routeKey: key, reason: "duplicate_route_event" });
+content.js:521:    subtitleUiCoordinator.lastRouteSwitchKey = key;
+content.js:522:    subtitleUiCoordinator.lastRouteSwitchAt = now;
+content.js:526:function beginSubtitleUiCycle(bvid = "", p = "") {
+content.js:528:    subtitleUiCoordinator.routeKey = routeKey;
+content.js:529:    subtitleUiCoordinator.phase = "loading";
+content.js:530:    subtitleUiCoordinator.generation += 1;
+content.js:531:    subtitleUiCoordinator.lastRenderSignature = "";
+content.js:532:    subtitleUiCoordinator.lastCacheApplySignature = "";
+content.js:533:    subtitleUiCoordinator.scrollUnlockAt = 0;
+content.js:534:    subtitleUiCoordinator.displaySource = "";
+content.js:535:    if (subtitleUiCoordinator.timeoutTimer) clearTimeout(subtitleUiCoordinator.timeoutTimer);
+content.js:536:    const generation = subtitleUiCoordinator.generation;
+content.js:537:    subtitleUiCoordinator.timeoutTimer = setTimeout(() => {
+content.js:538:        if (subtitleUiCoordinator.generation !== generation || subtitleUiCoordinator.routeKey !== routeKey) return;
+content.js:539:        subtitleUiCoordinator.timeoutTimer = null;
+content.js:540:        subtitleUiCoordinator.phase = "empty";
+content.js:541:        subtitleUiCoordinator.lastRenderSignature = "";
+content.js:542:        renderContent();
+content.js:544:    logSubtitleDiagnostic("ui_phase_changed", { phase: "loading", routeKey, generation });
+content.js:547:function markSubtitleUiReady(source = "unknown", bvid = "", p = "") {
+content.js:549:    if (subtitleUiCoordinator.routeKey && subtitleUiCoordinator.routeKey !== routeKey) return;
+content.js:550:    const alreadyReadyForRoute = subtitleUiCoordinator.phase === "ready" && subtitleUiCoordinator.routeKey === routeKey;
+content.js:551:    subtitleUiCoordinator.routeKey = routeKey;
+content.js:552:    subtitleUiCoordinator.phase = "ready";
+content.js:553:    if (!alreadyReadyForRoute || source === "language_switch") subtitleUiCoordinator.displaySource = source;
+content.js:554:    if (!alreadyReadyForRoute) subtitleUiCoordinator.lastRenderSignature = "";
+content.js:555:    if (subtitleUiCoordinator.timeoutTimer) {
+content.js:556:        clearTimeout(subtitleUiCoordinator.timeoutTimer);
+content.js:557:        subtitleUiCoordinator.timeoutTimer = null;
+content.js:559:    logSubtitleDiagnostic("ui_phase_changed", { phase: "ready", source, routeKey, generation: subtitleUiCoordinator.generation });
+content.js:562:function isSubtitleUiLoading() {
+content.js:564:    return subtitleUiCoordinator.phase === "loading" && subtitleUiCoordinator.routeKey === routeKey;
+content.js:1020:    renderContent();
+content.js:1061:    beginSubtitleObservation(appState.injectBvid);
+content.js:1062:    startSubtitleCheckTimer();
+content.js:1063:    await syncCacheFromBackground(getBvidFromUrl(location.href) || appState.tabState?.activeBvid);
+content.js:1064:    triggerDefaultSubtitleCapture();
+content.js:1065:    setInterval(triggerDefaultSubtitleCapture, 3500);
+content.js:1085:            task: "subtitle",
+content.js:1097:    if (msgType === "BILI_SUBTITLE_DATA") {
+content.js:1098:        logSubtitleDiagnostic("source_received", {
+content.js:1103:            subtitleUrl: String(event.data?.subtitleUrl || ""),
+content.js:1104:            ...getSubtitleDiagnosticRowsMeta(event.data?.data)
+content.js:1107:            markSubtitleUiReady("inject", event.data?.bvid, event.data?.p || event.data?.tid);
+content.js:1110:    if (msgType === "BILI_INJECT_READY" || msgType === "BILI_SUBTITLE_HANDSHAKE") {
+content.js:1112:        beginSubtitleObservation(appState.injectBvid || resolveCurrentBvid());
+content.js:1117:        if (msgType === "BILI_SUBTITLE_HANDSHAKE") {
+content.js:1118:            pushSubtitleTimeline("handshake", {
+content.js:1122:            scheduleSubtitleFallbackWatchdog("handshake");
+content.js:1123:            flushPendingSubtitleIfReady();
+content.js:1125:            pushSubtitleTimeline("inject_ready");
+content.js:1126:            logContent.info("subtitle_detected", { source: "inject_ready" });
+content.js:1132:        logInject.debug(event.data.event || "subtitle_detected", event.data.detail || {});
+content.js:1133:        if (event.data.event === "subtitle_detected") {
+content.js:1134:            pushSubtitleTimeline("inject_detected", {
+content.js:1137:            scheduleSubtitleFallbackWatchdog("inject_log");
+content.js:1166:    if (msgType === "BILI_ROUTE_SWITCH") {
+content.js:1171:        if (isDuplicateSubtitleRouteSwitch(routeBvid, routeP)) return;
+content.js:1172:        resetAllState();
+content.js:1174:        beginSubtitleUiCycle(routeBvid, routeP);
+content.js:1186:        clearCCListImmediately();
+content.js:1187:        renderContent();
+content.js:1191:    if (msgType !== "BILI_SUBTITLE_DATA") return;
+content.js:1192:    appState.subtitleDomDetected = true;
+content.js:1193:    pushSubtitleTimeline("inject_data_received", {
+content.js:1196:    scheduleSubtitleFallbackWatchdog("subtitle_data");
+content.js:1197:    const subtitles = Array.isArray(event.data?.data) ? event.data.data : [];
+content.js:1198:    if (!subtitles.length) {
+content.js:1199:        logContent.warn("subtitle_detected", { source: "inject_message_empty" });
+content.js:1206:        pushSubtitleTimeline("drop_mismatch_bvid", { payloadBvid: bvid, currentBvid: currentUrlBvid });
+content.js:1214:        subtitle: subtitles,
+content.js:1218:        subtitleLanguage: String(event.data?.language || ""),
+content.js:1219:        subtitleLanguageLabel: String(event.data?.languageLabel || ""),
+content.js:1220:        subtitleUrl: String(event.data?.subtitleUrl || "")
+content.js:1222:    const languageSwitch = appState.pendingSubtitleLanguageSwitch;
+content.js:1225:        pendingPayload.subtitleLanguage = String(languageSwitch.id || "");
+content.js:1226:        pendingPayload.subtitleLanguageLabel = String(languageSwitch.label || "");
+content.js:1228:        appState.activeSubtitleId = String(languageSwitch.id || "");
+content.js:1230:        const selectedSubtitleOption = findSubtitleOption(appState.subtitleOptions, appState.activeSubtitleId)
+content.js:1231:            || pickSubtitle(appState.subtitleOptions);
+content.js:1233:        pendingPayload.subtitleLanguage = "zh";
+content.js:1234:        pendingPayload.subtitleLanguageLabel = "中文";
+content.js:1235:        pendingPayload.subtitleUrl = selectedSubtitleOption?.url || pendingPayload.subtitleUrl;
+content.js:1236:        appState.activeSubtitleId = "zh";
+content.js:1239:        appState.pendingSubtitle = pendingPayload;
+content.js:1240:        logContent.info("subtitle_detected", { source: "pending_subtitle_set", count: subtitles.length, bvid: currentUrlBvid || "" });
+content.js:1241:        pushSubtitleTimeline("pending_wait_bvid", { count: subtitles.length });
+content.js:1242:        logContent.warn("subtitle_detected", { source: "inject_message_pending_bvid", count: subtitles.length });
+content.js:1243:        scheduleSubtitleFallbackWatchdog("pending_bvid");
+content.js:1248:        logSubtitleDiagnostic("direct_render", {
+content.js:1253:            ...getSubtitleDiagnosticRowsMeta(subtitles)
+content.js:1255:        renderCC(immediateContainer, subtitles);
+content.js:1257:    await forwardSubtitlePayload(pendingPayload, "inject_message_forwarded");
+content.js:1259:        applyOfficialSubtitleVariantToLocalCache({
+content.js:1261:            option: { id: "zh", label: "中文", url: pendingPayload.subtitleUrl || "" },
+content.js:1262:            rows: subtitles,
+content.js:1266:    if (languageSwitch) appState.pendingSubtitleLanguageSwitch = null;
+content.js:1270:        logContent.warn("subtitle_detected", {
+content.js:1280:    if (container) renderCC(container, subtitles);
+content.js:1338:        pushSubtitleTimeline("bvid_switch", { from: beforeBvid, to: afterBvid || "" });
+content.js:1339:        resetPageStateByBvidSwitch();
+content.js:1344:        clearCCListImmediately();
+content.js:1357:            applyCacheSubtitleState(appState.cache, currentRoute || afterBvid || beforeBvid);
+content.js:1369:    if (afterBvid && hasUsableSubtitleCache(appState.cache, afterBvid)) {
+content.js:1370:        appState.subtitleCapturedBvid = afterBvid;
+content.js:1378:        startSubtitleCheckTimer();
+content.js:1384:    beginSubtitleObservation(appState.injectBvid || afterBvid || routeBvid);
+content.js:1385:    flushPendingSubtitleIfReady();
+content.js:1386:    renderContent();
+content.js:1390:        syncActiveCacheByBvid(syncTarget);
+content.js:1970:    renderContent();
+content.js:2116:                renderContent();
+content.js:2162:            renderContent();
+content.js:2217:            renderContent();
+content.js:2240:            handleCopySubtitleWithTimestamp();
+content.js:2245:            handleCopyRawSubtitle();
+content.js:2249:            handleCopyRawSubtitle(actionNode);
+content.js:2253:            toggleSubtitleLanguageMenu(actionNode);
+content.js:2257:            closeSubtitleLanguageMenu();
+content.js:2258:            switchOfficialSubtitleLanguage(actionNode.dataset.languageId).catch((error) => {
+content.js:2329:            renderContent();
+content.js:2332:        if (action === "summary-refresh-subtitle-cache") {
+content.js:2343:            renderContent();
+content.js:2395:            renderContent();
+content.js:2426:            renderContent();
+content.js:2444:            scrollToCurrentSubtitle(true);
+content.js:2485:            handleRegenerateGroqSubtitle();
+content.js:2642:function renderContent() {
+content.js:2669:            if (id === "CC") renderCC(container);
+content.js:2681:    renderSubtitleTimelinePanel(panel);
+content.js:2740:    if (!silent) renderContent();
+content.js:2759:        renderContent();
+content.js:2766:        renderContent();
+content.js:2814:        renderContent();
+content.js:2818:    renderContent();
+content.js:2841:        renderContent();
+content.js:2848:        renderContent();
+content.js:2884:                    <div class="feedback-subtitle">我非常重视你和你的意见。</div>
+content.js:3042:        rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
+content.js:3043:        processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
+content.js:3045:        subtitleSource: String(appState.cache?.subtitleSource || ""),
+content.js:3055:    const segmentsNoTimestamp = isNoTimestampSubtitleCache(appState.cache);
+content.js:3087:        const hasSubtitle = hasUsableSubtitleCache(appState.cache, resolveCurrentBvid());
+content.js:3088:        const isCheckingSubtitleCache = !hasSubtitle && isCloudReadLoadingForCurrentVideo();
+content.js:3090:        let tipText = hasSubtitle ? "去除噪音，抓住重点。" : "点击后将先检查字幕缓存。";
+content.js:3092:        let btnText = isCheckingSubtitleCache ? "检查并生成" : "生成 AI 总结";
+content.js:3100:        } else if (isCheckingSubtitleCache) {
+content.js:3102:        } else if (!hasSubtitle) {
+content.js:3105:                ${renderMissingSubtitleState()}
+content.js:3112:            <div class="page-body subtitle-empty-container">
+content.js:3355:function renderCC(panel, rowsOverride) {
+content.js:3356:    logSubtitleDiagnostic("render_called", {
+content.js:3358:        ...getSubtitleDiagnosticRowsMeta(rowsOverride)
+content.js:3367:    const rows = Array.isArray(rowsOverride) ? rowsOverride : (cacheReadyForCurrent ? getRawSubtitleRowsFromCache(appState.cache) : []);
+content.js:3369:        && subtitleUiCoordinator.phase === "ready"
+content.js:3370:        && subtitleUiCoordinator.displaySource === "inject"
+content.js:3372:        logSubtitleDiagnostic("render_skipped", {
+content.js:3375:            routeKey: subtitleUiCoordinator.routeKey
+content.js:3379:    if (rows.length > 0 && subtitleUiCoordinator.phase === "ready") {
+content.js:3380:        const rowsMeta = getSubtitleDiagnosticRowsMeta(rows);
+content.js:3382:            subtitleUiCoordinator.routeKey,
+content.js:3385:            String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || ""),
+content.js:3386:            String(appState.cache?.subtitleLanguage || appState.tabState?.subtitleLanguage || "")
+content.js:3388:        if (subtitleUiCoordinator.lastRenderSignature === readySignature && panel.querySelector?.(".cc-panel")) {
+content.js:3389:            logSubtitleDiagnostic("render_skipped", {
+content.js:3392:                routeKey: subtitleUiCoordinator.routeKey
+content.js:3396:        subtitleUiCoordinator.lastRenderSignature = readySignature;
+content.js:3397:        subtitleUiCoordinator.scrollUnlockAt = Date.now() + 300;
+content.js:3399:    if (isSubtitleUiLoading() && rows.length === 0) {
+content.js:3400:        const routeKey = subtitleUiCoordinator.routeKey;
+content.js:3402:        if (subtitleUiCoordinator.lastRenderSignature === signature) {
+content.js:3403:            logSubtitleDiagnostic("render_skipped", {
+content.js:3410:        subtitleUiCoordinator.lastRenderSignature = signature;
+content.js:3417:            logSubtitleDiagnostic("loading_updated_in_place", { routeKey });
+content.js:3421:        subtitleUiCoordinator.lastRenderSignature = "";
+content.js:3425:            task: "subtitle",
+content.js:3430:                row_count: getRawSubtitleRowsFromCache(appState.cache).length
+content.js:3434:    const subtitleSource = String(appState.tabState?.subtitleSource || "");
+content.js:3468:    const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
+content.js:3469:    const isNoTimestampSubtitle = subtitleSource === "siliconflow" || subtitleSource === "funasr";
+content.js:3470:    const shouldShowRegenerate = rows.length > 0 && isAsrSubtitle && !running;
+content.js:3475:        subtitleUiCoordinator.phase,
+content.js:3477:        getSubtitleDiagnosticRowsMeta(rows).firstThreeLines,
+content.js:3479:        subtitleSource,
+content.js:3480:        isAsrSubtitle,
+content.js:3483:    if (panel.dataset.subtitleDiagRenderSignature === domRenderSignature && panel.querySelector?.(".cc-panel")) {
+content.js:3484:        logSubtitleDiagnostic("render_skipped", {
+content.js:3487:            routeKey: subtitleUiCoordinator.routeKey
+content.js:3491:    panel.dataset.subtitleDiagRenderSignature = domRenderSignature;
+content.js:3493:    const subtitleCacheSource = String(appState.cache?.subtitleCacheSource || "").toLowerCase();
+content.js:3497:        ? (subtitleCacheSource === "cloud" ? "云端缓存" : (isAsrSubtitle ? "ASR转录生成" : "官方AI字幕"))
+content.js:3502:    const canSwitchOfficialSubtitle = rows.length > 0 && !isAsrSubtitle && !running;
+content.js:3503:    const languageBtnHtml = canSwitchOfficialSubtitle
+content.js:3534:            const hasTimestamp = !isNoTimestampSubtitle && Number.isFinite(start) && start >= 0;
+content.js:3550:            scrollToCurrentSubtitle(true, "auto");
+content.js:3551:            logSubtitleDiagnostic("rows_updated_in_place", {
+content.js:3554:                routeKey: subtitleUiCoordinator.routeKey
+content.js:3573:        const isDetectingSubtitle = !running && (isSubtitleUiLoading() || ((!appState.cache || !cacheReadyForCurrent) && !detectTimeoutReached));
+content.js:3574:        if (isSubtitleUiLoading() && appState.subtitleDetectTimeoutTimer) {
+content.js:3575:            clearTimeout(appState.subtitleDetectTimeoutTimer);
+content.js:3576:            appState.subtitleDetectTimeoutTimer = null;
+content.js:3577:        } else if (isDetectingSubtitle && !isSubtitleUiLoading() && !appState.subtitleDetectTimeoutTimer) {
+content.js:3579:            appState.subtitleDetectTimeoutTimer = setTimeout(() => {
+content.js:3580:                appState.subtitleDetectTimeoutTimer = null;
+content.js:3581:                renderContent();
+content.js:3583:        } else if (!isDetectingSubtitle && appState.subtitleDetectTimeoutTimer) {
+content.js:3584:            clearTimeout(appState.subtitleDetectTimeoutTimer);
+content.js:3585:            appState.subtitleDetectTimeoutTimer = null;
+content.js:3587:        const capsuleDisabled = (running || isDetectingSubtitle) ? "disabled" : "";
+content.js:3589:        if (asrPanelError && !running && !isDetectingSubtitle && renderErrorPanel) {
+content.js:3599:        const statusText = isDetectingSubtitle
+content.js:3604:        const buttonText = running ? "转录中..." : (isDetectingSubtitle ? "检测中..." : "开始在线转录");
+content.js:3613:            is_detecting_subtitle: isDetectingSubtitle,
+content.js:3640:        const capsuleHtml = `<div class="subtitle-empty-container">
+content.js:3702:        scrollToCurrentSubtitle(true, "auto");
+content.js:3785:        rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
+content.js:3786:        processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
+content.js:3956:    const rumorsNoTimestamp = isNoTimestampSubtitleCache(appState.cache) || rumors?.no_timestamp || claims.some((item) => item?.no_timestamp);
+content.js:3968:        rawSubtitleLength: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
+content.js:3969:        processedSubtitleLength: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle.length : 0,
+content.js:3970:        subtitleSource: String(appState.cache?.subtitleSource || ""),
+content.js:4087:            <div class="page-body subtitle-empty-container">
+content.js:4138:    renderContent();
+content.js:4214:            renderContent();
+content.js:4281:    renderContent();
+content.js:4953:    await syncCacheFromBackground(bvid, { preserveCacheOnMiss: false, force: true, skipCloud: true }).catch(() => {});
+content.js:4954:    renderContent();
+content.js:4973:        await syncCacheFromBackground(currentBvid, { preserveCacheOnMiss: false, force: true, skipCloud: true }).catch(() => {});
+content.js:4975:    renderContent();
+content.js:4995:    if (options.render !== false) renderContent();
+content.js:5002:    appState.activeSubtitleId = "";
+content.js:5003:    appState.subtitleOptions = [];
+content.js:5004:    appState.subtitleOptionsBvid = "";
+content.js:5008:function renderSubtitleEmptyDemoControls() {
+content.js:5014:                ${renderMissingSubtitleState()}
+content.js:5147:            ${renderSubtitleEmptyDemoControls()}
+content.js:5275:    renderContent();
+content.js:5276:    // Check for subtitle existence before running summary or segments
+content.js:5279:        if (needsSubtitleForTasks(tasks) && currentBvid) {
+content.js:5280:            const synced = await syncCacheFromBackgroundWithRetry(currentBvid, 3, 120, { skipCloud: false });
+content.js:5287:        if (!currentBvid || normalizeBvidCase(appState.cache?.bvid || "") !== normalizeBvidCase(currentBvid) || !hasSubtitleInCache(appState.cache)) {
+content.js:5295:            if (appState.activePage === "summary") renderContent();
+content.js:5348:        else renderContent();
+content.js:5351:        renderContent();
+content.js:5580:            renderContent();
+content.js:5633:function resetPageStateByBvidSwitch() {
+content.js:5634:    logSubtitleDiagnostic("clear_requested", { source: "resetPageStateByBvidSwitch" });
+content.js:5635:    beginSubtitleUiCycle();
+content.js:5654:    appState.renderedSubtitleIndex = -1;
+content.js:5656:    closeSubtitleLanguageMenu();
+content.js:5658:    appState.subtitleCapturedBvid = "";
+content.js:5659:    appState.subtitleOptions = [];
+content.js:5660:    appState.subtitleOptionsBvid = "";
+content.js:5661:    appState.activeSubtitleId = "";
+content.js:5662:    appState.pendingSubtitle = null;
+content.js:5678:    appState.lastSubtitleForwardAt = 0;
+content.js:5679:    appState.subtitleTimeline = [];
+content.js:5686:    appState.subtitleDomDetected = false;
+content.js:5687:    appState.subtitleObserveUntil = 0;
+content.js:5688:    appState.subtitleCheckTargetBvid = "";
+content.js:5720:    if (appState.subtitleCheckDelayTimer) {
+content.js:5721:        clearTimeout(appState.subtitleCheckDelayTimer);
+content.js:5722:        appState.subtitleCheckDelayTimer = null;
+content.js:5724:    if (appState.subtitleDetectTimeoutTimer) {
+content.js:5725:        clearTimeout(appState.subtitleDetectTimeoutTimer);
+content.js:5726:        appState.subtitleDetectTimeoutTimer = null;
+content.js:5732:    stopSubtitleObserver();
+content.js:5735:function resetAllState() {
+content.js:5736:    logSubtitleDiagnostic("clear_requested", { source: "resetAllState" });
+content.js:5749:    appState.subtitleDomDetected = false;
+content.js:5752:    appState.subtitleObserveUntil = 0;
+content.js:5753:    appState.subtitleCheckTargetBvid = "";
+content.js:5760:    appState.pendingSubtitle = null;
+content.js:5761:    appState.subtitleOptions = [];
+content.js:5762:    appState.subtitleOptionsBvid = "";
+content.js:5763:    appState.activeSubtitleId = "";
+content.js:5786:    if (appState.subtitleCheckDelayTimer) {
+content.js:5787:        clearTimeout(appState.subtitleCheckDelayTimer);
+content.js:5788:        appState.subtitleCheckDelayTimer = null;
+content.js:5790:    if (appState.subtitleDetectTimeoutTimer) {
+content.js:5791:        clearTimeout(appState.subtitleDetectTimeoutTimer);
+content.js:5792:        appState.subtitleDetectTimeoutTimer = null;
+content.js:5798:    stopSubtitleObserver();
+content.js:5799:    resetPageStateByBvidSwitch();
+content.js:5803:        appState.renderedSubtitleIndex = -1;
+content.js:5804:        renderCC(ccContainer, []);
+content.js:5809:    resetPageStateByBvidSwitch();
+content.js:5821:    await handleCopyRawSubtitle(buttonNode);
+content.js:5856:        handleCopySubtitleWithTimestamp();
+content.js:5860:        handleCopyRawSubtitle();
+content.js:5883:function toggleSubtitleLanguageMenu(buttonNode) {
+content.js:5884:    const existing = document.getElementById("subtitle-language-menu");
+content.js:5894:    const options = getOfficialSubtitleOptionsForCurrentVideo();
+content.js:5896:        refreshSubtitleOptionsForCurrentVideo({ force: true })
+content.js:5898:                renderContent();
+content.js:5902:                        const freshOptions = getOfficialSubtitleOptionsForCurrentVideo();
+content.js:5903:                        if (freshOptions.length > 1 && freshButton?.isConnected) toggleSubtitleLanguageMenu(freshButton);
+content.js:5912:    overlay.id = "subtitle-language-menu";
+content.js:5915:    const activeId = String(appState.activeSubtitleId || appState.cache?.subtitleLanguage || "");
+content.js:5916:    overlay.innerHTML = `<div class="copy-option-menu subtitle-language-menu">${options.map((item) => {
+content.js:5917:        const id = getSubtitleOptionId(item);
+content.js:5919:        return `<button type="button" class="copy-option-btn subtitle-language-option ${active ? "active" : ""}" data-action="cc-switch-language" data-language-id="${escapeHtmlAttr(id)}">${escapeHtml(item.label || id)}${active ? " · 当前" : ""}</button>`;
+content.js:5928:            closeSubtitleLanguageMenu();
+content.js:5929:            switchOfficialSubtitleLanguage(switchButton.dataset.languageId).catch((error) => {
+content.js:5934:        if (event.target === overlay) closeSubtitleLanguageMenu();
+content.js:5950:function closeSubtitleLanguageMenu() {
+content.js:5951:    document.getElementById("subtitle-language-menu")?.remove();
+content.js:5954:async function handleCopySubtitleWithTimestamp() {
+content.js:5955:    const rows = getRawSubtitleRows();
+content.js:5960:    const text = buildTimestampedSubtitleText(appState.cache);
+content.js:6010:function isAsrSubtitleSourceValue(source) {
+content.js:6015:function applyCacheSubtitleState(cache, targetBvid = "") {
+content.js:6016:    logSubtitleDiagnostic("cache_read", {
+content.js:6017:        source: "applyCacheSubtitleState",
+content.js:6021:        ...getSubtitleDiagnosticRowsMeta(cache?.rawSubtitle || cache?.processedSubtitle)
+content.js:6026:    const rowsMeta = getSubtitleDiagnosticRowsMeta(cache?.rawSubtitle || cache?.processedSubtitle);
+content.js:6033:        String(cache?.subtitleSource || ""),
+content.js:6034:        String(cache?.subtitleLanguage || "")
+content.js:6036:    if (subtitleUiCoordinator.lastCacheApplySignature === applySignature) {
+content.js:6037:        logSubtitleDiagnostic("cache_apply_skipped", {
+content.js:6038:            source: "applyCacheSubtitleState",
+content.js:6046:    subtitleUiCoordinator.lastCacheApplySignature = applySignature;
+content.js:6047:    if (hasUsableSubtitleCache(cache, target)) {
+content.js:6048:        if (subtitleUiCoordinator.displaySource !== "inject") {
+content.js:6049:            markSubtitleUiReady("cache", target, cache?.tid || getRoutePartId());
+content.js:6051:            logSubtitleDiagnostic("ui_phase_unchanged", {
+content.js:6055:                routeKey: subtitleUiCoordinator.routeKey
+content.js:6059:    const subtitleSource = String(cache?.subtitleSource || "");
+content.js:6065:        subtitleSource: subtitleSource || appState.tabState?.subtitleSource || "",
+content.js:6066:        transcriptionProgress: isAsrSubtitleSourceValue(subtitleSource)
+content.js:6070:    if (hasUsableSubtitleCache(cache, target)) {
+content.js:6071:        appState.subtitleCapturedBvid = target;
+content.js:6081:    if (!silent) renderContent();
+content.js:6092:                if (!silent) renderContent();
+content.js:6100:                applyCacheSubtitleState(cache, target);
+content.js:6104:            if (cacheUpdated || !silent || ["CC", "summary", "chat", "real"].includes(appState.activePage)) renderContent();
+content.js:6110:            if (!silent || ["CC", "summary", "chat", "real"].includes(appState.activePage)) renderContent();
+content.js:6128:        <div class="page-body subtitle-empty-container">
+content.js:6136:function renderMissingSubtitleState() {
+content.js:6138:        <div class="page-body subtitle-empty-container">
+content.js:6141:                <div class="subtitle-empty-actions">
+content.js:6142:                    <button class="action-btn subtitle-empty-primary" data-action="goto-cc-tab">去生成字幕</button>
+content.js:6143:                    <button class="action-btn ghost subtitle-empty-secondary" data-action="summary-refresh-subtitle-cache">刷新</button>
+content.js:6640:        if (appState.activePage === "CC") scrollToCurrentSubtitle(false);
+content.js:6650:function scrollToCurrentSubtitle(force, behavior = "smooth") {
+content.js:6651:    if (!force && subtitleUiCoordinator.scrollUnlockAt > Date.now()) return;
+content.js:6652:    if (force && subtitleUiCoordinator.scrollUnlockAt > Date.now() && behavior === "auto") return;
+content.js:6653:    const rows = getRawSubtitleRowsFromCache(appState.cache);
+content.js:6672:    const index = getActiveSubtitleIndex(rows, t);
+content.js:6678:        highlightSubtitleRow(index);
+content.js:6697:function getActiveSubtitleIndex(rows, t) {
+content.js:6707:function highlightSubtitleRow(index) {
+content.js:6708:    if (index === appState.renderedSubtitleIndex) return;
+content.js:6714:    appState.renderedSubtitleIndex = index;
+content.js:6809:function resolveDurationFromSubtitles() {
+content.js:6810:    const processed = Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle : [];
+content.js:6811:    const raw = Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle : [];
+content.js:6829:    const fallback = resolveDurationFromSubtitles();
+content.js:6848:    if (isNoTimestampSubtitleCache(appState.cache)) return [];
+content.js:7053:async function triggerDefaultSubtitleCapture() {
+content.js:7055:    if (appState.subtitleCaptureLock) return;
+content.js:7058:    if (appState.subtitleCapturedBvid === bvid) return;
+content.js:7059:    if (hasUsableSubtitleCache(appState.cache, bvid)) {
+content.js:7060:        appState.subtitleCapturedBvid = bvid;
+content.js:7063:    appState.subtitleCaptureLock = true;
+content.js:7065:        const payload = await fetchSubtitleByPlayerApi(bvid);
+content.js:7075:        const selectedSubtitleOption = findSubtitleOption(appState.subtitleOptions, "zh")
+content.js:7076:            || findSubtitleOption(appState.subtitleOptions, appState.activeSubtitleId)
+content.js:7077:            || pickSubtitle(appState.subtitleOptions);
+content.js:7085:                subtitle: payload,
+content.js:7087:                subtitleLanguage: "zh",
+content.js:7088:                subtitleLanguageLabel: "中文",
+content.js:7089:                subtitleUrl: selectedSubtitleOption?.url || ""
+content.js:7092:        applyOfficialSubtitleVariantToLocalCache({
+content.js:7094:            option: { ...(selectedSubtitleOption || {}), id: "zh", label: "中文" },
+content.js:7098:        appState.subtitleCapturedBvid = bvid;
+content.js:7099:        appState.lastSubtitleForwardAt = Date.now();
+content.js:7102:        pushSubtitleTimeline("default_capture_success", { bvid, count: payload.length });
+content.js:7103:        logContent.info("subtitle_parsed", { bvid, count: payload.length, source: "default_fetch" });
+content.js:7106:        pushSubtitleTimeline("default_capture_error", { bvid, error: error.message || "unknown_error" });
+content.js:7107:        logContent.debug("subtitle_detected", {
+content.js:7113:        appState.subtitleCaptureLock = false;
+content.js:7123:    if (appState.subtitleCheckDelayTimer) {
+content.js:7124:        clearTimeout(appState.subtitleCheckDelayTimer);
+content.js:7125:        appState.subtitleCheckDelayTimer = null;
+content.js:7127:    appState.subtitleCheckTargetBvid = bvid;
+content.js:7128:    beginSubtitleObservation(bvid);
+content.js:7129:    appState.subtitleCheckDelayTimer = setTimeout(() => {
+content.js:7130:        appState.subtitleCheckDelayTimer = null;
+content.js:7135:        renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:7139:function startSubtitleCheckTimer() {
+content.js:7140:    if (appState.subtitleCheckDelayTimer) {
+content.js:7141:        clearTimeout(appState.subtitleCheckDelayTimer);
+content.js:7142:        appState.subtitleCheckDelayTimer = null;
+content.js:7144:    if (appState.subtitleDetectTimeoutTimer) {
+content.js:7145:        clearTimeout(appState.subtitleDetectTimeoutTimer);
+content.js:7146:        appState.subtitleDetectTimeoutTimer = null;
+content.js:7148:    appState.subtitleCheckDelayTimer = setTimeout(() => {
+content.js:7149:        appState.subtitleCheckDelayTimer = null;
+content.js:7150:        renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:7155:        appState.subtitleDetectTimeoutTimer = setTimeout(() => {
+content.js:7156:            appState.subtitleDetectTimeoutTimer = null;
+content.js:7157:            renderContent();
+content.js:7167:    if (appState.subtitleCheckTargetBvid !== bvid) return;
+content.js:7170:    if (Date.now() < Number(appState.subtitleObserveUntil || 0)) return;
+content.js:7171:    if (appState.subtitleCapturedBvid === bvid) return;
+content.js:7172:    if (hasUsableSubtitleCache(appState.cache, bvid)) return;
+content.js:7173:    if ((Array.isArray(appState.subtitleTimeline) ? appState.subtitleTimeline : []).length > 0) return;
+content.js:7174:    if (appState.subtitleDomDetected || hasNativeCCSubtitleDom()) return;
+content.js:7182:    renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:7185:function hasNativeCCSubtitleDom() {
+content.js:7187:        ".bpx-player-subtitle-wrap .bpx-player-subtitle-item",
+content.js:7188:        ".bpx-player-subtitle-wrap .bpx-player-subtitle-item-text",
+content.js:7189:        ".bilibili-player-video-subtitle .bilibili-player-video-subtitle-content",
+content.js:7190:        ".bilibili-player-video-subtitle-content",
+content.js:7191:        ".bpx-player-dialog-wrap .bpx-player-ctrl-subtitle-language-item-text",
+content.js:7192:        "video track[kind='subtitles']",
+content.js:7267:    renderContent();
+content.js:7268:    renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:7270:    if (!hasUsableSubtitleCache(appState.cache, bvid)) {
+content.js:7272:        const synced = await syncCacheFromBackgroundWithRetry(bvid, 2, 150, { skipCloud: false });
+content.js:7273:        if (synced && hasUsableSubtitleCache(appState.cache, bvid)) {
+content.js:7274:            applyCacheSubtitleState(appState.cache, bvid);
+content.js:7280:            renderContent();
+content.js:7314:    renderContent();
+content.js:7315:    renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:7365:        renderContent();
+content.js:7366:        renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:7370:async function handleRegenerateGroqSubtitle() {
+content.js:7377:    const subtitleSource = String(appState.tabState?.subtitleSource || "");
+content.js:7378:    if (!(subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr")) return;
+content.js:7379:    appState.subtitleTimeline = [];
+content.js:7382:        rawSubtitle: [],
+content.js:7383:        processedSubtitle: [],
+content.js:7396:    renderContent();
+content.js:7446:        renderContent();
+content.js:7450:function beginSubtitleObservation(bvid) {
+content.js:7453:    appState.subtitleDomDetected = hasNativeCCSubtitleDom();
+content.js:7454:    appState.subtitleObserveUntil = Date.now() + SUBTITLE_OBSERVE_GRACE_MS;
+content.js:7455:    if (appState.subtitleObserver) return;
+content.js:7462:        if (hasNativeCCSubtitleDom()) {
+content.js:7463:            appState.subtitleDomDetected = true;
+content.js:7466:            renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:7470:    appState.subtitleObserver = observer;
+content.js:7473:function stopSubtitleObserver() {
+content.js:7474:    if (!appState.subtitleObserver) return;
+content.js:7475:    appState.subtitleObserver.disconnect();
+content.js:7476:    appState.subtitleObserver = null;
+content.js:7488:async function fetchSubtitleByPlayerApi(bvid) {
+content.js:7498:    /* Disabled temporarily: actual subtitles are read from inject.xhr. */
+content.js:7500:    logSubtitleDiagnostic("source_request", {
+content.js:7511:    const subtitles = Array.isArray(data?.data?.subtitle?.subtitles) ? data.data.subtitle.subtitles : [];
+content.js:7512:    if (!subtitles.length) return [];
+content.js:7513:    appState.subtitleOptions = normalizeSubtitleOptions(subtitles);
+content.js:7514:    appState.subtitleOptionsBvid = normalizeBvidCase(bvid);
+content.js:7515:    appState.subtitleOptionsKey = `${normalizeBvidCase(bvid)}::${cid}`;
+content.js:7516:    const picked = pickSubtitle(subtitles);
+content.js:7517:    appState.activeSubtitleId = normalizeSubtitleLanguageKey(picked) || getSubtitleOptionId(picked);
+content.js:7518:    const rawUrl = String(picked?.url || picked?.subtitle_url || "").trim();
+content.js:7520:    const subtitleUrl = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
+content.js:7521:    logSubtitleDiagnostic("source_selected", {
+content.js:7525:        subtitleUrl,
+content.js:7526:        language: getSubtitleOptionId(picked)
+content.js:7528:    const rows = await fetchSubtitleBody(subtitleUrl);
+content.js:7529:    logSubtitleDiagnostic("source_received", {
+content.js:7533:        subtitleUrl,
+content.js:7534:        ...getSubtitleDiagnosticRowsMeta(rows)
+content.js:7539:function pickSubtitle(subtitles) {
+content.js:7540:    return pickSubtitleFromPage(subtitles);
+content.js:7543:function normalizeSubtitleOptions(subtitles) {
+content.js:7544:    if (typeof normalizeSubtitleOptionsFromPage === "function") {
+content.js:7545:        return normalizeSubtitleOptionsFromPage(subtitles);
+content.js:7547:    const list = Array.isArray(subtitles) ? subtitles : [];
+content.js:7549:        const rawUrl = String(item?.subtitle_url || item?.url || "").trim();
+content.js:7551:        const id = String(item?.lan || item?.lan_doc || `subtitle-${index + 1}`).trim();
+content.js:7557:function getSubtitleOptionId(option) {
+content.js:7561:function normalizeSubtitleLanguageKey(option) {
+content.js:7583:function createSubtitleCacheKey({ bvid, cid, language = "default" } = {}) {
+content.js:7591:function mergeSubtitleOptions(...groups) {
+content.js:7594:        const id = getSubtitleOptionId(item);
+content.js:7597:        const normalized = { ...item, id: normalizeSubtitleLanguageKey(item) || id || label, label: label || id };
+content.js:7598:        const languageKey = normalizeSubtitleLanguageKey(normalized);
+content.js:7599:        const existingIndex = output.findIndex((option) => normalizeSubtitleLanguageKey(option) === languageKey);
+content.js:7617:function collectSubtitleOptionsFromDom() {
+content.js:7618:    const roots = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-major-inner"));
+content.js:7619:    const scopedTextNodes = roots.flatMap((root) => Array.from(root.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text")));
+content.js:7620:    const fallbackTextNodes = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
+content.js:7625:        const item = node?.closest?.(".bpx-player-ctrl-subtitle-language-item") || node;
+content.js:7627:        const rawUrl = String(dataset.subtitleUrl || dataset.url || dataset.href || "").trim();
+content.js:7640:function openSubtitleLanguageDomMenu() {
+content.js:7641:    const trigger = document.querySelector(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
+content.js:7650:async function refreshSubtitleOptionsFromDom() {
+content.js:7651:    let options = collectSubtitleOptionsFromDom();
+content.js:7653:    openSubtitleLanguageDomMenu();
+content.js:7655:    options = collectSubtitleOptionsFromDom();
+content.js:7659:function getOfficialSubtitleOptionsForCurrentVideo() {
+content.js:7663:    if (!currentKey || String(appState.subtitleOptionsKey || "") !== currentKey) return [];
+content.js:7664:    return Array.isArray(appState.subtitleOptions) ? appState.subtitleOptions : [];
+content.js:7667:async function refreshSubtitleOptionsForCurrentVideo({ force = false } = {}) {
+content.js:7672:    if (!force && String(appState.subtitleOptionsKey || "") === optionsKey && Array.isArray(appState.subtitleOptions) && appState.subtitleOptions.length) {
+content.js:7673:        return appState.subtitleOptions;
+content.js:7681:            const subtitles = Array.isArray(data?.data?.subtitle?.subtitles) ? data.data.subtitle.subtitles : [];
+content.js:7682:            apiOptions = normalizeSubtitleOptions(subtitles);
+content.js:7685:    const domOptions = await refreshSubtitleOptionsFromDom().catch(() => []);
+content.js:7686:    appState.subtitleOptions = mergeSubtitleOptions(apiOptions, domOptions);
+content.js:7687:    appState.subtitleOptionsBvid = bvid;
+content.js:7688:    appState.subtitleOptionsKey = optionsKey;
+content.js:7689:    if (!appState.activeSubtitleId && appState.subtitleOptions.length) {
+content.js:7690:        const picked = pickSubtitle(appState.subtitleOptions);
+content.js:7691:        appState.activeSubtitleId = getSubtitleOptionId(picked);
+content.js:7693:    return appState.subtitleOptions;
+content.js:7696:async function fetchSubtitleBody(subtitleUrl) {
+content.js:7697:    const subRes = await fetch(subtitleUrl, { credentials: "include" });
+content.js:7704:function getCachedSubtitleRowsForLanguage(option) {
+content.js:7707:    const language = normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default";
+content.js:7708:    const key = createSubtitleCacheKey({ bvid, cid, language });
+content.js:7709:    const variants = appState.cache?.subtitleVariants && typeof appState.cache.subtitleVariants === "object"
+content.js:7710:        ? appState.cache.subtitleVariants
+content.js:7713:    const rows = Array.isArray(entry?.rawSubtitle) ? entry.rawSubtitle : [];
+content.js:7718:function getLocalZhSubtitleRows() {
+content.js:7721:    const variants = appState.cache?.subtitleVariants && typeof appState.cache.subtitleVariants === "object"
+content.js:7722:        ? appState.cache.subtitleVariants
+content.js:7724:    const key = createSubtitleCacheKey({ bvid, cid, language: "zh" });
+content.js:7726:    if (Array.isArray(direct?.rawSubtitle) && direct.rawSubtitle.length) return { key, rows: direct.rawSubtitle, entry: direct };
+content.js:7729:        normalizeSubtitleLanguageKey({
+content.js:7734:        Array.isArray(entry?.rawSubtitle) &&
+content.js:7735:        entry.rawSubtitle.length
+content.js:7737:    if (candidate) return { key: candidate[0], rows: candidate[1].rawSubtitle, entry: candidate[1] };
+content.js:7738:    const cacheLanguage = normalizeSubtitleLanguageKey({
+content.js:7739:        id: appState.cache?.subtitleLanguage,
+content.js:7740:        label: appState.cache?.subtitleLanguageLabel
+content.js:7742:    const rawRows = Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle : [];
+content.js:7743:    const isOfficial = String(appState.cache?.subtitleSource || "").toLowerCase() === "official";
+content.js:7744:    if (rawRows.length && isOfficial && (!cacheLanguage || cacheLanguage === "zh" || String(appState.cache?.subtitleLanguage || "") === "default")) {
+content.js:7752:                languageLabel: appState.cache?.subtitleLanguageLabel || "中文",
+content.js:7753:                subtitleUrl: appState.cache?.subtitleUrl || "",
+content.js:7754:                rawSubtitle: rawRows,
+content.js:7755:                processedSubtitle: Array.isArray(appState.cache?.processedSubtitle) ? appState.cache.processedSubtitle : []
+content.js:7762:function findSubtitleOption(options, optionId) {
+content.js:7764:    const targetKey = normalizeSubtitleLanguageKey({ id: targetId, label: targetId, domLabel: targetId });
+content.js:7766:        getSubtitleOptionId(item) === targetId ||
+content.js:7767:        normalizeSubtitleLanguageKey(item) === targetId ||
+content.js:7768:        (targetKey && normalizeSubtitleLanguageKey(item) === targetKey)
+content.js:7771:    return candidates.find((item) => !!getCachedSubtitleRowsForLanguage(item)?.rows?.length)
+content.js:7776:async function resolveSubtitleRowsForOption(option, { forceRefresh = false } = {}) {
+content.js:7777:    const languageKey = normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default";
+content.js:7779:    let cached = getCachedSubtitleRowsForLanguage(targetOption);
+content.js:7784:        const rows = await fetchSubtitleBody(targetOption.url);
+content.js:7788:        const freshOptions = await refreshSubtitleOptionsForCurrentVideo({ force: true });
+content.js:7789:        const freshOption = findSubtitleOption(freshOptions, languageKey);
+content.js:7792:            cached = getCachedSubtitleRowsForLanguage(targetOption);
+content.js:7797:                const rows = await fetchSubtitleBody(targetOption.url);
+content.js:7805:function syncBiliSubtitleDomLanguage(option) {
+content.js:7808:    clickSubtitleLanguageDomOption(label).catch(() => {});
+content.js:7811:async function saveOfficialSubtitleRows(option, rows, cached = null) {
+content.js:7814:    const languageKey = normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default";
+content.js:7822:            subtitle: rows,
+content.js:7824:            subtitleLanguage: languageKey,
+content.js:7825:            subtitleLanguageLabel: option.label || getSubtitleOptionId(option),
+content.js:7826:            subtitleUrl: option.url || cached?.entry?.subtitleUrl || "",
+content.js:7831:    applyOfficialSubtitleVariantToLocalCache({
+content.js:7838:    subtitleUiCoordinator.displaySource = "language_switch";
+content.js:7839:    renderContent();
+content.js:7840:    syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true })
+content.js:7842:            if (appState.activePage === "CC") renderContent();
+content.js:7847:function applyOfficialSubtitleVariantToLocalCache({ bvid, option, rows, cached = null, languageKey = "" } = {}) {
+content.js:7851:    const language = String(languageKey || normalizeSubtitleLanguageKey(option) || getSubtitleOptionId(option) || "default").trim() || "default";
+content.js:7852:    const key = createSubtitleCacheKey({ bvid: target, cid, language });
+content.js:7854:    const variants = existingCache.subtitleVariants && typeof existingCache.subtitleVariants === "object"
+content.js:7855:        ? { ...existingCache.subtitleVariants }
+content.js:7857:    const processedSubtitle = Array.isArray(cached?.entry?.processedSubtitle) && cached.entry.processedSubtitle.length
+content.js:7858:        ? cached.entry.processedSubtitle
+content.js:7859:        : (Array.isArray(existingCache.processedSubtitle) && String(existingCache.subtitleLanguage || "") === language
+content.js:7860:            ? existingCache.processedSubtitle
+content.js:7867:        languageLabel: String(option?.label || getSubtitleOptionId(option) || language),
+content.js:7868:        subtitleUrl: String(option?.url || cached?.entry?.subtitleUrl || ""),
+content.js:7869:        rawSubtitle: rows,
+content.js:7870:        processedSubtitle,
+content.js:7879:        subtitleSource: "official",
+content.js:7880:        subtitleLanguage: language,
+content.js:7881:        subtitleLanguageLabel: String(option?.label || getSubtitleOptionId(option) || language),
+content.js:7882:        subtitleUrl: String(option?.url || cached?.entry?.subtitleUrl || ""),
+content.js:7883:        rawSubtitle: rows,
+content.js:7884:        processedSubtitle,
+content.js:7885:        subtitleVariants: variants,
+content.js:7893:        subtitleSource: "official",
+content.js:7894:        subtitleLanguage: language,
+content.js:7895:        subtitleLanguageLabel: String(option?.label || getSubtitleOptionId(option) || language),
+content.js:7899:    appState.activeSubtitleId = language;
+content.js:7900:    appState.subtitleCapturedBvid = target;
+content.js:7901:    appState.lastSubtitleForwardAt = Date.now();
+content.js:7904:async function switchOfficialSubtitleLanguage(optionId) {
+content.js:7907:    const targetKey = normalizeSubtitleLanguageKey({ id: optionId, label: optionId, domLabel: optionId });
+content.js:7909:        const zhCached = getLocalZhSubtitleRows();
+content.js:7914:                url: zhCached.entry?.subtitleUrl || ""
+content.js:7916:            applyOfficialSubtitleVariantToLocalCache({
+content.js:7923:            renderContent();
+content.js:7928:    const options = await refreshSubtitleOptionsForCurrentVideo({ force: !getOfficialSubtitleOptionsForCurrentVideo().length });
+content.js:7929:    const option = findSubtitleOption(options, optionId);
+content.js:7931:    const { option: targetOption, rows, cached } = await resolveSubtitleRowsForOption(option, { forceRefresh: true });
+content.js:7933:        await switchSubtitleLanguageByDom(targetOption);
+content.js:7938:    await saveOfficialSubtitleRows(targetOption, rows, cached);
+content.js:7939:    syncBiliSubtitleDomLanguage(targetOption);
+content.js:7943:async function switchSubtitleLanguageByDom(option) {
+content.js:7948:    appState.pendingSubtitleLanguageSwitch = {
+content.js:7949:        id: getSubtitleOptionId(option),
+content.js:7954:    appState.subtitleCapturedBvid = "";
+content.js:7956:    const clicked = await clickSubtitleLanguageDomOption(label);
+content.js:7958:        appState.pendingSubtitleLanguageSwitch = null;
+content.js:7962:        await waitForSubtitleSwitchForward(marker);
+content.js:7964:        const resolved = await resolveSubtitleRowsForOption(option, { forceRefresh: true });
+content.js:7966:        await saveOfficialSubtitleRows(resolved.option, resolved.rows, resolved.cached);
+content.js:7968:    await syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true });
+content.js:7969:    if (appState.activePage === "CC") renderContent();
+content.js:7973:async function clickSubtitleLanguageDomOption(label) {
+content.js:7976:    const requestId = `subtitle_switch_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+content.js:7983:            if (event?.data?.type !== "BILI_SUBTITLE_LANGUAGE_SWITCH_RESULT") return;
+content.js:7996:    logContent.info("subtitle_detected", {
+content.js:8006:function waitForSubtitleSwitchForward(marker, timeoutMs = 8000) {
+content.js:8010:            if (Number(appState.lastSubtitleForwardAt || 0) >= marker) {
+content.js:8017:                appState.pendingSubtitleLanguageSwitch = null;
+content.js:8079:function hasUsableSubtitleCache(cache, targetBvid = "") {
+content.js:8087:        (Array.isArray(cache?.rawSubtitle) && cache.rawSubtitle.length > 0) ||
+content.js:8088:        (Array.isArray(cache?.processedSubtitle) && cache.processedSubtitle.length > 0)
+content.js:8483:function getRawSubtitleRows() {
+content.js:8484:    return getRawSubtitleRowsFromCache(appState.cache);
+content.js:8487:function getRawSubtitlePlainText() {
+content.js:8488:    return getRawSubtitlePlainTextFromCache(appState.cache);
+content.js:8491:async function handleCopyRawSubtitle(buttonNode) {
+content.js:8492:    const text = getRawSubtitlePlainText();
+content.js:8514:    const rows = getRawSubtitleRows();
+content.js:8520:    const bvid = resolveCurrentBvid() || "subtitle";
+content.js:8553:        if (isDuplicateSubtitleRouteSwitch(current, routeP)) {
+content.js:8560:        pushSubtitleTimeline("route_switch", { from: prev, to: current, fromKey: prevKey, toKey: currentKey });
+content.js:8561:        resetAllState();
+content.js:8563:        appState.pendingSubtitle = null;
+content.js:8584:        startSubtitleCheckTimer();
+content.js:8585:        beginSubtitleObservation(current);
+content.js:8586:        clearCCListImmediately();
+content.js:8587:        renderContent();
+content.js:8588:        syncCacheFromBackground(current);
+content.js:8590:        scheduleSubtitleFallbackWatchdog("route_switch");
+content.js:8601:function clearCCListImmediately() {
+content.js:8602:    logSubtitleDiagnostic("clear_requested", { source: "clearCCListImmediately" });
+content.js:8605:    appState.renderedSubtitleIndex = -1;
+content.js:8606:    renderCC(container, []);
+content.js:8688:function scheduleSubtitleFallbackWatchdog(source) {
+content.js:8689:    if (appState.subtitleFallbackTimer) {
+content.js:8690:        clearTimeout(appState.subtitleFallbackTimer);
+content.js:8691:        appState.subtitleFallbackTimer = null;
+content.js:8694:    appState.subtitleFallbackTimer = setTimeout(() => {
+content.js:8695:        if (appState.lastSubtitleForwardAt >= marker) return;
+content.js:8696:        logContent.warn("subtitle_detected", { source: "fallback_trigger", reason: source });
+content.js:8697:        triggerDefaultSubtitleCapture();
+content.js:8701:async function forwardSubtitlePayload(payload, source) {
+content.js:8705:    logSubtitleDiagnostic("source_forwarded", {
+content.js:8706:        source: source || "forwardSubtitlePayload",
+content.js:8710:        subtitleUrl: String(payload?.subtitleUrl || ""),
+content.js:8711:        ...getSubtitleDiagnosticRowsMeta(payload?.subtitle)
+content.js:8717:        startSubtitleCheckTimer();
+content.js:8723:        appState.pendingSubtitle = null;
+content.js:8724:        appState.subtitleCapturedBvid = bvid;
+content.js:8725:        appState.lastSubtitleForwardAt = Date.now();
+content.js:8726:        pushSubtitleTimeline("subtitle_forwarded", {
+content.js:8730:            count: Array.isArray(payload.subtitle) ? payload.subtitle.length : 0
+content.js:8732:        logContent.info("subtitle_detected", { bvid, cid: appState.injectCid || 0, count: Array.isArray(payload.subtitle) ? payload.subtitle.length : 0, source });
+content.js:8734:        pushSubtitleTimeline("subtitle_forward_error", { source, bvid, error: error.message || "转发字幕失败" });
+content.js:8736:            task: "subtitle_forward",
+content.js:8744:        reportContentError?.(error, { task: "subtitle_forward", source });
+content.js:8748:function flushPendingSubtitleIfReady() {
+content.js:8749:    if (!appState.pendingSubtitle) return;
+content.js:8753:        ...appState.pendingSubtitle,
+content.js:8754:        bvid: String(appState.pendingSubtitle.bvid || resolvedBvid).trim() || resolvedBvid
+content.js:8757:    pushSubtitleTimeline("pending_flush", { bvid: payload.bvid });
+content.js:8758:    forwardSubtitlePayload(payload, "pending_flush");
+content.js:8761:async function syncActiveCacheByBvid(expectedBvid) {
+content.js:8769:        applyCacheSubtitleState(appState.cache, target);
+content.js:8770:        if (hasUsableSubtitleCache(appState.cache, target)) {
+content.js:8771:            appState.subtitleCapturedBvid = target;
+content.js:8776:            const source = String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "").toLowerCase();
+content.js:8778:                refreshSubtitleOptionsForCurrentVideo()
+content.js:8780:                        if (Array.isArray(options) && options.length > 1 && appState.activePage === "CC") renderContent();
+content.js:8786:        renderContent();
+content.js:8790:function hasSubtitleCacheForBvid(targetBvid) {
+content.js:8791:    return hasUsableSubtitleCache(appState.cache, targetBvid);
+content.js:8807:    const subtitleSource = String(appState.tabState?.subtitleSource || "");
+content.js:8812:    const hasSubtitle = hasSubtitleCacheForBvid(target);
+content.js:8815:    if (hasSubtitle) {
+content.js:8822:    const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
+content.js:8823:    const shouldKeepRunning = localState.phase === "running" || (sameTask && isAsrSubtitle && progress > 0 && progress < 100);
+content.js:8834:async function syncCacheFromBackground(bvid, options = {}) {
+content.js:8862:            renderContent();
+content.js:8870:        applyCacheSubtitleState(cache, target);
+content.js:8871:        appState.subtitleCapturedBvid = target;
+content.js:8874:        renderContent();
+content.js:8883:async function syncCacheFromBackgroundWithRetry(bvid, attempts = 6, delayMs = 250, options = {}) {
+content.js:8887:        const ok = await syncCacheFromBackground(target, {
+content.js:8892:        if (ok && hasSubtitleCacheForBvid(target)) {
+content.js:8900:    renderContent();
+content.js:8917:            await handleRegenerateGroqSubtitle();
+content.js:8920:        if (command === "get-subtitle-options") {
+content.js:8921:            const options = await refreshSubtitleOptionsForCurrentVideo().catch(() => getOfficialSubtitleOptionsForCurrentVideo());
+content.js:8924:                activeId: String(appState.activeSubtitleId || appState.cache?.subtitleLanguage || ""),
+content.js:8925:                source: String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "")
+content.js:8928:        if (command === "switch-subtitle-language") {
+content.js:8929:            await switchOfficialSubtitleLanguage(message?.languageId);
+content.js:8969:            await syncCacheFromBackground(resolveCurrentBvid(), {
+content.js:9068:            renderContent();
+content.js:9069:            renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:9127:                    renderContent();
+content.js:9145:                        renderContent();
+content.js:9188:                if (ok && hasUsableSubtitleCache(appState.cache, targetBvid)) {
+content.js:9189:                    applyCacheSubtitleState(appState.cache, targetBvid);
+content.js:9199:                renderContent();
+content.js:9201:            if (hasUsableSubtitleCache(appState.cache, targetBvid)) {
+content.js:9204:                renderContent();
+content.js:9205:                syncCacheFromBackgroundWithRetry(targetBvid).then(finishTranscriptionDone);
+content.js:9207:            renderSubtitleTimelinePanel(document.getElementById("panel-body"));
+content.js:9213:                renderContent();
+content.js:9222:        pushSubtitleTimeline("drop_mismatch_bvid_bg", { payloadBvid, currentBvid: routeBvid });
+content.js:9231:    appState.pendingSubtitle = null;
+content.js:9236:        applyCacheSubtitleState(appState.cache, payloadBvid || routeBvid);
+content.js:9238:    if (cache?.rawSubtitle?.length || cache?.processedSubtitle?.length) {
+content.js:9242:    renderContent();
+content.js:9246:function pushSubtitleTimeline(stage, detail) {
+content.js:9252:    appState.subtitleTimeline = [...(Array.isArray(appState.subtitleTimeline) ? appState.subtitleTimeline : []), item].slice(-40);
+content.js:9253:    renderSubtitleTimelinePanel(panelShadowRoot ? panelShadowRoot.getElementById("panel-body") : null);
+content.js:9256:function renderSubtitleTimelinePanel(panel) {
+content.js:9258:    const oldNode = panel.querySelector(".subtitle-timeline-panel");
+content.js:9269:        if (term) return `<div class="subtitle-timeline-empty">未搜索到匹配字幕</div>`;
+content.js:9271:        return `<div class="subtitle-timeline-empty">暂无字幕</div>`;
+content.js:9276:        return `<div class="subtitle-timeline-row"><span class="subtitle-timeline-time">${formatTimelineTime(item.ts)}</span><span class="subtitle-timeline-stage">${stage}</span><span class="subtitle-timeline-detail">${detail}</span></div>`;

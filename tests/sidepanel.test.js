@@ -244,6 +244,31 @@ describe("native side panel", () => {
     expect(content).toMatch(/if \(!Number\.isFinite\(subtitleUiCoordinator\.scrollUnlockAt\)\) \{[\s\S]*?readyWithoutSubtitleSince = 0;[\s\S]*?return;/);
   });
 
+  it("keeps subtitle fallback naming focused on transcription availability", () => {
+    expect(content).toContain("function evaluateSubtitleFallback()");
+    expect(content).toContain("function scheduleTranscriptionPrompt(meta)");
+    expect(content).toContain("function scheduleTranscriptionAvailabilityCheck(source)");
+    expect(content).toContain("function logPlayerApiCaptureDisabled(bvid)");
+    expect(content).not.toContain("triggerDefaultSubtitleCapture");
+    expect(content).not.toContain("scheduleSubtitleFallbackWatchdog");
+    expect(content).not.toContain("fetchSubtitleByPlayerApi");
+    expect(content).not.toContain("controlAvailable");
+    expect(content).not.toContain("subtitleCaptureLock");
+  });
+
+  it("shows subtitle diagnostics only while debug mode is enabled", () => {
+    expect(content).toMatch(/function logSubtitleDiagnostic\(event, detail = \{\}\) \{\s*if \(!isDebugLoggingEnabled\(\)\) return;/);
+    expect(content).toContain('window.postMessage({ type: "BILI_SET_DEBUG_MODE", enabled: isDebugLoggingEnabled() }, "*")');
+    expect(content).toContain('logSubtitleDiagnostic("source_disabled"');
+    expect(inject).toContain("let subtitleDebugEnabled = false");
+    expect(inject).toContain('event.data?.type === "BILI_SET_DEBUG_MODE"');
+    expect(inject).toMatch(/function logSubtitleDiagnostic\(event, detail = \{\}\) \{\s*if \(!subtitleDebugEnabled\) return;/);
+  });
+
+  it("delegates full resets to the shared page reset", () => {
+    expect(content).toMatch(/function resetAllState\(\) \{[\s\S]*?resetPageStateByBvidSwitch\(\);[\s\S]*?clearStreamCache\(\);/);
+  });
+
   it("allows the cached Chinese CC variant to replace the injected display", () => {
     expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?subtitleUiCoordinator\.displaySource = "language_switch"/);
     expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?subtitleUiCoordinator\.displayCommitted = false/);

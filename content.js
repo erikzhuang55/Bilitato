@@ -319,6 +319,10 @@ function isDebugLoggingEnabled() {
     return !!(IS_DEBUG_MODE || appState?.settings?.debugMode);
 }
 
+function syncInjectDebugMode() {
+    window.postMessage({ type: "BILI_SET_DEBUG_MODE", enabled: isDebugLoggingEnabled() }, "*");
+}
+
 function abortBackgroundOperations(reason = "page_unload") {
     try {
         chrome.runtime.sendMessage({ action: "ABORT_TAB_OPERATIONS", reason }).catch?.(() => {});
@@ -349,7 +353,6 @@ const appState = {
     followPausedAt: 0,
     followCurrentIndex: -1,
     renderedSubtitleIndex: -1,
-    subtitleCaptureLock: false,
     subtitleCapturedBvid: "",
     injectBvid: "",
     injectCid: 0,
@@ -486,6 +489,7 @@ function getSubtitleDiagnosticRowsMeta(rows) {
 }
 
 function logSubtitleDiagnostic(event, detail = {}) {
+    if (!isDebugLoggingEnabled()) return;
     try {
         console.log("[SUBTITLE_DIAG]", {
             event,
@@ -509,7 +513,6 @@ const subtitleUiCoordinator = {
     displayCommitted: false,
     pendingRequestUrls: new Set(),
     controlProbeTimer: null,
-    controlAvailable: false,
     lastRouteSwitchKey: "",
     lastRouteSwitchAt: 0
 };
@@ -541,7 +544,6 @@ function beginSubtitleUiCycle(bvid = "", p = "") {
     subtitleUiCoordinator.displaySource = "";
     subtitleUiCoordinator.displayCommitted = false;
     subtitleUiCoordinator.pendingRequestUrls = new Set();
-    subtitleUiCoordinator.controlAvailable = false;
     const generation = subtitleUiCoordinator.generation;
     appState.followCurrentIndex = -1;
     appState.renderedSubtitleIndex = -1;
@@ -635,7 +637,6 @@ function startSubtitleControlProbe(routeKey, generation) {
         }
         const subtitleButton = document.querySelector(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
         if (subtitleButton) {
-            subtitleUiCoordinator.controlAvailable = true;
             subtitleUiCoordinator.phase = "loading";
             stopSubtitleControlProbe();
             scheduleSubtitleUiDeadline(routeKey, generation, 5000, "trigger_failed");
@@ -1246,13 +1247,14 @@ async function bootstrap() {
         metadata: { route_key: getCurrentRouteVideoKey() }
     });
     globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
+    syncInjectDebugMode();
     appState.injectBvid = normalizeBvidCase(getBvidFromUrl(location.href) || appState.tabState?.activeBvid || "");
     appState.injectBvidChangedAt = Date.now();
     beginSubtitleObservation(appState.injectBvid);
     startSubtitleCheckTimer();
     await syncCacheFromBackground(getBvidFromUrl(location.href) || appState.tabState?.activeBvid);
-    triggerDefaultSubtitleCapture();
-    setInterval(triggerDefaultSubtitleCapture, 3500);
+    evaluateSubtitleFallback();
+    setInterval(evaluateSubtitleFallback, 3500);
     renderApp();
     startFocusTicker();
     Object.defineProperty(window, '__biliDebug', { get: () => appState });
@@ -1309,7 +1311,7 @@ async function onInjectMessage(event) {
                 bvid: String(event?.data?.bvid || "").trim(),
                 cid: Number(event?.data?.cid || 0)
             });
-            scheduleSubtitleFallbackWatchdog("handshake");
+            scheduleTranscriptionAvailabilityCheck("handshake");
             flushPendingSubtitleIfReady();
         } else {
             pushSubtitleTimeline("inject_ready");
@@ -1329,7 +1331,7 @@ async function onInjectMessage(event) {
             pushSubtitleTimeline("inject_detected", {
                 source: String(event?.data?.detail?.source || "")
             });
-            scheduleSubtitleFallbackWatchdog("inject_log");
+            scheduleTranscriptionAvailabilityCheck("inject_log");
         }
         return;
     }
@@ -1389,7 +1391,7 @@ async function onInjectMessage(event) {
     pushSubtitleTimeline("inject_data_received", {
         count: Array.isArray(event.data?.data) ? event.data.data.length : 0
     });
-    scheduleSubtitleFallbackWatchdog("subtitle_data");
+    scheduleTranscriptionAvailabilityCheck("subtitle_data");
     const subtitles = Array.isArray(event.data?.data) ? event.data.data : [];
     if (!subtitles.length) {
         logContent.warn("subtitle_detected", { source: "inject_message_empty" });
@@ -1441,7 +1443,7 @@ async function onInjectMessage(event) {
         logContent.info("subtitle_detected", { source: "pending_subtitle_set", count: subtitles.length, bvid: currentUrlBvid || "" });
         pushSubtitleTimeline("pending_wait_bvid", { count: subtitles.length });
         logContent.warn("subtitle_detected", { source: "inject_message_pending_bvid", count: subtitles.length });
-        scheduleSubtitleFallbackWatchdog("pending_bvid");
+        scheduleTranscriptionAvailabilityCheck("pending_bvid");
         return;
     }
     const immediateContainer = panelShadowRoot?.getElementById("page-CC") || document.getElementById("page-CC");
@@ -1514,6 +1516,7 @@ function onStorageChanged(changes, areaName) {
             all: !!changes.settings.newValue.disableCloudCacheRead
         };
         globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
+        syncInjectDebugMode();
     }
     if (changes.cloudReadDisabledBvids) {
         const target = normalizeBvidCase(resolveCurrentBvid() || appState.cache?.bvid || "");
@@ -5416,6 +5419,8 @@ function bindSegmentPromptDebugControls(panel) {
                 if (!res?.ok) throw new Error(res?.error || "保存失败");
                 appState.settings = res.settings || nextSettings;
                 IS_DEBUG_MODE = !!debugMode;
+                globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
+                syncInjectDebugMode();
                 logUI.info(debugMode ? "runtime_debug_enabled" : "runtime_debug_disabled", {
                     task: "debug",
                     detail: { source: "debug_page_inline_toggle" }
@@ -5963,66 +5968,8 @@ function resetPageStateByBvidSwitch() {
 
 function resetAllState() {
     logSubtitleDiagnostic("clear_requested", { source: "resetAllState" });
-    appState.chatPending = [];
-    appState.chatStreamingId = "";
-    appState.chatActiveMessageId = "";
-    appState.sessionGeneratedTasks = new Set();
-    appState.chatGuideHidden = false;
-
-    const chatPanel = panelShadowRoot ? panelShadowRoot.getElementById("page-chat") : null;
-    if (chatPanel) {
-        chatPanel.dataset.lastSignature = "";
-        chatPanel.innerHTML = "";
-    }
-
-    appState.subtitleDomDetected = false;
-    resetTranscriptionState();
-    clearAsrSession();
-    appState.subtitleObserveUntil = 0;
-    appState.subtitleCheckTargetBvid = "";
-    appState.expandedSummaryHeight = 0;
-    appState.lastCacheSyncTime = 0;
-    appState.lastCacheSyncBvid = "";
-    appState.isStateDirty = true;
-    appState.transcriptionCapsuleVisible = false;
-    appState.transcriptionCapsuleMeta = null;
-    appState.pendingSubtitle = null;
-    appState.subtitleOptions = [];
-    appState.subtitleOptionsBvid = "";
-    appState.activeSubtitleId = "";
-    appState.cache = null; // Explicitly clear cache including summary, segments, etc.
-    appState.playInfo = null; // Explicitly clear playInfo
-    
-    clearStreamCache();
-    clearStepProgressTimers();
-    clearPseudoProgressTicker();
-    
-    appState.progressTaskId = "";
-    appState.progressLastTick = 0;
-    appState.progressLastPercent = 0;
-    appState.pseudoProgressTaskId = "";
-    appState.pseudoProgressValue = 0;
-    appState.pseudoProgressStartedAt = 0;
-    appState.cloudReadState = { bvid: "", status: "idle", requestId: 0, startedAt: 0 };
-    appState.segmentsMarkerTickAt = 0;
-    
-    const bar = panelShadowRoot ? panelShadowRoot.getElementById("step-progress-bar") : null;
-    if (bar) resetStepProgressBar(bar);
-    
-    removeSegmentsFloatWindow();
-    removeSegmentsProgressMarkers();
-    
-    if (appState.subtitleCheckDelayTimer) {
-        clearTimeout(appState.subtitleCheckDelayTimer);
-        appState.subtitleCheckDelayTimer = null;
-    }
-    if (appState.transcribeCountdownTimer) {
-        clearInterval(appState.transcribeCountdownTimer);
-        appState.transcribeCountdownTimer = null;
-    }
-    stopSubtitleObserver();
     resetPageStateByBvidSwitch();
-    
+    clearStreamCache();
     const ccContainer = panelShadowRoot ? panelShadowRoot.getElementById("page-CC") : null;
     if (ccContainer) {
         appState.renderedSubtitleIndex = -1;
@@ -7274,9 +7221,8 @@ function getTabStateKey() {
     return appState.tabId ? `tabState_${appState.tabId}` : null;
 }
 
-async function triggerDefaultSubtitleCapture() {
+function evaluateSubtitleFallback() {
     if (isTranscriptionRunning()) return; // Transcription lock guard
-    if (appState.subtitleCaptureLock) return;
     const bvid = resolveCurrentBvid();
     if (!bvid) return;
     if (appState.subtitleCapturedBvid === bvid) return;
@@ -7284,61 +7230,16 @@ async function triggerDefaultSubtitleCapture() {
         appState.subtitleCapturedBvid = bvid;
         return;
     }
-    appState.subtitleCaptureLock = true;
-    try {
-        const payload = await fetchSubtitleByPlayerApi(bvid);
-        if (!payload?.length) {
-            scheduleTranscriptionCapsuleIfNeeded({
-                bvid,
-                cid: resolveCid(),
-                tid: getTidFromUrl(location.href),
-                title: cleanBilibiliTitle(document.title)
-            });
-            return;
-        }
-        const selectedSubtitleOption = findSubtitleOption(appState.subtitleOptions, "zh")
-            || findSubtitleOption(appState.subtitleOptions, appState.activeSubtitleId)
-            || pickSubtitle(appState.subtitleOptions);
-        await chrome.runtime.sendMessage({
-            action: "SUBTITLE_CAPTURED",
-            payload: {
-                bvid,
-                cid: resolveCid(),
-                tid: getTidFromUrl(location.href),
-                title: cleanBilibiliTitle(document.title),
-                subtitle: payload,
-                source: "official",
-                subtitleLanguage: "zh",
-                subtitleLanguageLabel: "中文",
-                subtitleUrl: selectedSubtitleOption?.url || ""
-            }
-        });
-        applyOfficialSubtitleVariantToLocalCache({
-            bvid,
-            option: { ...(selectedSubtitleOption || {}), id: "zh", label: "中文" },
-            rows: payload,
-            languageKey: "zh"
-        });
-        appState.subtitleCapturedBvid = bvid;
-        appState.lastSubtitleForwardAt = Date.now();
-        appState.transcriptionCapsuleVisible = false;
-        appState.transcriptionCapsuleMeta = null;
-        pushSubtitleTimeline("default_capture_success", { bvid, count: payload.length });
-        logContent.info("subtitle_parsed", { bvid, count: payload.length, source: "default_fetch" });
-    } catch (error) {
-        appState.injectReady = true;
-        pushSubtitleTimeline("default_capture_error", { bvid, error: error.message || "unknown_error" });
-        logContent.debug("subtitle_detected", {
-            bvid,
-            source: "default_fetch_miss",
-            detail: { error_message: error.message || "unknown_error" }
-        });
-    } finally {
-        appState.subtitleCaptureLock = false;
-    }
+    logPlayerApiCaptureDisabled(bvid);
+    scheduleTranscriptionPrompt({
+        bvid,
+        cid: resolveCid(),
+        tid: getTidFromUrl(location.href),
+        title: cleanBilibiliTitle(document.title)
+    });
 }
 
-function scheduleTranscriptionCapsuleIfNeeded(meta) {
+function scheduleTranscriptionPrompt(meta) {
     if (isTranscriptionRunning()) return; // Transcription lock guard
     const bvid = normalizeBvidCase(meta?.bvid || "");
     const injectBvid = normalizeBvidCase(appState.injectBvid || "");
@@ -7699,55 +7600,13 @@ function isStorageChangeStateDirty(changes, switched, routeMismatch, afterBvid) 
     });
 }
 
-async function fetchSubtitleByPlayerApi(bvid) {
-    console.log("[SUBTITLE_DIAG]", {
-        event: "source_disabled",
-        ts: Date.now(),
+function logPlayerApiCaptureDisabled(bvid) {
+    logSubtitleDiagnostic("source_disabled", {
         source: "player_api",
         reason: "disabled_for_inject_only_diagnosis",
         bvid,
         routeP: String(new URL(location.href).searchParams.get("p") || "")
     });
-    return [];
-    /* Disabled temporarily: actual subtitles are read from inject.xhr. */
-    const cid = resolveCid();
-    logSubtitleDiagnostic("source_request", {
-        source: "player_api",
-        bvid,
-        cid,
-        requestUrl: `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`
-    });
-    if (!cid) return [];
-    const api = `https://api.bilibili.com/x/player/v2?bvid=${encodeURIComponent(bvid)}&cid=${encodeURIComponent(cid)}`;
-    const res = await fetch(api, { credentials: "include" });
-    if (!res.ok) return [];
-    const data = await res.json();
-    const subtitles = Array.isArray(data?.data?.subtitle?.subtitles) ? data.data.subtitle.subtitles : [];
-    if (!subtitles.length) return [];
-    appState.subtitleOptions = normalizeSubtitleOptions(subtitles);
-    appState.subtitleOptionsBvid = normalizeBvidCase(bvid);
-    appState.subtitleOptionsKey = `${normalizeBvidCase(bvid)}::${cid}`;
-    const picked = pickSubtitle(subtitles);
-    appState.activeSubtitleId = normalizeSubtitleLanguageKey(picked) || getSubtitleOptionId(picked);
-    const rawUrl = String(picked?.url || picked?.subtitle_url || "").trim();
-    if (!rawUrl) return [];
-    const subtitleUrl = rawUrl.startsWith("//") ? `https:${rawUrl}` : rawUrl;
-    logSubtitleDiagnostic("source_selected", {
-        source: "player_api",
-        bvid,
-        cid,
-        subtitleUrl,
-        language: getSubtitleOptionId(picked)
-    });
-    const rows = await fetchSubtitleBody(subtitleUrl);
-    logSubtitleDiagnostic("source_received", {
-        source: "player_api",
-        bvid,
-        cid,
-        subtitleUrl,
-        ...getSubtitleDiagnosticRowsMeta(rows)
-    });
-    return rows;
 }
 
 function pickSubtitle(subtitles) {
@@ -8810,7 +8669,7 @@ function startRouteWatcher() {
         renderContent();
         syncCacheFromBackground(current);
         refreshFeedbackAfterVideoSwitch();
-        scheduleSubtitleFallbackWatchdog("route_switch");
+        scheduleTranscriptionAvailabilityCheck("route_switch");
     }, 2000);
 }
 
@@ -8924,7 +8783,7 @@ async function ensureAsrPlayInfoForBvid(targetBvid) {
     return null;
 }
 
-function scheduleSubtitleFallbackWatchdog(source) {
+function scheduleTranscriptionAvailabilityCheck(source) {
     if (appState.subtitleFallbackTimer) {
         clearTimeout(appState.subtitleFallbackTimer);
         appState.subtitleFallbackTimer = null;
@@ -8933,7 +8792,7 @@ function scheduleSubtitleFallbackWatchdog(source) {
     appState.subtitleFallbackTimer = setTimeout(() => {
         if (appState.lastSubtitleForwardAt >= marker) return;
         logContent.warn("subtitle_detected", { source: "fallback_trigger", reason: source });
-        triggerDefaultSubtitleCapture();
+        evaluateSubtitleFallback();
     }, 2000);
 }
 

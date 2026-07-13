@@ -20,6 +20,7 @@
     let silentSession = null;
     let silentSessionSeq = 0;
     let manualOverrideRouteKey = "";
+    let subtitleDebugEnabled = false;
     let userSubtitlePreference = { mode: "unknown", label: "" };
     const stealthStyleId = "bili-stealth-css";
     const originalFetch = window.fetch;
@@ -32,6 +33,10 @@
     emitPlayInfo(); // Initial emission
 
     window.addEventListener("message", (event) => {
+        if (event.data?.type === "BILI_SET_DEBUG_MODE") {
+            subtitleDebugEnabled = event.data.enabled === true;
+            return;
+        }
         if (event.data?.type === "GET_PLAY_INFO") {
             window.postMessage({
                 type: "SEND_PLAY_INFO",
@@ -229,6 +234,7 @@
     }
 
     function logSubtitleDiagnostic(event, detail = {}) {
+        if (!subtitleDebugEnabled) return;
         try {
             console.log("[SUBTITLE_DIAG]", {
                 event,

@@ -17,6 +17,10 @@
     let subtitleStringCache = [];
     let routeMetaReadyAt = 0;
     let autoTriggerAttempts = 0;
+    let silentSession = null;
+    let silentSessionSeq = 0;
+    let manualOverrideRouteKey = "";
+    let userSubtitlePreference = { mode: "unknown", label: "" };
     const stealthStyleId = "bili-stealth-css";
     const originalFetch = window.fetch;
     const originalOpen = XMLHttpRequest.prototype.open;
@@ -40,6 +44,18 @@
             subtitleStringCache = [];
             removeStealthMask();
             emitLog("subtitle_recapture_enabled", { source: "content" });
+            return;
+        }
+        if (event.data?.type === "BILI_RETRY_SUBTITLE_CAPTURE") {
+            isSubtitleCaptured = false;
+            autoTriggerStarted = false;
+            subtitleStringCache = [];
+            manualOverrideRouteKey = "";
+            silentDeadlineTs = Date.now() + 2000;
+            cancelSilentSession({ releaseMask: true });
+            performSilentAutoTrigger();
+            scheduleAutoTriggerFlow("manual_retry");
+            emitLog("subtitle_retry_started", { routeKey: getRouteVideoKey() });
             return;
         }
         if (event.data?.type === "BILI_SWITCH_SUBTITLE_LANGUAGE") {
@@ -88,10 +104,12 @@
 
         if (isSubtitleRequest(url)) {
             const requestMeta = this.__biliRequestMeta || resolveCurrentVideoMeta();
+            const requestStartedAt = performance.now();
             logSubtitleDiagnostic("source_request", { source: "inject.xhr", subtitleUrl: url, requestMeta });
             emitLog("subtitle_request_start", { source: "xhr", url, requestMeta });
             scheduleAutoTriggerFlow("xhr_detected");
             this.addEventListener("load", () => {
+                logSubtitleResourceTiming(url, this, requestStartedAt, requestMeta);
                 logSubtitleDiagnostic("source_response", { source: "inject.xhr", subtitleUrl: url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
                 emitLog("subtitle_response_done", { source: "xhr", url, requestMeta, currentMeta: resolveCurrentVideoMeta() });
                 emitSubtitlePayload(this.responseText, url, requestMeta);
@@ -112,6 +130,7 @@
                             _ts: Date.now()
                         };
                         emitLog("playinfo_updated", { source: "xhr_playurl", url_host: getUrlHost(url), bvid: currentBvid });
+                        emitPlayInfo();
                     }
                 } catch (_) {}
             });
@@ -162,8 +181,8 @@
         const routeBvid = String(requestMeta?.bvid || getBvidFromUrl(location.href) || "").trim();
         isSubtitleCaptured = true;
         capturedBvid = routeBvid || capturedBvid;
-        stopAutoTriggerFlow();
-        hackSubtitleOff();
+        stopAutoTriggerFlow({ preserveMask: true });
+        finishSilentSession();
         const delay = Math.max(0, Number(routeMetaReadyAt || 0) - Date.now());
         setTimeout(() => {
             postSubtitleData(body, url, requestMeta);
@@ -228,9 +247,43 @@
         }
     }
 
+    function logSubtitleResourceTiming(rawUrl, xhr, requestStartedAt, requestMeta) {
+        setTimeout(() => {
+            let absoluteUrl = "";
+            try {
+                absoluteUrl = new URL(String(rawUrl || ""), location.href).href;
+            } catch (_) {}
+            const entries = absoluteUrl ? performance.getEntriesByName(absoluteUrl, "resource") : [];
+            const entry = entries[entries.length - 1] || null;
+            const value = (number) => Number.isFinite(Number(number)) ? Math.round(Number(number) * 10) / 10 : null;
+            const elapsedMs = value(performance.now() - Number(requestStartedAt || performance.now()));
+            const timing = {
+                source: "inject.xhr",
+                urlHost: getUrlHost(absoluteUrl || rawUrl),
+                status: Number(xhr?.status || 0),
+                elapsedMs,
+                queueMs: entry ? value(entry.fetchStart - entry.startTime) : null,
+                dnsMs: entry ? value(entry.domainLookupEnd - entry.domainLookupStart) : null,
+                connectMs: entry ? value(entry.connectEnd - entry.connectStart) : null,
+                tlsMs: entry && entry.secureConnectionStart > 0 ? value(entry.connectEnd - entry.secureConnectionStart) : null,
+                ttfbMs: entry ? value(entry.responseStart - entry.requestStart) : null,
+                downloadMs: entry ? value(entry.responseEnd - entry.responseStart) : null,
+                resourceTotalMs: entry ? value(entry.duration) : null,
+                protocol: String(entry?.nextHopProtocol || ""),
+                transferSize: Number(entry?.transferSize || 0),
+                encodedBodySize: Number(entry?.encodedBodySize || 0),
+                decodedBodySize: Number(entry?.decodedBodySize || 0),
+                timingAvailable: !!entry,
+                requestMeta
+            };
+            logSubtitleDiagnostic("source_resource_timing", timing);
+            emitLog("subtitle_resource_timing", timing);
+        }, 0);
+    }
+
     function scheduleAutoTriggerFlow(reason) {
         syncCaptureStateWithRoute();
-        if (isSubtitleCaptured || autoTriggerStarted) return;
+        if (isSubtitleCaptured || autoTriggerStarted || manualOverrideRouteKey === getRouteVideoKey()) return;
         if (autoTriggerTimer) clearTimeout(autoTriggerTimer);
         const waitMs = Math.max(0, Number(silentDeadlineTs || 0) - Date.now());
         autoTriggerAttempts = 0;
@@ -251,12 +304,12 @@
         emitLog("subtitle_autotrigger", { reason, attempts: autoTriggerAttempts });
     }
 
-    function stopAutoTriggerFlow() {
+    function stopAutoTriggerFlow({ preserveMask = false } = {}) {
         if (autoTriggerTimer) {
             clearTimeout(autoTriggerTimer);
             autoTriggerTimer = null;
         }
-        removeStealthMask();
+        if (!preserveMask) removeStealthMask();
     }
 
     function applyStealthMask() {
@@ -266,7 +319,7 @@
         maskNode.innerHTML = [
             ".bpx-player-video-subtitle { visibility: hidden !important; }",
             ".bili-subtitle-x-subtitle-panel-position { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
-            ".bpx-player-ctrl-subtitle-menu.bui.bui-panel.bui-dark { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
+            ".bpx-player-ctrl-subtitle-menu, .bpx-player-ctrl-subtitle-panel, .bpx-player-dialog-wrap:has(.bpx-player-ctrl-subtitle-language-item-text) { opacity: 0 !important; visibility: hidden !important; pointer-events: none !important; }",
             ".bpx-common-toast, .bpx-player-toast-wrap, .bpx-player-toast-row, .bpx-player-toast-auto { display: none !important; opacity: 0 !important; visibility: hidden !important; }"
         ].join(" ");
         document.head.appendChild(maskNode);
@@ -291,8 +344,79 @@
         if (hadMask) emitLog("subtitle_stealth_released", { source: "manual_interaction" });
     }
 
-    function hackSubtitleOff() {
-        applyStealthMask();
+    function getSubtitleLanguageEntries() {
+        return Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text")).map((labelNode) => ({
+            labelNode,
+            item: labelNode.closest?.(".bpx-player-ctrl-subtitle-language-item") || labelNode,
+            label: normalizeSubtitleLabel(labelNode.textContent || labelNode.innerText)
+        }));
+    }
+
+    function restoreSilentSessionState(session = silentSession) {
+        if (!session) return false;
+        const restoreLabel = userSubtitlePreference.mode === "on" && userSubtitlePreference.label
+            ? userSubtitlePreference.label
+            : "关闭";
+        const result = clickSubtitleLanguageLabel(restoreLabel);
+        if (result.clicked) {
+            session.restoreClicked = true;
+            emitLog("subtitle_stealth_restore_clicked", {
+                routeKey: session.routeKey,
+                preferenceMode: userSubtitlePreference.mode,
+                requestedLabel: restoreLabel,
+                matchedText: result.matchedText
+            });
+        }
+        return result.clicked;
+    }
+
+    function closeSubtitleMenuSilently() {
+        const nodes = document.querySelectorAll(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle, .bpx-player-ctrl-subtitle-menu, .bpx-player-ctrl-subtitle-panel");
+        nodes.forEach((node) => {
+            ["mouseleave", "mouseout"].forEach((type) => {
+                try {
+                    node.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+                } catch (_) {}
+            });
+        });
+        try {
+            document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+        } catch (_) {}
+    }
+
+    function cancelSilentSession({ restore = false, releaseMask = true } = {}) {
+        const session = silentSession;
+        if (session?.finishTimer) clearTimeout(session.finishTimer);
+        if (restore) restoreSilentSessionState(session);
+        silentSession = null;
+        if (releaseMask) removeStealthMask();
+    }
+
+    function finishSilentSession() {
+        const session = silentSession;
+        if (!session || session.finishing) return;
+        session.finishing = true;
+        const retryDelays = [0, 80, 200, 400, 800];
+        const tryClose = (attempt) => {
+            if (silentSession?.id !== session.id) return;
+            if (restoreSilentSessionState(session)) {
+                closeSubtitleMenuSilently();
+                session.finishTimer = setTimeout(() => {
+                    if (silentSession?.id !== session.id) return;
+                    silentSession = null;
+                    removeStealthMask();
+                    emitLog("subtitle_stealth_completed", { routeKey: session.routeKey, attempts: attempt + 1 });
+                }, 160);
+                return;
+            }
+            if (attempt + 1 < retryDelays.length) {
+                session.finishTimer = setTimeout(() => tryClose(attempt + 1), retryDelays[attempt + 1]);
+                return;
+            }
+            closeSubtitleMenuSilently();
+            emitLog("subtitle_stealth_close_pending", { routeKey: session.routeKey, attempts: retryDelays.length });
+        };
+        tryClose(0);
     }
 
     function performSilentAutoTrigger() {
@@ -301,6 +425,16 @@
 
     function blindSilentOpen() {
         if (isSubtitleCaptured) return;
+        const routeKey = getRouteVideoKey();
+        if (manualOverrideRouteKey === routeKey) return false;
+        cancelSilentSession({ releaseMask: false });
+        silentSession = {
+            id: ++silentSessionSeq,
+            routeKey,
+            finishTimer: null,
+            finishing: false,
+            restoreClicked: false
+        };
         applyStealthMask();
         const allTextDivs = Array.from(document.querySelectorAll(".bpx-player-ctrl-subtitle-language-item-text"));
         const chineseTrack = allTextDivs.find((el) => String(el?.innerText || "").trim().includes("中文"));
@@ -333,7 +467,7 @@
 
     function dispatchSubtitleClick(target) {
         if (!target) return false;
-        ["pointerdown", "mousedown", "pointerup", "mouseup", "click"].forEach((type) => {
+        ["pointerdown", "mousedown", "pointerup", "mouseup"].forEach((type) => {
             try {
                 target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
             } catch (_) {}
@@ -415,6 +549,7 @@
     }
 
     function hardResetForRoute(nextBvid, reason) {
+        cancelSilentSession({ releaseMask: true });
         isSubtitleCaptured = false;
         autoTriggerStarted = false;
         capturedBvid = String(nextBvid || "").trim();
@@ -423,6 +558,7 @@
         latestPlayinfo = null; // 切换视频时清空，防止旧视频数据残留
         latestAudioProbe = null;
         silentDeadlineTs = Date.now() + 2000;
+        manualOverrideRouteKey = "";
         stopAutoTriggerFlow();
         emitLog("subtitle_route_reset", { bvid: capturedBvid, reason });
         performSilentAutoTrigger();
@@ -496,10 +632,28 @@
 
     function bindManualCCIntervention() {
         const release = (eventName, event) => {
+            if (!event.isTrusted) return;
+            const languageItem = event.target?.closest?.(".bpx-player-ctrl-subtitle-language-item");
             const target = event.target?.closest?.(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
-            if (!target) return;
+            if (!target && !languageItem) return;
+            if (eventName === "click" && languageItem) {
+                const labelNode = languageItem.querySelector?.(".bpx-player-ctrl-subtitle-language-item-text");
+                const label = normalizeSubtitleLabel(labelNode?.textContent || languageItem.textContent || "");
+                if (label) {
+                    userSubtitlePreference = /关闭/.test(label)
+                        ? { mode: "off", label: "关闭" }
+                        : { mode: "on", label };
+                    emitLog("subtitle_user_preference_changed", userSubtitlePreference);
+                }
+            }
             emitLog("subtitle_manual_intervention", { event: eventName });
-            removeStealthMask();
+            manualOverrideRouteKey = getRouteVideoKey();
+            autoTriggerStarted = true;
+            if (autoTriggerTimer) {
+                clearTimeout(autoTriggerTimer);
+                autoTriggerTimer = null;
+            }
+            cancelSilentSession({ restore: !languageItem, releaseMask: true });
         };
         document.addEventListener("mouseover", (event) => {
             release("mouseover", event);
@@ -555,27 +709,6 @@
             emitLog("playinfo_missing", { source: "resolve_playinfo" });
         }
     }
-
-    // Auto-detect URL changes to re-emit playinfo
-    let lastUrl = location.href;
-    new MutationObserver(() => {
-        const url = location.href;
-        if (url !== lastUrl) {
-            lastUrl = url;
-            setTimeout(emitPlayInfo, 1000); // Wait for page to update internal state
-        }
-    }).observe(document, {subtree: true, childList: true});
-
-    // 路由守卫：防止 SPA 切换时旧数据残留
-    let lastLocation = window.location.href;
-    setInterval(() => {
-        if (window.location.href !== lastLocation) {
-            lastLocation = window.location.href;
-            latestPlayinfo = null;
-            latestAudioProbe = null;
-            emitLog("route_memory_reset", { bvid: getBvidFromUrl(window.location.href) });
-        }
-    }, 300);
 
     function resolvePlayInfo() {
         try {

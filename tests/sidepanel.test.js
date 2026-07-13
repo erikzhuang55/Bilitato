@@ -93,6 +93,13 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('document.querySelector(".release-notice-overlay")?.setAttribute("data-theme", theme)');
   });
 
+  it("keeps the embedded release notice above the header metrics control", () => {
+    const metricsLayer = Number(contentCss.match(/\.logo-remaining-container\s*\{[\s\S]*?z-index:\s*(\d+)/)?.[1]);
+    const releaseLayer = Number(contentCss.match(/\.release-notice-overlay\s*\{[\s\S]*?z-index:\s*(\d+)/)?.[1]);
+
+    expect(releaseLayer).toBeGreaterThan(metricsLayer);
+  });
+
   it("keeps the ModelScope preset list aligned with currently supported models", () => {
     const modelScopeList = content.match(/modelscope:\s*\[([\s\S]*?)\]/)?.[1] || "";
     expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Flash"');
@@ -171,6 +178,96 @@ describe("native side panel", () => {
     expect(sidepanel).toContain("showSubtitleLanguageMenu");
     expect(sidepanelCss).toContain(".subtitle-language-option.active");
     expect(sidepanelCss).toContain('.ai-summary-plugin-box[data-theme="dark"] .metrics-box');
+  });
+
+  it("keeps automatic subtitle capture invisible without blocking manual controls", () => {
+    expect(inject).toContain("if (!event.isTrusted) return");
+    expect(inject).toContain("manualOverrideRouteKey === getRouteVideoKey()");
+    expect(inject).toContain('userSubtitlePreference = { mode: "unknown", label: "" }');
+    expect(inject).toContain('userSubtitlePreference = /关闭/.test(label)');
+    expect(inject).toContain('userSubtitlePreference.mode === "on"');
+    expect(inject).toContain("restoreSilentSessionState");
+    expect(inject).toContain("finishSilentSession");
+    expect(inject).toContain("const retryDelays = [0, 80, 200, 400, 800]");
+    expect(inject).toContain('emitLog("subtitle_stealth_close_pending"');
+    expect(inject).toContain('emitLog("subtitle_route_reset", { bvid: capturedBvid, reason });\n        performSilentAutoTrigger();\n        scheduleAutoTriggerFlow');
+    expect(content).toContain("allowDomOpen = false");
+    expect(content).toContain("if (allowDomOpen && mergeSubtitleOptions(apiOptions, domOptions).length <= 1)");
+  });
+
+  it("defers subtitle follow scrolling until the new part player time settles", () => {
+    expect(content).toContain("subtitleUiCoordinator.scrollUnlockAt = Number.POSITIVE_INFINITY");
+    expect(content).toContain("armSubtitleScrollAlignment(routeKey, generation)");
+    expect(content).toContain('document.addEventListener("loadedmetadata", onMediaEvent, true)');
+    expect(content).toContain('document.addEventListener("durationchange", onMediaEvent, true)');
+    expect(content).toContain('document.addEventListener("timeupdate", onMediaEvent, true)');
+    expect(content).toContain('fallbackTimer = setTimeout(() => unlock("fallback", false), 5000)');
+    expect(content).toContain("listNode.scrollTop = 0");
+    expect(content).toMatch(/scrollUnlockAt = Math\.max\([\s\S]*?subtitleUiCoordinator\.scrollUnlockAt,[\s\S]*?Date\.now\(\) \+ 300/);
+  });
+
+  it("deduplicates route, playinfo, and subtitle follow polling", () => {
+    expect(inject.match(/setInterval\(\(\) =>/g)?.length || 0).toBe(1);
+    expect(inject).not.toContain("new MutationObserver(() =>");
+    expect(content).toContain("const playInfoWaiters = new Set()");
+    expect(content).toContain("resolvePlayInfoWaiters(normalizedInfo)");
+    expect(content).not.toContain("for (let i = 0; i < 30; i++)");
+    expect(content).toContain("appState.focusTickerTimer = setInterval");
+    expect(content).not.toContain("requestAnimationFrame(loop)");
+  });
+
+  it("keeps the CC panel loading while a subtitle request is in flight", () => {
+    expect(content).toContain('event.data.event === "subtitle_request_start"');
+    expect(content).toContain("extendSubtitleUiLoadingForRequest");
+    expect(content).toContain('event.data.event === "subtitle_response_done"');
+    expect(content).toContain("completeSubtitleUiRequest");
+    expect(content).toContain("pendingRequestUrls: new Set()");
+    expect(content).toContain('scheduleSubtitleUiDeadline(routeKey, generation, 10000, "timeout")');
+    expect(content).toContain('scheduleSubtitleUiDeadline(subtitleUiCoordinator.routeKey, subtitleUiCoordinator.generation, 1500, "unavailable")');
+    expect(content).toContain('logSubtitleDiagnostic("ui_loading_extended"');
+    expect(content).toContain('emptyTip.textContent = "正在读取字幕，请稍候..."');
+  });
+
+  it("separates absent subtitles, capture failures, and slow subtitle responses", () => {
+    expect(content).toContain('subtitleUiCoordinator.phase = "probing"');
+    expect(content).toContain('source: "subtitle_control_absent"');
+    expect(content).toContain('scheduleSubtitleUiDeadline(routeKey, generation, 5000, "trigger_failed")');
+    expect(content).toContain('scheduleSubtitleUiDeadline(routeKey, generation, 10000, "timeout")');
+    expect(content).toContain('data-action="${buttonAction}"');
+    expect(content).toContain('const buttonAction = retryableSubtitleLoad ? "subtitle-load-retry" : "transcription-start"');
+    expect(content).toContain('window.postMessage({ type: "BILI_RETRY_SUBTITLE_CAPTURE" }, "*")');
+    expect(inject).toContain('event.data?.type === "BILI_RETRY_SUBTITLE_CAPTURE"');
+  });
+
+  it("waits for player alignment before declaring that subtitles are absent", () => {
+    expect(content).toContain("if (!Number.isFinite(subtitleUiCoordinator.scrollUnlockAt))");
+    expect(content).toMatch(/if \(!Number\.isFinite\(subtitleUiCoordinator\.scrollUnlockAt\)\) \{[\s\S]*?readyWithoutSubtitleSince = 0;[\s\S]*?return;/);
+  });
+
+  it("allows the cached Chinese CC variant to replace the injected display", () => {
+    expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?subtitleUiCoordinator\.displaySource = "language_switch"/);
+    expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?subtitleUiCoordinator\.displayCommitted = false/);
+    expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?delete ccPanel\.dataset\.subtitleDiagRenderSignature/);
+  });
+
+  it("does not leave a ready subtitle route showing the stale loading DOM", () => {
+    expect(content).toContain("doesCcDomMatchRows(panel, rows)");
+    expect(content).toContain("doesCcDomMatchLoading(panel)");
+    expect(content).toContain("delete panel.dataset.subtitleDiagRenderSignature");
+    expect(content).toContain("delete container.dataset.subtitleDiagRenderSignature");
+    expect(content).toContain("canDirectRenderCurrentRoute");
+    expect(content).toContain('logSubtitleDiagnostic("direct_render_skipped"');
+    expect(content).toContain('reason: payloadP && currentUrlP && payloadP !== currentUrlP ? "payload_p_mismatch" : "route_state_not_aligned"');
+  });
+
+  it("records detailed resource timing for subtitle XHR requests", () => {
+    expect(inject).toContain("logSubtitleResourceTiming(url, this, requestStartedAt, requestMeta)");
+    expect(inject).toContain('logSubtitleDiagnostic("source_resource_timing"');
+    expect(inject).toContain('emitLog("subtitle_resource_timing"');
+    expect(inject).toContain("queueMs:");
+    expect(inject).toContain("ttfbMs:");
+    expect(inject).toContain("downloadMs:");
+    expect(inject).toContain("nextHopProtocol");
   });
 
   it("stores ASR subtitles with the current part cid resolved from playurl", () => {

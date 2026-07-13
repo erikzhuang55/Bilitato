@@ -3530,7 +3530,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 .release-notice-overlay {
     position: absolute;
     inset: 0;
-    z-index: 700;
+    z-index: 2147483000;
     display: flex;
     align-items: center;
     justify-content: center;

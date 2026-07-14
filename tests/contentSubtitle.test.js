@@ -66,4 +66,26 @@ describe("contentSubtitle", () => {
     expect(srt).toContain("1\n00:00:01,000 --> 00:00:02,000\n第一句");
     expect(srt).toContain("2\n00:00:05,000 --> 00:00:08,000\n第二句");
   });
+
+  it("tracks official subtitle rows that use from/to timestamps", () => {
+    const rows = [
+      { from: 0, to: 2, content: "第一句" },
+      { from: 2, to: 5, content: "第二句" },
+      { from: 5, to: 8, content: "第三句" }
+    ];
+
+    expect(subtitle.getActiveSubtitleIndex(rows, 0.5)).toBe(0);
+    expect(subtitle.getActiveSubtitleIndex(rows, 3)).toBe(1);
+    expect(subtitle.getActiveSubtitleIndex(rows, 6)).toBe(2);
+  });
+
+  it("does not jump to the last row when timestamps do not progress", () => {
+    const rows = [
+      { from: 0, to: 0, content: "第一句" },
+      { from: 0, to: 0, content: "第二句" },
+      { from: 0, to: 0, content: "第三句" }
+    ];
+
+    expect(subtitle.getActiveSubtitleIndex(rows, 1)).toBe(-1);
+  });
 });

@@ -31,6 +31,7 @@ import "./logger.js";
 
 let IS_DEBUG_MODE = false;
 const cacheWriteLocks = new Map();
+const taskStateWriteLocks = new Map();
 const TIMEOUT_ERROR_CODES = new Set([
     "TIMEOUT",
     "AI_RESPONSE_TIMEOUT",
@@ -179,7 +180,8 @@ async function enrichTaskFailureContext(context = {}) {
         return { ...merged, ...buildSubtitleStatsContext(null, taskContext) };
     }
     try {
-        const cache = await getCache(bvid);
+        const directory = await getCache(bvid);
+        const cache = getPartCacheForContext(directory, bvid, taskContext);
         return { ...merged, ...buildSubtitleStatsContext(cache, taskContext) };
     } catch (_) {
         return { ...merged, ...buildSubtitleStatsContext(null, taskContext) };
@@ -570,6 +572,7 @@ const tabOperationAbortControllers = new Map();
 const tabStateCache = new Map();
 const tabStateWriteTimers = new Map();
 const cacheMemory = new Map();
+const VIDEO_CACHE_SCHEMA_VERSION = 3;
 const recentAsrAudioFingerprints = new Map();
 let currentDebugMode = false;
 const fallbackLoggerFactory = {
@@ -589,6 +592,69 @@ const logBackground = loggerFactory.create("background", {
         pushGlobalLog(entry);
     }
 });
+const partScopeDiagnosticSignatures = new Map();
+
+function buildPartScopeCacheMeta(cache = {}) {
+    return {
+        cacheBvid: normalizeBvid(cache?.bvid || ""),
+        cacheCid: Number(cache?.cid || 0),
+        cacheTid: String(cache?.tid || ""),
+        hasSummary: !!String(cache?.summary || "").trim(),
+        segmentsCount: Array.isArray(cache?.segments) ? cache.segments.length : 0,
+        hasRumors: !!normalizeRumors(cache?.rumors),
+        historyCount: Array.isArray(cache?.history) ? cache.history.length : 0,
+        summarySource: String(cache?.summaryCacheSource || ""),
+        segmentsSource: String(cache?.segmentsCacheSource || ""),
+        rumorsSource: String(cache?.rumorsCacheSource || ""),
+        partsCount: cache?.parts && typeof cache.parts === "object" ? Object.keys(cache.parts).length : 0,
+        availablePartKeys: cache?.parts && typeof cache.parts === "object" ? Object.keys(cache.parts).slice(0, 50) : []
+    };
+}
+
+function buildCacheDirectoryDiagnostic(cache = {}) {
+    const parts = cache?.parts && typeof cache.parts === "object" ? cache.parts : {};
+    return {
+        topLevelKeys: Object.keys(cache || {}).sort(),
+        bvid: normalizeBvid(cache?.bvid || ""),
+        schemaVersion: Number(cache?.schemaVersion || 0),
+        updatedAt: Number(cache?.updatedAt || 0),
+        partCount: Object.keys(parts).length,
+        parts: Object.entries(parts).map(([partKey, part]) => ({
+            partKey,
+            cid: Number(part?.cid || 0),
+            tid: String(part?.tid || ""),
+            title: String(part?.title || ""),
+            subtitleRows: Array.isArray(part?.rawSubtitle) ? part.rawSubtitle.length : 0,
+            subtitleVariants: part?.subtitleVariants && typeof part.subtitleVariants === "object"
+                ? Object.keys(part.subtitleVariants).length
+                : 0,
+            hasSummary: !!String(part?.summary || "").trim(),
+            segmentsCount: Array.isArray(part?.segments) ? part.segments.length : 0,
+            hasRumors: !!normalizeRumors(part?.rumors),
+            historyCount: Array.isArray(part?.history) ? part.history.length : 0,
+            metricsCount: Array.isArray(part?.metrics) ? part.metrics.length : 0,
+            updatedAt: Number(part?.updatedAt || 0)
+        }))
+    };
+}
+
+function logCacheDirectorySnapshot(cache = {}, source = "") {
+    logPartScopeDiagnostic("cache_directory_snapshot", {
+        source,
+        directory: buildCacheDirectoryDiagnostic(cache)
+    }, `directory:${normalizeBvid(cache?.bvid || "")}:${source}`);
+}
+
+function logPartScopeDiagnostic(event, detail = {}, dedupeKey = "") {
+    if (!currentDebugMode) return;
+    const payload = { event, ts: Date.now(), layer: "background", ...detail };
+    if (dedupeKey) {
+        const signature = JSON.stringify(payload, (key, value) => key === "ts" ? undefined : value);
+        if (partScopeDiagnosticSignatures.get(dedupeKey) === signature) return;
+        partScopeDiagnosticSignatures.set(dedupeKey, signature);
+    }
+    console.log("[PART_SCOPE_DIAG]", payload);
+}
 const logAI = loggerFactory.create("ai", {
     getDebugMode: () => currentDebugMode,
     onEntry: (entry) => {
@@ -757,7 +823,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
         if (key.startsWith("cache_")) {
             const bvid = normalizeBvid(key.replace(/^cache_/i, ""));
             if (!bvid) return;
-            if (change.newValue) cacheMemory.set(bvid, cloneData(change.newValue));
+            if (change.newValue) cacheMemory.set(bvid, normalizeVideoCacheDirectory(change.newValue, bvid));
             else cacheMemory.delete(bvid);
         }
     });
@@ -1013,6 +1079,19 @@ async function handleMessage(msg, sender) {
         await handleSubtitleCaptured(tabId, msg.payload);
         return {};
     }
+    if (msg.action === "SET_ACTIVE_PART") {
+        if (!tabId) return {};
+        const bvid = normalizeBvid(msg?.bvid);
+        if (!bvid) return {};
+        const cid = Number(msg?.cid || 0);
+        await updateTabState(tabId, {
+            activeBvid: bvid,
+            activeCid: Number.isFinite(cid) && cid > 0 ? cid : 0,
+            activeTid: String(msg?.tid || "").trim() || null,
+            updatedAt: Date.now()
+        });
+        return {};
+    }
     if (msg.action === "RUN_TRANSCRIBE_FALLBACK" || msg.action === "GET_AUDIO_URL") {
         if (!tabId) throw new Error("tabId 缺失");
         const result = await ContentProvider.transcribeFallback(tabId, msg.payload || {});
@@ -1021,7 +1100,12 @@ async function handleMessage(msg, sender) {
     if (msg.action === "ABORT_TAB_OPERATIONS") {
         const count = abortTabOperations(tabId, "aborted");
         if (tabId) {
-            await setTaskStatus(tabId, TASK_KEYS, "idle").catch(() => {});
+            const current = await getTabState(tabId).catch(() => null);
+            await setTaskStatus(tabId, TASK_KEYS, "idle", "", {
+                bvid: current?.activeBvid || "",
+                cid: Number(current?.activeCid || 0),
+                tid: String(current?.activeTid || "")
+            }).catch(() => {});
             await updateTabState(tabId, { transcriptionProgress: 0, updatedAt: Date.now() }).catch(() => {});
         }
         logBackground.info("tab_operations_aborted", { tab_id: tabId || 0, detail: { controller_count: count } });
@@ -1030,7 +1114,11 @@ async function handleMessage(msg, sender) {
     if (msg.action === "CLEAR_SUBTITLE_CACHE") {
         const bvid = normalizeBvid(msg.bvid);
         if (!bvid) return {};
+        const cid = Number(msg.cid || 0);
+        if (!(cid > 0)) throw createAppError("PART_IDENTITY_PENDING", "正在识别当前分 P，请稍候再试");
         await mergeCacheByBvid(bvid, {
+            cid,
+            tid: String(msg.tid || ""),
             rawSubtitle: [],
             processedSubtitle: [],
             rawHash: "",
@@ -1051,7 +1139,7 @@ async function handleMessage(msg, sender) {
         if (!bvid) return { deleted: 0 };
         const current = await getCache(bvid);
         if (!current || !Object.keys(current).length) return { deleted: 0 };
-        await mergeCacheByBvid(bvid, buildDerivedCacheClearPatch());
+        await mergeCacheByBvid(bvid, buildDerivedCacheClearPatch(current));
         return { deleted: 1 };
     }
     if (msg.action === "DELETE_ALL_VIDEO_CACHE") {
@@ -1062,7 +1150,8 @@ async function handleMessage(msg, sender) {
             const bvid = normalizeBvid(value?.bvid || key.replace(/^cache_/i, ""));
             if (!bvid || seen.has(bvid)) return;
             seen.add(bvid);
-            await mergeCacheByBvid(bvid, buildDerivedCacheClearPatch());
+            const directory = normalizeVideoCacheDirectory(value, bvid);
+            await mergeCacheByBvid(bvid, buildDerivedCacheClearPatch(directory));
         }));
         return { deleted: seen.size };
     }
@@ -1095,7 +1184,10 @@ async function handleMessage(msg, sender) {
         const tabState = await getTabState(tabId);
         const settings = await getResolvedSettings();
         if (tabState?.activeBvid && msg?.skipCloud !== true) {
-            await hydrateCloudCacheIfNeeded(tabState.activeBvid, CLOUD_CACHE_KEYS, settings);
+            await hydrateCloudCacheIfNeeded(tabState.activeBvid, CLOUD_CACHE_KEYS, settings, {
+                cid: Number(tabState?.activeCid || 0),
+                tid: String(tabState?.activeTid || "")
+            });
         }
         const rawCache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
         const cache = selectCachePart(rawCache, {
@@ -1104,6 +1196,13 @@ async function handleMessage(msg, sender) {
         });
         const feedback = await fetchFeedbackState(settings).catch(() => ({ rows: [], unreadCount: 0, enabled: false }));
         const cloudCachePrefs = await getCloudCacheReadPrefs(tabState?.activeBvid, settings);
+        logPartScopeDiagnostic("ui_cache_response", {
+            channel: "bootstrap",
+            requestedBvid: normalizeBvid(tabState?.activeBvid || ""),
+            requestedCid: Number(tabState?.activeCid || 0),
+            selected: !!cache,
+            ...(cache ? buildPartScopeCacheMeta(cache) : {})
+        }, `bootstrap:${tabId}:${tabState?.activeBvid || ""}:${tabState?.activeCid || 0}`);
         return { tabId, tabState, cache, settings, providers: PROVIDERS, feedback, cloudCachePrefs };
     }
     if (msg.action === "GET_CACHE") {
@@ -1114,25 +1213,49 @@ async function handleMessage(msg, sender) {
             const bvid = normalizeBvid(tabState?.activeBvid);
             const settings = await getResolvedSettings();
             if (bvid && msg?.skipCloud !== true) {
-                await hydrateCloudCacheIfNeeded(bvid, CLOUD_CACHE_KEYS, settings);
+                await hydrateCloudCacheIfNeeded(bvid, CLOUD_CACHE_KEYS, settings, {
+                    cid: Number(tabState?.activeCid || 0),
+                    tid: String(tabState?.activeTid || "")
+                });
             }
             const rawCache = bvid ? await getCache(bvid) : null;
             const cache = selectCachePart(rawCache, {
                 bvid,
                 cid: Number(tabState?.activeCid || 0)
             });
+            logPartScopeDiagnostic("ui_cache_response", {
+                channel: "get_cache_active",
+                requestedBvid: bvid,
+                requestedCid: Number(tabState?.activeCid || 0),
+                selected: !!cache,
+                ...(cache ? buildPartScopeCacheMeta(cache) : {})
+            }, `get-active:${tabId}:${bvid}:${tabState?.activeCid || 0}`);
             return { bvid, cache, tabState, cloudCachePrefs: await getCloudCacheReadPrefs(bvid, settings) };
         }
         const settings = await getResolvedSettings();
+        const tabState = tabId ? await getTabState(tabId) : null;
+        const hasExplicitCid = Object.prototype.hasOwnProperty.call(msg || {}, "cid");
+        const cacheContext = {
+            cid: Number(hasExplicitCid ? msg.cid : (tabState?.activeCid || 0)),
+            tid: String(msg.tid || tabState?.activeTid || "")
+        };
         if (msg?.skipCloud !== true) {
-            await hydrateCloudCacheIfNeeded(expected, CLOUD_CACHE_KEYS, settings);
+            await hydrateCloudCacheIfNeeded(expected, CLOUD_CACHE_KEYS, settings, cacheContext);
         }
         const rawCache = await getCache(expected);
-        const tabState = tabId ? await getTabState(tabId) : null;
         const cache = selectCachePart(rawCache, {
             bvid: expected,
-            cid: Number(msg.cid || tabState?.activeCid || 0)
+            cid: cacheContext.cid
         });
+        logPartScopeDiagnostic("ui_cache_response", {
+            channel: "get_cache_explicit",
+            requestedBvid: expected,
+            requestedCid: cacheContext.cid,
+            requestedTid: cacheContext.tid,
+            rootCid: Number(rawCache?.cid || 0),
+            selected: !!cache,
+            ...(cache ? buildPartScopeCacheMeta(cache) : {})
+        }, `get-explicit:${tabId || 0}:${expected}:${cacheContext.cid}`);
         return { bvid: expected, cache, tabState, cloudCachePrefs: await getCloudCacheReadPrefs(expected, settings) };
     }
     if (msg.action === "RUN_TASKS") {
@@ -1162,7 +1285,7 @@ async function handleMessage(msg, sender) {
         const text = String(msg.text || "").trim();
         const messageId = String(msg.messageId || "");
         if (!text || !messageId) throw new Error("聊天参数不完整");
-        const result = await runChatForTab(tabId, text, messageId, normalizeBvid(msg.bvid));
+        const result = await runChatForTab(tabId, text, messageId, normalizeBvid(msg.bvid), normalizeTaskContext(msg.taskContext));
         return { answer: result.answer, metrics: result.metrics };
     }
     if (msg.action === "ABORT_TRANSCRIPTION") {
@@ -1176,13 +1299,11 @@ async function handleMessage(msg, sender) {
         const tasks = (Array.isArray(msg.tasks) ? msg.tasks : []).filter((task) => TASK_KEYS.includes(task));
         if (!tasks.length) return {};
         const current = await getTabState(tabId);
-        const taskStatus = { ...(current?.taskStatus || {}) };
-        const taskErrors = { ...(current?.taskErrors || {}) };
-        tasks.forEach((task) => {
-            taskStatus[task] = "idle";
-            delete taskErrors[task];
+        await setTaskStatus(tabId, tasks, "idle", "", {
+            bvid: current?.activeBvid || "",
+            cid: Number(current?.activeCid || 0),
+            tid: String(current?.activeTid || "")
         });
-        await updateTabState(tabId, { taskStatus, taskErrors, lastError: "", updatedAt: Date.now() });
         return {};
     }
     if (msg.action === "SAVE_SETTINGS") {
@@ -2872,14 +2993,15 @@ async function handleSubtitleCaptured(tabId, payload) {
     const clearDerived = payload?.clearDerived === true;
     logBackground.info("subtitle_detected", { tab_id: tabId, bvid, cid, tid });
     const existing = await getCache(bvid);
+    const existingPart = selectCachePart(existing, { bvid, cid }) || {};
     const rawSubtitle = normalizeRawSubtitle(payload.subtitle || []);
     const rawHash = makeSubtitleHash(rawSubtitle);
-    if (existing?.rawHash && existing.rawHash === rawHash) {
+    if (existingPart?.rawHash && existingPart.rawHash === rawHash) {
         logBackground.debug("subtitle_duplicate_ignore", { bvid, tab_id: tabId, raw_hash: rawHash });
-        const existingSource = String(existing?.subtitleSource || "");
-        const existingLanguage = String(existing?.subtitleLanguage || "");
-        const existingCid = Number(existing?.cid || 0);
-        const existingTid = String(existing?.tid || "").trim();
+        const existingSource = String(existingPart?.subtitleSource || "");
+        const existingLanguage = String(existingPart?.subtitleLanguage || "");
+        const existingCid = Number(existingPart?.cid || 0);
+        const existingTid = String(existingPart?.tid || "").trim();
         const nextTid = String(tid || "").trim();
         let nextCache = existing;
         if (
@@ -2891,11 +3013,11 @@ async function handleSubtitleCaptured(tabId, payload) {
             await mergeCacheByBvid(bvid, {
                 cid: Number.isFinite(cid) ? cid : 0,
                 tid,
-                title: payload.title || existing?.title || "",
+                title: payload.title || existingPart?.title || "",
                 subtitleSource,
                 subtitleLanguage,
                 subtitleLanguageLabel,
-                subtitleUrl: String(payload?.subtitleUrl || existing?.subtitleUrl || ""),
+                subtitleUrl: String(payload?.subtitleUrl || existingPart?.subtitleUrl || ""),
                 ...(clearDerived ? {
                     summary: "",
                     segments: [],
@@ -2920,10 +3042,13 @@ async function handleSubtitleCaptured(tabId, payload) {
             const settings = await getResolvedSettings();
             await persistCloudSubtitlePatch(bvid, settings, nextCache, {
                 title: payload.title || "",
-                subtitleSource
+                subtitleSource,
+                cid,
+                tid
             });
         }
-        await pushSubtitleSyncToTab(tabId, bvid, nextCache, "duplicate");
+        const nextPartCache = selectCachePart(nextCache, { bvid, cid });
+        if (nextPartCache) await pushSubtitleSyncToTab(tabId, bvid, nextPartCache, "duplicate");
         return;
     }
     const processedSubtitle = isNoTimestampSubtitleSource(subtitleSource)
@@ -2982,14 +3107,17 @@ async function handleSubtitleCaptured(tabId, payload) {
         updatedAt: Date.now()
     });
     const latestCache = await getCache(bvid);
+    const latestPartCache = selectCachePart(latestCache, { bvid, cid });
     if (isAsrSubtitleSource(subtitleSource)) {
         const settings = await getResolvedSettings();
         await persistCloudSubtitlePatch(bvid, settings, latestCache, {
             title: payload.title || "",
-            subtitleSource
+            subtitleSource,
+            cid,
+            tid
         });
     }
-    await pushSubtitleSyncToTab(tabId, bvid, latestCache, "fresh");
+    if (latestPartCache) await pushSubtitleSyncToTab(tabId, bvid, latestPartCache, "fresh");
 }
 
 async function pushSubtitleSyncToTab(tabId, bvid, cache, reason) {
@@ -3056,9 +3184,13 @@ function normalizeTaskContext(raw) {
     const totalSeconds = Number(duration.totalSeconds);
     const formattedTime = String(duration.formattedTime || "").trim();
     const cid = Number(source.cid || 0);
+    const bvid = normalizeBvid(source.bvid || "");
+    const partKey = createVideoCachePartKey(bvid, cid);
     return {
+        bvid,
         cid: Number.isFinite(cid) && cid > 0 ? cid : 0,
         tid: String(source.tid || "").trim(),
+        partKey,
         videoDuration: {
             totalSeconds: Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0,
             formattedTime
@@ -3082,6 +3214,18 @@ function createVideoCachePartKey(bvid, cid) {
     return normalizedBvid && normalizedCid ? `${normalizedBvid}::${normalizedCid}` : "";
 }
 
+function resolvePartContext(bvid, context = {}) {
+    const normalizedBvid = normalizeBvid(context?.bvid || bvid);
+    const cid = Number(context?.cid || 0);
+    const normalizedCid = Number.isFinite(cid) && cid > 0 ? cid : 0;
+    return {
+        bvid: normalizedBvid,
+        cid: normalizedCid,
+        tid: String(context?.tid || "").trim(),
+        partKey: createVideoCachePartKey(normalizedBvid, normalizedCid)
+    };
+}
+
 function createSubtitleCacheKey({ bvid, cid, language = "default" } = {}) {
     return [
         normalizeBvid(bvid),
@@ -3091,16 +3235,9 @@ function createSubtitleCacheKey({ bvid, cid, language = "default" } = {}) {
 }
 
 function getPartCacheFields(cache = {}) {
-    const fields = [
-        "bvid", "cid", "tid", "title",
-        "rawSubtitle", "processedSubtitle", "rawHash", "processedHash",
-        "subtitleSource", "subtitleLanguage", "subtitleLanguageLabel",
-        "summary", "segments", "rumors", "history", "metrics",
-        "summaryCacheSource", "segmentsCacheSource", "rumorsCacheSource",
-        "summaryModel", "segmentsModel", "rumorsModel"
-    ];
-    return fields.reduce((acc, key) => {
-        if (Object.prototype.hasOwnProperty.call(cache, key)) acc[key] = cloneData(cache[key]);
+    const directoryFields = new Set(["parts", "schemaVersion"]);
+    return Object.entries(cache || {}).reduce((acc, [key, value]) => {
+        if (!directoryFields.has(key)) acc[key] = cloneData(value);
         return acc;
     }, {});
 }
@@ -3108,13 +3245,20 @@ function getPartCacheFields(cache = {}) {
 function selectCachePart(cache = {}, context = {}) {
     if (!cache || typeof cache !== "object") return cache;
     const cid = Number(context?.cid || 0);
-    if (!(cid > 0)) return cache;
+    if (!(cid > 0)) return null;
     const partKey = createVideoCachePartKey(cache.bvid || context.bvid, cid);
     const part = partKey && cache.parts && typeof cache.parts === "object" ? cache.parts[partKey] : null;
-    if (part && typeof part === "object") return { ...cache, ...cloneData(part), parts: cache.parts, subtitleVariants: cache.subtitleVariants };
-    const cacheCid = Number(cache?.cid || 0);
-    if (cacheCid > 0 && cacheCid !== cid) return null;
-    return cache;
+    if (part && typeof part === "object") {
+        return { ...cache, ...cloneData(part), parts: cache.parts, subtitleVariants: cache.subtitleVariants };
+    }
+    return null;
+}
+
+function getPartCacheForContext(cache = {}, bvid = "", context = {}) {
+    const identity = resolvePartContext(bvid, context);
+    const selected = selectCachePart(cache, identity);
+    if (!selected || !isCacheForTaskContext(selected, identity)) return null;
+    return selected;
 }
 
 function makeSubtitleHash(list) {
@@ -3129,44 +3273,60 @@ async function runTasksForTab(tabId, tasks, force, taskContext = {}, requestedBv
     const bvid = normalizeBvid(requestedBvid || tabState?.activeBvid);
     if (!bvid) throw new Error("未获取到视频字幕");
     const contextCid = Number(taskContext?.cid || 0);
-    const contextTid = String(taskContext?.tid || "").trim();
-    const tabPatch = { updatedAt: Date.now() };
-    if (normalizeBvid(tabState?.activeBvid) !== bvid) tabPatch.activeBvid = bvid;
-    if (contextCid > 0 && Number(tabState?.activeCid || 0) !== contextCid) tabPatch.activeCid = contextCid;
-    if (contextTid && String(tabState?.activeTid || "") !== contextTid) tabPatch.activeTid = contextTid;
-    if (Object.keys(tabPatch).length > 1) {
-        await updateTabState(tabId, tabPatch);
-    }
+    if (!(contextCid > 0)) throw createAppError("PART_IDENTITY_PENDING", "正在识别当前分 P，请稍候再试");
+    const requestIdentity = resolvePartContext(bvid, taskContext);
+    logPartScopeDiagnostic("task_request_identity", {
+        tabId,
+        feature: tasks.join(","),
+        requestedBvid: requestIdentity.bvid,
+        requestedCid: requestIdentity.cid,
+        requestedTid: requestIdentity.tid,
+        requestedPartKey: requestIdentity.partKey,
+        activeBvid: normalizeBvid(tabState?.activeBvid || ""),
+        activeCid: Number(tabState?.activeCid || 0),
+        activeTid: String(tabState?.activeTid || "")
+    });
     const resolvedSettings = settingsOverride || await getResolvedSettings();
     const hydrateTasks = [...new Set([
         ...tasks,
         ...(tasks.some((task) => ["summary", "segments", "rumors"].includes(task)) ? ["subtitle"] : [])
     ])];
-    await hydrateCloudCacheIfNeeded(bvid, hydrateTasks, resolvedSettings);
+    await hydrateCloudCacheIfNeeded(bvid, hydrateTasks, resolvedSettings, taskContext);
     const hasSummarySegments = tasks.includes("summary") && tasks.includes("segments");
     const otherTasks = tasks.filter((task) => !(hasSummarySegments && (task === "summary" || task === "segments")));
 
     if (hasSummarySegments) {
-        await setTaskStatus(tabId, ["summary", "segments"], "processing");
+        await setTaskStatus(tabId, ["summary", "segments"], "processing", "", taskContext);
         await runSummarySegmentsTasks(tabId, bvid, force, resolvedSettings, taskContext);
     }
 
     if (otherTasks.length) {
-        await setTaskStatus(tabId, otherTasks, "processing");
+        await setTaskStatus(tabId, otherTasks, "processing", "", taskContext);
         await Promise.all(otherTasks.map((task) => runSingleTask(tabId, bvid, task, force, resolvedSettings, taskContext)));
-        await setTaskStatus(tabId, otherTasks, "done");
+        await setTaskStatus(tabId, otherTasks, "done", "", taskContext);
     }
 
     logBackground.info("task_finish", { tab_id: tabId, bvid, tasks });
 }
 
 async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {}) {
+    const identity = resolvePartContext(bvid, taskContext);
     if (!force) {
-        await hydrateCloudCacheIfNeeded(bvid, [task], settings);
+        await hydrateCloudCacheIfNeeded(bvid, [task], settings, identity);
     }
-    const cache = await getCache(bvid);
+    const rawCache = await getCache(bvid);
+    const cache = getPartCacheForContext(rawCache, bvid, identity);
+    logPartScopeDiagnostic("task_local_read", {
+        feature: task,
+        requestedPartKey: identity.partKey,
+        requestedCid: identity.cid,
+        rootCid: Number(rawCache?.cid || 0),
+        selected: !!cache,
+        ...(cache ? buildPartScopeCacheMeta(cache) : {})
+    });
+    if (!cache) throw createMissingSubtitleError();
     if (!force && cache?.[task]) return cache[task];
-    const key = `${bvid}|${task}`;
+    const key = `${identity.partKey || bvid}|${task}`;
     const startedAt = Date.now();
     logBackground.info("task_start", { tab_id: tabId, bvid, task });
     await reportClientUsageEvent({
@@ -3180,17 +3340,17 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
         tabId
     }, settings);
     try {
-        const result = await runWithDedup(key, () => requestTaskResult(bvid, task, settings, { ...taskContext, tabId }));
+        const result = await runWithDedup(key, () => requestTaskResult(bvid, task, settings, { ...taskContext, ...identity, tabId }));
         await mergeCacheByBvid(bvid, {
-            ...(Number(taskContext?.cid || 0) > 0 ? { cid: Number(taskContext.cid) } : {}),
-            ...(String(taskContext?.tid || "").trim() ? { tid: String(taskContext.tid).trim() } : {}),
+            ...(identity.cid > 0 ? { cid: identity.cid } : {}),
+            ...(identity.tid ? { tid: identity.tid } : {}),
             [task]: result,
             ...buildTaskSourcePatch([task], "local"),
             updatedAt: Date.now()
         });
-        const cloudSaved = await persistCloudFeaturePatch(bvid, settings, { [task]: result });
+        const cloudSaved = await persistCloudFeaturePatch(bvid, settings, { [task]: result }, identity);
         if (cloudSaved) {
-            await incrementCloudVideoCallCount(bvid, settings, task);
+            await incrementCloudVideoCallCount(bvid, settings, task, identity);
         }
         await reportClientUsageEvent({
             eventName: "task_success",
@@ -3237,24 +3397,35 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
         } else {
             logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task }));
         }
-        await setTaskStatus(tabId, [task], status, error.message || "任务失败");
+        await setTaskStatus(tabId, [task], status, error.message || "任务失败", identity);
         throw error;
     }
 }
 
 async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext = {}) {
+    const identity = resolvePartContext(bvid, taskContext);
     if (!force) {
-        await hydrateCloudCacheIfNeeded(bvid, ["summary", "segments"], settings);
+        await hydrateCloudCacheIfNeeded(bvid, ["summary", "segments"], settings, identity);
     }
-    const cache = await getCache(bvid);
+    const rawCache = await getCache(bvid);
+    const cache = getPartCacheForContext(rawCache, bvid, identity);
+    logPartScopeDiagnostic("task_local_read", {
+        feature: "summary_segments",
+        requestedPartKey: identity.partKey,
+        requestedCid: identity.cid,
+        rootCid: Number(rawCache?.cid || 0),
+        selected: !!cache,
+        ...(cache ? buildPartScopeCacheMeta(cache) : {})
+    });
+    if (!cache) throw createMissingSubtitleError();
     if (!force && cache?.summary && Array.isArray(cache?.segments) && cache.segments.length) {
-        await setTaskStatus(tabId, ["summary", "segments"], "done");
+        await setTaskStatus(tabId, ["summary", "segments"], "done", "", identity);
         return {
             summary: { ok: true, data: cache.summary || "", error: null },
             segments: { ok: true, data: cache.segments, error: null }
         };
     }
-    const key = `${bvid}|summary_segments`;
+    const key = `${identity.partKey || bvid}|summary_segments`;
     const startedAt = Date.now();
     logBackground.info("task_start", { tab_id: tabId, bvid, task: "summary_segments", mode: settings.prefMode });
     await reportClientUsageEvent({
@@ -3269,8 +3440,8 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
         metadata: { pref_mode: settings?.prefMode || "" }
     }, settings);
     const runner = settings.prefMode === "efficiency"
-        ? () => runSummarySegmentsInEfficiency(tabId, bvid, force, settings, taskContext)
-        : () => runSummarySegmentsInQuality(tabId, bvid, force, settings, taskContext);
+        ? () => runSummarySegmentsInEfficiency(tabId, bvid, force, settings, { ...taskContext, ...identity })
+        : () => runSummarySegmentsInQuality(tabId, bvid, force, settings, { ...taskContext, ...identity });
     let results;
     try {
         results = await runWithDedup(key, runner);
@@ -3291,13 +3462,13 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
     if (results?.summary?.ok) cloudPatch.summary = results.summary.data;
     if (results?.segments?.ok) cloudPatch.segments = results.segments.data;
     if (Object.keys(cloudPatch).length) {
-        const cloudSaved = await persistCloudFeaturePatch(bvid, settings, cloudPatch);
+        const cloudSaved = await persistCloudFeaturePatch(bvid, settings, cloudPatch, identity);
         if (cloudSaved) {
             if (Object.prototype.hasOwnProperty.call(cloudPatch, "summary")) {
-                await incrementCloudVideoCallCount(bvid, settings, "summary");
+                await incrementCloudVideoCallCount(bvid, settings, "summary", identity);
             }
             if (Object.prototype.hasOwnProperty.call(cloudPatch, "segments")) {
-                await incrementCloudVideoCallCount(bvid, settings, "segments");
+                await incrementCloudVideoCallCount(bvid, settings, "segments", identity);
             }
         }
     }
@@ -3339,19 +3510,28 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
     return results;
 }
 
-async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
+async function runChatForTab(tabId, text, messageId, requestedBvid = "", taskContext = {}) {
     const tabState = await getTabState(tabId);
     const bvid = normalizeBvid(requestedBvid || tabState?.activeBvid);
     if (!bvid) throw new Error("未获取到视频字幕");
-    if (normalizeBvid(tabState?.activeBvid) !== bvid) {
-        await updateTabState(tabId, { activeBvid: bvid, updatedAt: Date.now() });
-    }
-    await setTaskStatus(tabId, ["chat"], "processing");
+    const identity = resolvePartContext(bvid, taskContext);
+    if (!(identity.cid > 0)) throw createAppError("PART_IDENTITY_PENDING", "正在识别当前分 P，请稍候再试");
+    await setTaskStatus(tabId, ["chat"], "processing", "", identity);
     const resolvedSettings = await getResolvedSettings();
-    await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings);
-    const cache = await getCache(bvid);
+    await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings, identity);
+    const rawCache = await getCache(bvid);
+    const cache = getPartCacheForContext(rawCache, bvid, identity);
+    logPartScopeDiagnostic("task_local_read", {
+        feature: "chat",
+        requestedPartKey: identity.partKey,
+        requestedCid: identity.cid,
+        rootCid: Number(rawCache?.cid || 0),
+        selected: !!cache,
+        ...(cache ? buildPartScopeCacheMeta(cache) : {})
+    });
+    if (!cache) throw createMissingSubtitleError();
     const history = Array.isArray(cache.history) ? cache.history : [];
-    const key = `${bvid}|chat|${messageId}`;
+    const key = `${identity.partKey}|chat|${messageId}`;
     const startedAt = Date.now();
     logBackground.info("task_enqueue", { tab_id: tabId, bvid, tasks: ["chat"] });
     logBackground.info("task_start", { tab_id: tabId, bvid, task: "chat" });
@@ -3376,7 +3556,7 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
             logAIPromptBuilt({ bvid, task: "chat", provider: resolvedSettings.provider, mode: "chat", prompt, promptSettings: resolvedSettings.promptSettings });
             const aiRes = await callAIWithTimeout(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, { tabId });
             lastMetrics = aiRes.metrics || null;
-            await appendMetrics(bvid, tabId, "chat", aiRes.metrics);
+            await appendMetrics(bvid, tabId, "chat", aiRes.metrics, identity);
             await reportFeatureUsage("chat", bvid, resolvedSettings, aiRes.metrics);
             return aiRes.text.trim();
         });
@@ -3385,8 +3565,8 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
             { id: `u_${messageId}`, role: "user", content: text, createdAt: Date.now() },
             { id: `a_${messageId}`, role: "assistant", content: answer, metrics: lastMetrics || null, createdAt: Date.now() }
         ];
-        await mergeCacheByBvid(bvid, { history: mergedHistory, updatedAt: Date.now() });
-        await setTaskStatus(tabId, ["chat"], "done");
+        await mergeCacheByBvid(bvid, { cid: identity.cid, tid: identity.tid, history: mergedHistory, updatedAt: Date.now() });
+        await setTaskStatus(tabId, ["chat"], "done", "", identity);
         await reportClientUsageEvent({
             eventName: "task_success",
             featureName: "chat",
@@ -3425,7 +3605,7 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "") {
         } else {
             logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat" }));
         }
-        await setTaskStatus(tabId, ["chat"], status, error.message || "聊天失败");
+        await setTaskStatus(tabId, ["chat"], status, error.message || "聊天失败", identity);
         throw error;
     }
 }
@@ -3439,15 +3619,24 @@ async function runChatForPort(port, msg) {
     const tabState = await getTabState(tabId);
     const bvid = normalizeBvid(msg?.bvid || tabState?.activeBvid);
     if (!bvid) throw new Error("未获取到视频字幕");
-    if (normalizeBvid(tabState?.activeBvid) !== bvid) {
-        await updateTabState(tabId, { activeBvid: bvid, updatedAt: Date.now() });
-    }
-    await setTaskStatus(tabId, ["chat"], "processing");
+    const identity = resolvePartContext(bvid, normalizeTaskContext(msg?.taskContext));
+    if (!(identity.cid > 0)) throw createAppError("PART_IDENTITY_PENDING", "正在识别当前分 P，请稍候再试");
+    await setTaskStatus(tabId, ["chat"], "processing", "", identity);
     const resolvedSettings = await getResolvedSettings();
-    await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings);
-    const cache = await getCache(bvid);
+    await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings, identity);
+    const rawCache = await getCache(bvid);
+    const cache = getPartCacheForContext(rawCache, bvid, identity);
+    logPartScopeDiagnostic("task_local_read", {
+        feature: "chat_stream",
+        requestedPartKey: identity.partKey,
+        requestedCid: identity.cid,
+        rootCid: Number(rawCache?.cid || 0),
+        selected: !!cache,
+        ...(cache ? buildPartScopeCacheMeta(cache) : {})
+    });
+    if (!cache) throw createMissingSubtitleError();
     const history = Array.isArray(cache.history) ? cache.history : [];
-    const key = `${bvid}|chat_stream|${messageId}`;
+    const key = `${identity.partKey}|chat_stream|${messageId}`;
     const abortKey = `${tabId}|${messageId}`;
     const abortController = new AbortController();
     chatAbortControllers.set(abortKey, abortController);
@@ -3478,11 +3667,11 @@ async function runChatForPort(port, msg) {
             const aiRes = await callAIWithTimeoutStream(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, (delta) => {
                 const chunk = String(delta || "");
                 streamedAnswerText += chunk;
-                safePortPost(port, { type: "delta", messageId, delta: chunk });
+                safePortPost(port, { type: "delta", messageId, partKey: identity.partKey, delta: chunk });
 
             }, abortController, { tabId });
             lastMetrics = aiRes.metrics || null;
-            await appendMetrics(bvid, tabId, "chat", aiRes.metrics);
+            await appendMetrics(bvid, tabId, "chat", aiRes.metrics, identity);
             await reportFeatureUsage("chat", bvid, resolvedSettings, aiRes.metrics);
             return String(aiRes.text || streamedAnswerText || "").trim();
         });
@@ -3491,8 +3680,8 @@ async function runChatForPort(port, msg) {
             { id: `u_${messageId}`, role: "user", content: text, createdAt: Date.now() },
             { id: `a_${messageId}`, role: "assistant", content: answer, metrics: lastMetrics || null, createdAt: Date.now() }
         ];
-        await mergeCacheByBvid(bvid, { history: mergedHistory, updatedAt: Date.now() });
-        await setTaskStatus(tabId, ["chat"], "done");
+        await mergeCacheByBvid(bvid, { cid: identity.cid, tid: identity.tid, history: mergedHistory, updatedAt: Date.now() });
+        await setTaskStatus(tabId, ["chat"], "done", "", identity);
         await reportClientUsageEvent({
             eventName: "task_success",
             featureName: "chat",
@@ -3506,7 +3695,7 @@ async function runChatForPort(port, msg) {
             tabId,
             metadata: { stream: true }
         }, resolvedSettings);
-        safePortPost(port, { type: "done", messageId, answer, metrics: lastMetrics || null });
+        safePortPost(port, { type: "done", messageId, partKey: identity.partKey, answer, metrics: lastMetrics || null });
         logBackground.info("task_finish", { tab_id: tabId, bvid, tasks: ["chat_stream"] });
     } catch (error) {
         if (error?.code === "ABORTED") {
@@ -3527,8 +3716,8 @@ async function runChatForPort(port, msg) {
                 tabId,
                 ...buildUsageErrorPayload(error, { startedAt, errorCode: "ABORTED", metadata: { stream: true } })
             }, resolvedSettings);
-            await setTaskStatus(tabId, ["chat"], "done");
-            safePortPost(port, { type: "aborted", messageId });
+            await setTaskStatus(tabId, ["chat"], "done", "", identity);
+            safePortPost(port, { type: "aborted", messageId, partKey: identity.partKey });
             return;
         }
         const status = isTimeoutError(error) ? "timeout" : "error";
@@ -3554,8 +3743,8 @@ async function runChatForPort(port, msg) {
         } else {
             logBackground.error("task_abort", buildFailureLog(error, { tab_id: tabId, bvid, task: "chat_stream" }));
         }
-        await setTaskStatus(tabId, ["chat"], status, error.message || "聊天失败");
-        safePortPost(port, { type: "error", messageId, error: error.message || "聊天失败" });
+        await setTaskStatus(tabId, ["chat"], status, error.message || "聊天失败", identity);
+        safePortPost(port, { type: "error", messageId, partKey: identity.partKey, error: error.message || "聊天失败" });
         throw error;
     } finally {
         chatAbortControllers.delete(abortKey);
@@ -3564,10 +3753,10 @@ async function runChatForPort(port, msg) {
 
 async function requestTaskResult(bvid, task, settings, taskContext = {}) {
     const cloudTasks = ["summary", "segments", "rumors"].includes(task) ? ["subtitle", task] : [task];
-    await hydrateCloudCacheIfNeeded(bvid, cloudTasks, settings);
+    await hydrateCloudCacheIfNeeded(bvid, cloudTasks, settings, taskContext);
     const rawCache = await getCache(bvid);
-    const cache = selectCachePart(rawCache, { bvid, cid: Number(taskContext?.cid || 0) }) || rawCache;
-    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
+    const cache = getPartCacheForContext(rawCache, bvid, taskContext);
+    if (!cache) throw createMissingSubtitleError();
     const subtitlePayloadOptions = task === "segments"
         ? { purpose: "segments", mode: "quality" }
         : { purpose: "general" };
@@ -3682,7 +3871,7 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
             output_chars: String(aiRes.text || "").length
         }
     });
-    await appendMetrics(bvid, null, task, aiRes.metrics);
+    await appendMetrics(bvid, null, task, aiRes.metrics, taskContext);
     await reportFeatureUsage(task, bvid, settings, aiRes.metrics);
     if (task === "summary") {
         const summaryText = sanitizeSummaryOutput(aiRes.text);
@@ -4208,7 +4397,10 @@ async function retrySegmentsWithCompactPrompt({ tabId, bvid, cache, settings, ta
             processed_count: Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle.length : 0
         }
     });
-    await appendMetrics(bvid, null, "segments", aiRes.metrics);
+    await applySummarySegmentsResults(tabId, bvid, {
+        segments: { ok: true, data: normalized, error: null }
+    }, { taskContext });
+    await appendMetrics(bvid, null, "segments", aiRes.metrics, taskContext);
     await reportFeatureUsage("segments", bvid, settings, aiRes.metrics);
     logAI.info("segments_compact_retry_success", {
         bvid,
@@ -4427,34 +4619,38 @@ function resolveUsageErrorCode(error, fallback = "UNKNOWN") {
     return String(error?.code || fallback || "UNKNOWN").trim() || "UNKNOWN";
 }
 
-async function setTaskStatusMap(tabId, statusMap, lastError = "", errorMap = {}) {
-    const current = await getTabState(tabId);
-    const taskStatus = { ...(current?.taskStatus || {}) };
-    const taskErrors = { ...(current?.taskErrors || {}) };
-    for (const task of Object.keys(statusMap || {})) {
-        const status = statusMap[task];
-        if (!status) continue;
-        taskStatus[task] = status;
-        if (status === "error" || status === "timeout") {
-            const taskError = errorMap?.[task];
-            await captureTaskFailureToSentry(taskError, {
-                source: "task_status_update",
-                task,
-                tabId,
-                bvid: String(current?.activeBvid || ""),
-                status
-            });
-            taskErrors[task] = taskError ? serializeAppError(taskError) : {
-                message: String(lastError || "任务失败"),
-                code: "",
-                status: undefined,
-                retryAfterSec: undefined
-            };
-        } else {
-            delete taskErrors[task];
+async function setTaskStatusMap(tabId, statusMap, lastError = "", errorMap = {}, partContext = {}) {
+    return runWithTaskStateLock(tabId, async () => {
+        const current = await getTabState(tabId);
+        const identity = resolvePartContext(current?.activeBvid || "", partContext);
+        const partState = getTaskStateForPart(current, identity);
+        const taskStatus = { ...partState.taskStatus };
+        const taskErrors = { ...partState.taskErrors };
+        for (const task of Object.keys(statusMap || {})) {
+            const status = statusMap[task];
+            if (!status) continue;
+            taskStatus[task] = status;
+            if (status === "error" || status === "timeout") {
+                const taskError = errorMap?.[task];
+                await captureTaskFailureToSentry(taskError, {
+                    source: "task_status_update",
+                    task,
+                    tabId,
+                    bvid: identity.bvid,
+                    status
+                });
+                taskErrors[task] = taskError ? serializeAppError(taskError) : {
+                    message: String(lastError || "任务失败"),
+                    code: "",
+                    status: undefined,
+                    retryAfterSec: undefined
+                };
+            } else {
+                delete taskErrors[task];
+            }
         }
-    }
-    await updateTabState(tabId, { taskStatus, taskErrors, lastError, updatedAt: Date.now() });
+        await writeTaskStateForPart(tabId, current, identity, { taskStatus, taskErrors, taskRetryState: partState.taskRetryState, lastError });
+    });
 }
 
 async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
@@ -4467,6 +4663,7 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
     const tabState = tabId ? await getTabState(tabId).catch(() => null) : null;
     const contextCid = Number(options?.taskContext?.cid || tabState?.activeCid || 0);
     const contextTid = String(options?.taskContext?.tid || tabState?.activeTid || "").trim();
+    if (!(contextCid > 0)) throw createAppError("PART_IDENTITY_PENDING", "当前分 P 身份未就绪");
     if (contextCid > 0) cachePatch.cid = contextCid;
     if (contextTid) cachePatch.tid = contextTid;
     let lastError = "";
@@ -4503,14 +4700,14 @@ async function applySummarySegmentsResults(tabId, bvid, results, options = {}) {
         await mergeCacheByBvid(bvid, { ...cachePatch, updatedAt: Date.now() });
     }
     if (Object.keys(statusMap).length) {
-        await setTaskStatusMap(tabId, statusMap, lastError, errorMap);
+        await setTaskStatusMap(tabId, statusMap, lastError, errorMap, { bvid, cid: contextCid, tid: contextTid });
     }
 }
 
 async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskContext = {}) {
     const rawCache = await getCache(bvid);
-    const cache = selectCachePart(rawCache, { bvid, cid: Number(taskContext?.cid || 0) }) || rawCache;
-    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
+    const cache = getPartCacheForContext(rawCache, bvid, taskContext);
+    if (!cache) throw createMissingSubtitleError();
     const summarySubtitleOptions = { purpose: "general" };
     const segmentsSubtitleOptions = { purpose: "segments", mode: "quality" };
     const summarySubtitleText = getSubtitlePayload(cache, summarySubtitleOptions);
@@ -4530,6 +4727,8 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
         if (!forceWrite && now - Number(state.lastWriteAt || 0) < 350) return;
         state.lastWriteAt = now;
         await mergeCacheByBvid(bvid, {
+            cid: Number(taskContext.cid || 0),
+            tid: String(taskContext.tid || ""),
             summary: value,
             summaryCacheSource: "local",
             updatedAt: now
@@ -4554,7 +4753,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 summary: summaryExists ? results.summary : null,
                 segments: segmentsExists ? results.segments : null
             },
-            { keepProcessingTasks }
+            { keepProcessingTasks, taskContext }
         );
     }
 
@@ -4610,16 +4809,16 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                     throw createSummaryEmptyError();
                 }
                 await writeStreamingSummaryPartial(summaryText, partialState, true);
+                results.summary = { ok: true, data: summaryText, error: null };
+                await applySummarySegmentsResults(tabId, bvid, { summary: results.summary }, { taskContext });
                 logSummaryQualitySummary(bvid, summaryText, {
                     subtitleChars: summarySubtitleText.length,
                     promptChars: summaryPrompt.length,
                     promptMode: mode,
                     fromCache: false
                 });
-                await appendMetrics(bvid, null, "summary", aiRes.metrics);
+                await appendMetrics(bvid, null, "summary", aiRes.metrics, taskContext);
                 await reportFeatureUsage("summary", bvid, settings, aiRes.metrics);
-                results.summary = { ok: true, data: summaryText, error: null };
-                await applySummarySegmentsResults(tabId, bvid, { summary: results.summary });
                 logAI.info("ai_request_success", {
                     bvid,
                     task: "summary",
@@ -4638,7 +4837,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                 });
             } catch (error) {
                 results.summary = { ok: false, data: null, error };
-                await applySummarySegmentsResults(tabId, bvid, { summary: results.summary });
+                await applySummarySegmentsResults(tabId, bvid, { summary: results.summary }, { taskContext });
                 logAI.error("ai_request_failed", buildFailureLog(error, {
                     task: "summary",
                     bvid,
@@ -4765,10 +4964,10 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                         }
                         : getSubtitlePayloadMeta(cache, segmentsSubtitleText || summarySubtitleText, segmentsSubtitleOptions)
                 });
-                await appendMetrics(bvid, null, "segments", aiRes.metrics);
-                await reportFeatureUsage("segments", bvid, settings, aiRes.metrics);
                 results.segments = { ok: true, data: normalized, error: null };
-                await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
+                await applySummarySegmentsResults(tabId, bvid, { segments: results.segments }, { taskContext });
+                await appendMetrics(bvid, null, "segments", aiRes.metrics, taskContext);
+                await reportFeatureUsage("segments", bvid, settings, aiRes.metrics);
                 logAI.info("ai_request_success", {
                     bvid,
                     task: "segments",
@@ -4804,7 +5003,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                             originalError: segmentError
                         });
                         results.segments = { ok: true, data: normalized, error: null };
-                        await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
+                        await applySummarySegmentsResults(tabId, bvid, { segments: results.segments }, { taskContext });
                         return;
                     } catch (retryError) {
                         segmentError = normalizeSegmentsTaskError(retryError);
@@ -4820,7 +5019,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                     }
                 }
                 results.segments = { ok: false, data: null, error: segmentError };
-                await applySummarySegmentsResults(tabId, bvid, { segments: results.segments });
+                await applySummarySegmentsResults(tabId, bvid, { segments: results.segments }, { taskContext });
                 logAI.error("ai_request_failed", buildFailureLog(segmentError, {
                     task: "segments",
                     bvid,
@@ -4852,15 +5051,15 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
             });
         }
     } else {
-        await applySummarySegmentsResults(tabId, bvid, results);
+        await applySummarySegmentsResults(tabId, bvid, results, { taskContext });
     }
     return results;
 }
 
 async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, taskContext = {}) {
     const rawCache = await getCache(bvid);
-    const cache = selectCachePart(rawCache, { bvid, cid: Number(taskContext?.cid || 0) }) || rawCache;
-    if (!isCacheForTaskContext(cache, taskContext)) throw createMissingSubtitleError();
+    const cache = getPartCacheForContext(rawCache, bvid, taskContext);
+    if (!cache) throw createMissingSubtitleError();
     const subtitlePayloadOptions = { purpose: "segments", mode: "efficiency" };
     const subtitleText = getSubtitlePayload(cache, subtitlePayloadOptions);
     if (!subtitleText) throw createMissingSubtitleError();
@@ -4871,7 +5070,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             summary: { ok: true, data: String(cache.summary || ""), error: null },
             segments: { ok: true, data: cache.segments, error: null }
         };
-        await applySummarySegmentsResults(tabId, bvid, cached);
+        await applySummarySegmentsResults(tabId, bvid, cached, { taskContext });
         return cached;
     }
 
@@ -4947,7 +5146,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             if (!summaryText) return;
             summaryApplied = true;
             results.summary = { ok: true, data: summaryText, error: null };
-            summaryApplyPromise = applySummarySegmentsResults(tabId, bvid, { summary: results.summary }, { keepProcessingTasks: ["segments"] });
+            summaryApplyPromise = applySummarySegmentsResults(tabId, bvid, { summary: results.summary }, { keepProcessingTasks: ["segments"], taskContext });
         }, null, { tabId });
         await summaryApplyPromise;
         const fullText = String(streamBuffer || aiRes.text || "");
@@ -4965,7 +5164,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             const summaryText = sanitizeSummaryOutput(summarySection.content);
             if (summaryText) {
                 results.summary = { ok: true, data: summaryText, error: null };
-                await applySummarySegmentsResults(tabId, bvid, { summary: results.summary }, { keepProcessingTasks: ["segments"] });
+                await applySummarySegmentsResults(tabId, bvid, { summary: results.summary }, { keepProcessingTasks: ["segments"], taskContext });
             }
         }
         const segmentsSection = extractFirstProtocolSection(fullText, [
@@ -5008,7 +5207,6 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                     }
                 });
             } else {
-                const cache = await getCache(bvid);
                 const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency" });
                 if (normalized.length) {
                     results.segments = { ok: true, data: normalized, error: null };
@@ -5040,7 +5238,6 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             const jsonMatch = fullText.match(/\[\s*\{[\s\S]*?\}\s*\]/);
             if (jsonMatch) {
                 const parsed = robustJSONParse(jsonMatch[0]);
-                const cache = await getCache(bvid);
                 const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency", fallback: "loose_json_array" });
                 if (normalized.length) {
                     results.segments = { ok: true, data: normalized, error: null };
@@ -5123,7 +5320,6 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                         }
                     });
                 } else {
-                    const cache = await getCache(bvid);
                     const normalized = normalizeSegments(parsed, cache, { bvid, task: "segments", mode: "efficiency_fallback" });
                     if (normalized.length) {
                         results.segments = { ok: true, data: normalized, error: null };
@@ -5134,7 +5330,8 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                             mode: "efficiency_fallback",
                             subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions)
                         });
-                        await appendMetrics(bvid, null, "segments", fallbackRes.metrics);
+                        await applySummarySegmentsResults(tabId, bvid, { segments: results.segments }, { taskContext });
+                        await appendMetrics(bvid, null, "segments", fallbackRes.metrics, taskContext);
                         await reportFeatureUsage("segments", bvid, settings, fallbackRes.metrics);
                         logAI.info("segments_merged_parse_fallback_success", {
                             bvid,
@@ -5233,10 +5430,10 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                 fromCache: false
             });
         }
-        await appendMetrics(bvid, null, "summary", aiRes.metrics);
-        await appendMetrics(bvid, null, "segments", aiRes.metrics);
+        await applySummarySegmentsResults(tabId, bvid, results, { taskContext });
+        await appendMetrics(bvid, null, "summary", aiRes.metrics, taskContext);
+        await appendMetrics(bvid, null, "segments", aiRes.metrics, taskContext);
         await reportFeatureUsage("summary_segments_merged", bvid, settings, aiRes.metrics);
-        await applySummarySegmentsResults(tabId, bvid, results);
         logAI.info("ai_request_success", {
             bvid,
             task: "summary_segments_merged",
@@ -5261,7 +5458,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
             results.summary = { ok: false, data: null, error: finalError };
         }
         results.segments = { ok: false, data: null, error: finalError };
-        await applySummarySegmentsResults(tabId, bvid, results);
+        await applySummarySegmentsResults(tabId, bvid, results, { taskContext });
         await reportDailyFeatureUsage("summary_segments_merged", settings, {
             durationMs: Date.now() - requestStartedAt,
             tokens: 0
@@ -6373,35 +6570,95 @@ function runWithDedup(key, runner) {
     return promise;
 }
 
-async function setTaskStatus(tabId, tasks, status, lastError = "") {
-    const current = await getTabState(tabId);
-    const taskStatus = { ...(current?.taskStatus || {}) };
-    const taskErrors = { ...(current?.taskErrors || {}) };
-    const taskRetryState = { ...(current?.taskRetryState || {}) };
-    tasks.forEach((task) => {
-        taskStatus[task] = status;
-        if (status === "error" || status === "timeout") {
-            taskErrors[task] = {
-                message: String(lastError || "任务失败"),
-                code: "",
-                status: undefined,
-                retryAfterSec: undefined
-            };
-        } else {
-            delete taskErrors[task];
-        }
-        if (status === "idle") {
-            delete taskRetryState[task];
-        }
-    });
-    await updateTabState(tabId, { taskStatus, taskErrors, taskRetryState, lastError, updatedAt: Date.now() });
+function createIdleTaskStatus() {
+    return { summary: "idle", segments: "idle", rumors: "idle", chat: "idle" };
 }
 
-async function appendMetrics(bvid, tabId, task, metrics) {
-    const cache = await getCache(bvid);
+function getTaskStateForPart(tabState = {}, context = {}) {
+    const identity = resolvePartContext(context?.bvid || tabState?.activeBvid || "", context);
+    const stored = identity.partKey && tabState?.taskStateByPart?.[identity.partKey];
+    if (stored && typeof stored === "object") {
+        return {
+            taskStatus: { ...createIdleTaskStatus(), ...(stored.taskStatus || {}) },
+            taskErrors: { ...(stored.taskErrors || {}) },
+            taskRetryState: { ...(stored.taskRetryState || {}) },
+            lastError: String(stored.lastError || "")
+        };
+    }
+    const isActivePart = identity.partKey && identity.partKey === createVideoCachePartKey(tabState?.activeBvid, tabState?.activeCid);
+    return {
+        taskStatus: isActivePart ? { ...createIdleTaskStatus(), ...(tabState?.taskStatus || {}) } : createIdleTaskStatus(),
+        taskErrors: isActivePart ? { ...(tabState?.taskErrors || {}) } : {},
+        taskRetryState: isActivePart ? { ...(tabState?.taskRetryState || {}) } : {},
+        lastError: isActivePart ? String(tabState?.lastError || "") : ""
+    };
+}
+
+async function writeTaskStateForPart(tabId, current, identity, nextState) {
+    if (!identity?.partKey) {
+        await updateTabState(tabId, { ...nextState, updatedAt: Date.now() });
+        return;
+    }
+    const latest = await getTabState(tabId);
+    const taskStateByPart = {
+        ...(latest?.taskStateByPart || current?.taskStateByPart || {}),
+        [identity.partKey]: { ...nextState, updatedAt: Date.now() }
+    };
+    const activePartKey = createVideoCachePartKey(latest?.activeBvid, latest?.activeCid);
+    const visiblePatch = activePartKey === identity.partKey ? nextState : {};
+    await updateTabState(tabId, { taskStateByPart, ...visiblePatch, updatedAt: Date.now() });
+}
+
+function runWithTaskStateLock(tabId, runner) {
+    const key = String(tabId || 0);
+    const previous = taskStateWriteLocks.get(key) || Promise.resolve();
+    const next = previous.catch(() => {}).then(runner);
+    taskStateWriteLocks.set(key, next);
+    return next.finally(() => {
+        if (taskStateWriteLocks.get(key) === next) taskStateWriteLocks.delete(key);
+    });
+}
+
+async function setTaskStatus(tabId, tasks, status, lastError = "", partContext = {}) {
+    return runWithTaskStateLock(tabId, async () => {
+        const current = await getTabState(tabId);
+        const identity = resolvePartContext(current?.activeBvid || "", partContext);
+        const partState = getTaskStateForPart(current, identity);
+        const taskStatus = { ...partState.taskStatus };
+        const taskErrors = { ...partState.taskErrors };
+        const taskRetryState = { ...partState.taskRetryState };
+        tasks.forEach((task) => {
+            taskStatus[task] = status;
+            if (status === "error" || status === "timeout") {
+                taskErrors[task] = {
+                    message: String(lastError || "任务失败"),
+                    code: "",
+                    status: undefined,
+                    retryAfterSec: undefined
+                };
+            } else {
+                delete taskErrors[task];
+            }
+            if (status === "idle") {
+                delete taskRetryState[task];
+            }
+        });
+        await writeTaskStateForPart(tabId, current, identity, { taskStatus, taskErrors, taskRetryState, lastError });
+    });
+}
+
+async function appendMetrics(bvid, tabId, task, metrics, partContext = {}) {
+    const rawCache = await getCache(bvid);
+    const identity = resolvePartContext(bvid, partContext);
+    const cache = identity.cid > 0 ? (getPartCacheForContext(rawCache, bvid, identity) || {}) : rawCache;
     const cacheMetrics = Array.isArray(cache.metrics) ? cache.metrics : [];
     const entry = { task, ...metrics, at: Date.now() };
-    await mergeCacheByBvid(bvid, { metrics: [...cacheMetrics, entry].slice(-30), updatedAt: Date.now() });
+    await mergeCacheByBvid(bvid, {
+        ...(identity.cid > 0 ? { cid: identity.cid } : {}),
+        ...(identity.tid ? { tid: identity.tid } : {}),
+        metrics: [...cacheMetrics, entry].slice(-30),
+        updatedAt: Date.now()
+    });
     if (tabId) {
         const tabState = await getTabState(tabId);
         const tabMetrics = Array.isArray(tabState.metrics) ? tabState.metrics : [];
@@ -6430,13 +6687,54 @@ async function updateTabState(tabId, patch) {
         activeBvid: null,
         activeCid: 0,
         activeTid: null,
-        taskStatus: { summary: "idle", segments: "idle", rumors: "idle", chat: "idle" },
+        taskStatus: createIdleTaskStatus(),
+        taskErrors: {},
         taskRetryState: {},
         lastError: "",
         metrics: [],
         ...current,
         ...patch
     };
+    const routeIdentityChanged = Object.prototype.hasOwnProperty.call(patch || {}, "activeBvid")
+        || Object.prototype.hasOwnProperty.call(patch || {}, "activeCid");
+    if (routeIdentityChanged) {
+        const nextPartKey = createVideoCachePartKey(merged.activeBvid, merged.activeCid);
+        const previousPartKey = createVideoCachePartKey(current?.activeBvid, current?.activeCid);
+        const stored = nextPartKey && merged.taskStateByPart?.[nextPartKey];
+        const hasExplicitTaskState = Object.prototype.hasOwnProperty.call(patch || {}, "taskStatus");
+        const projected = hasExplicitTaskState
+            ? {
+                taskStatus: { ...createIdleTaskStatus(), ...(merged.taskStatus || {}) },
+                taskErrors: { ...(merged.taskErrors || {}) },
+                taskRetryState: { ...(merged.taskRetryState || {}) },
+                lastError: String(merged.lastError || "")
+            }
+            : stored
+            ? getTaskStateForPart(merged, { bvid: merged.activeBvid, cid: merged.activeCid, tid: merged.activeTid })
+            : nextPartKey && nextPartKey === previousPartKey
+                ? {
+                    taskStatus: { ...createIdleTaskStatus(), ...(merged.taskStatus || {}) },
+                    taskErrors: { ...(merged.taskErrors || {}) },
+                    taskRetryState: { ...(merged.taskRetryState || {}) },
+                    lastError: String(merged.lastError || "")
+                }
+                : {
+                    taskStatus: createIdleTaskStatus(),
+                    taskErrors: {},
+                    taskRetryState: {},
+                    lastError: ""
+                };
+        merged.taskStatus = projected.taskStatus;
+        merged.taskErrors = projected.taskErrors;
+        merged.taskRetryState = projected.taskRetryState;
+        merged.lastError = projected.lastError;
+        if (hasExplicitTaskState && nextPartKey) {
+            merged.taskStateByPart = {
+                ...(merged.taskStateByPart || {}),
+                [nextPartKey]: { ...projected, updatedAt: Date.now() }
+            };
+        }
+    }
     if (isEqualJSON(current, merged)) {
         tabStateCache.set(key, cloneData(merged));
         return merged;
@@ -6469,33 +6767,147 @@ async function getCache(bvid) {
     const legacyKey = `cache_${String(bvid || "").toUpperCase()}`;
     const keys = legacyKey !== key ? [key, legacyKey] : [key];
     const data = await chrome.storage.local.get(keys);
-    const value = data[key] || data[legacyKey] || {};
-    if (value && typeof value === "object") {
-        cacheMemory.set(normalized, cloneData(value));
-    }
+    const storedValue = data[key] || data[legacyKey] || {};
+    const value = normalizeVideoCacheDirectory(storedValue, normalized);
+    if (value && typeof value === "object") cacheMemory.set(normalized, cloneData(value));
     logCache.debug("cache_read", { key, found: !!value });
-    if (!data[key] && data[legacyKey]) {
-        await chrome.storage.local.set({ [key]: data[legacyKey] });
-        cacheMemory.set(normalized, cloneData(data[legacyKey]));
+    if (!isEqualJSON(storedValue, value) || (!data[key] && data[legacyKey])) {
+        await chrome.storage.local.set({ [key]: value });
+        if (legacyKey !== key && data[legacyKey]) await chrome.storage.local.remove(legacyKey);
+        logCache.info("cache_schema_migrated", { key, schema_version: VIDEO_CACHE_SCHEMA_VERSION });
+        logCacheDirectorySnapshot(value, "migration");
     }
     return value;
 }
 
-function buildDerivedCacheClearPatch() {
+const DERIVED_PART_CACHE_FIELDS = [
+    "summary", "segments", "rumors", "history", "metrics",
+    "summaryCacheSource", "segmentsCacheSource", "rumorsCacheSource",
+    "summaryModel", "segmentsModel", "rumorsModel",
+    "summaryUpdatedAt", "segmentsUpdatedAt", "rumorsUpdatedAt"
+];
+
+const LEGACY_ROOT_PART_FIELDS = [
+    "cid", "tid", "title",
+    "rawSubtitle", "processedSubtitle", "rawHash", "processedHash",
+    "subtitleSource", "subtitleLanguage", "subtitleLanguageLabel", "subtitleUrl",
+    "cloudSyncedAt", "updatedAt"
+];
+
+const TOP_LEVEL_SUBTITLE_CACHE_FIELDS = [
+    "cid", "tid", "title",
+    "rawSubtitle", "processedSubtitle", "rawHash", "processedHash",
+    "subtitleSource", "subtitleLanguage", "subtitleLanguageLabel", "subtitleUrl",
+    "cloudSyncedAt"
+];
+
+function clearDerivedPartCacheFields(part = {}) {
+    const next = cloneData(part || {});
+    DERIVED_PART_CACHE_FIELDS.forEach((field) => delete next[field]);
+    return next;
+}
+
+function normalizeVideoCacheDirectory(cache = {}, bvid = "") {
+    const normalizedBvid = normalizeBvid(cache?.bvid || bvid);
+    if (!normalizedBvid) return {};
+    const storedSchemaVersion = Number(cache?.schemaVersion || 0);
+    const hasTrustedPartScope = storedSchemaVersion >= 2;
+    const rawParts = cache?.parts && typeof cache.parts === "object" ? cache.parts : {};
+    const parts = {};
+    Object.entries(rawParts).forEach(([storedKey, rawPart]) => {
+        if (!rawPart || typeof rawPart !== "object") return;
+        const cid = Number(rawPart.cid || String(storedKey).split("::").pop() || 0);
+        if (!(cid > 0)) return;
+        const partKey = createVideoCachePartKey(normalizedBvid, cid);
+        const source = hasTrustedPartScope ? cloneData(rawPart) : clearDerivedPartCacheFields(rawPart);
+        parts[partKey] = {
+            ...source,
+            bvid: normalizedBvid,
+            cid,
+            updatedAt: Number(source.updatedAt || cache.updatedAt || Date.now())
+        };
+    });
+
+    if (!hasTrustedPartScope) {
+        const rootCid = Number(cache?.cid || 0);
+        if (rootCid > 0) {
+            const partKey = createVideoCachePartKey(normalizedBvid, rootCid);
+            const rootPart = LEGACY_ROOT_PART_FIELDS.reduce((acc, field) => {
+                if (Object.prototype.hasOwnProperty.call(cache, field)) acc[field] = cloneData(cache[field]);
+                return acc;
+            }, {});
+            parts[partKey] = {
+                ...(parts[partKey] || {}),
+                ...rootPart,
+                bvid: normalizedBvid,
+                cid: rootCid,
+                updatedAt: Number(rootPart.updatedAt || parts[partKey]?.updatedAt || Date.now())
+            };
+        }
+    }
+
+    const rootSubtitle = TOP_LEVEL_SUBTITLE_CACHE_FIELDS.reduce((acc, field) => {
+        if (Object.prototype.hasOwnProperty.call(cache, field)) acc[field] = cloneData(cache[field]);
+        return acc;
+    }, {});
+    const hasRootSubtitle = Array.isArray(rootSubtitle.rawSubtitle) && rootSubtitle.rawSubtitle.length
+        || Array.isArray(rootSubtitle.processedSubtitle) && rootSubtitle.processedSubtitle.length;
+    if (!hasRootSubtitle) {
+        const latestSubtitlePart = Object.values(parts)
+            .filter((part) => (
+                Array.isArray(part?.rawSubtitle) && part.rawSubtitle.length
+                || Array.isArray(part?.processedSubtitle) && part.processedSubtitle.length
+            ))
+            .sort((left, right) => Number(right?.updatedAt || 0) - Number(left?.updatedAt || 0))[0];
+        if (latestSubtitlePart) {
+            TOP_LEVEL_SUBTITLE_CACHE_FIELDS.forEach((field) => {
+                if (Object.prototype.hasOwnProperty.call(latestSubtitlePart, field)) {
+                    rootSubtitle[field] = cloneData(latestSubtitlePart[field]);
+                }
+            });
+        }
+    }
+
+    const subtitleVariants = cache?.subtitleVariants && typeof cache.subtitleVariants === "object"
+        ? cloneData(cache.subtitleVariants)
+        : {};
+    Object.values(parts).forEach((part) => {
+        if (!part?.subtitleVariants || typeof part.subtitleVariants !== "object") return;
+        Object.assign(subtitleVariants, cloneData(part.subtitleVariants));
+    });
+
     return {
-        summary: "",
-        segments: [],
-        rumors: null,
-        history: [],
-        metrics: [],
-        summaryCacheSource: "",
-        segmentsCacheSource: "",
-        rumorsCacheSource: "",
-        summaryModel: "",
-        segmentsModel: "",
-        rumorsModel: "",
-        updatedAt: Date.now()
+        bvid: normalizedBvid,
+        schemaVersion: VIDEO_CACHE_SCHEMA_VERSION,
+        ...rootSubtitle,
+        subtitleVariants,
+        updatedAt: Number(cache?.updatedAt || Date.now()),
+        parts
     };
+}
+
+function buildDerivedCacheClearPatch(cache = {}) {
+    const parts = cache?.parts && typeof cache.parts === "object"
+        ? Object.fromEntries(Object.entries(cache.parts).map(([partKey, part]) => [
+            partKey,
+            {
+                ...(part || {}),
+                summary: "",
+                segments: [],
+                rumors: null,
+                history: [],
+                metrics: [],
+                summaryCacheSource: "",
+                segmentsCacheSource: "",
+                rumorsCacheSource: "",
+                summaryModel: "",
+                segmentsModel: "",
+                rumorsModel: "",
+                updatedAt: Date.now()
+            }
+        ]))
+        : undefined;
+    return { ...(parts ? { parts } : {}), updatedAt: Date.now() };
 }
 
 function compareSemver(left, right) {
@@ -6591,13 +7003,23 @@ function isStorageQuotaError(error) {
 }
 
 function buildQuotaSafeCacheFallback(current = {}, merged = {}) {
-    const rawSubtitle = Array.isArray(merged?.rawSubtitle) ? merged.rawSubtitle : [];
-    const processedSubtitle = Array.isArray(merged?.processedSubtitle) ? merged.processedSubtitle : [];
-    if (!rawSubtitle.length || !processedSubtitle.length) return null;
+    const parts = merged?.parts && typeof merged.parts === "object" ? merged.parts : {};
+    let changed = false;
+    const safeParts = Object.fromEntries(Object.entries(parts).map(([partKey, part]) => {
+        const rawSubtitle = Array.isArray(part?.rawSubtitle) ? part.rawSubtitle : [];
+        const processedSubtitle = Array.isArray(part?.processedSubtitle) ? part.processedSubtitle : [];
+        if (!rawSubtitle.length || !processedSubtitle.length) return [partKey, part];
+        changed = true;
+        return [partKey, { ...part, processedSubtitle: [], processedHash: "", updatedAt: Date.now() }];
+    }));
+    const rootRawSubtitle = Array.isArray(merged?.rawSubtitle) ? merged.rawSubtitle : [];
+    const rootProcessedSubtitle = Array.isArray(merged?.processedSubtitle) ? merged.processedSubtitle : [];
+    const dropRootProcessed = rootRawSubtitle.length > 0 && rootProcessedSubtitle.length > 0;
+    if (!changed && !dropRootProcessed) return null;
     return {
         ...merged,
-        processedSubtitle: [],
-        processedHash: "",
+        ...(dropRootProcessed ? { processedSubtitle: [], processedHash: "" } : {}),
+        parts: safeParts,
         updatedAt: Date.now()
     };
 }
@@ -6608,54 +7030,90 @@ async function mergeCacheByBvid(bvid, patch) {
     const previous = cacheWriteLocks.get(normalized) || Promise.resolve();
     const next = previous.catch(() => {}).then(async () => {
         const key = `cache_${normalized}`;
-        const current = await getCache(normalized);
-        const merged = {
-            bvid: normalized,
-            cid: 0,
-            tid: null,
-            rawSubtitle: [],
-            processedSubtitle: [],
-            rawHash: "",
-            processedHash: "",
-            summary: "",
-            segments: [],
-            rumors: null,
-            history: [],
-            metrics: [],
-            updatedAt: Date.now(),
-            ...current,
-            ...patch
-        };
-        const patchCid = Number(patch?.cid || merged.cid || 0);
+        const current = normalizeVideoCacheDirectory(await getCache(normalized), normalized);
+        const parts = current.parts && typeof current.parts === "object" ? cloneData(current.parts) : {};
+        const patchCid = Object.prototype.hasOwnProperty.call(patch || {}, "cid")
+            ? Number(patch?.cid || 0)
+            : 0;
+        const subtitleWriteFields = [
+            "rawSubtitle", "processedSubtitle", "rawHash", "processedHash",
+            "subtitleSource", "subtitleLanguage", "subtitleLanguageLabel", "subtitleUrl"
+        ];
+        const hasSubtitlePatch = subtitleWriteFields.some((field) => Object.prototype.hasOwnProperty.call(patch || {}, field));
+        const rootSubtitlePatch = hasSubtitlePatch
+            ? TOP_LEVEL_SUBTITLE_CACHE_FIELDS.reduce((acc, field) => {
+                if (Object.prototype.hasOwnProperty.call(patch || {}, field)) acc[field] = cloneData(patch[field]);
+                return acc;
+            }, {})
+            : {};
+        const aiFields = ["summary", "segments", "rumors", "history"].filter((field) => Object.prototype.hasOwnProperty.call(patch || {}, field));
+        if (aiFields.length) {
+            logPartScopeDiagnostic("cache_write_target", {
+                bvid: normalized,
+                patchCid,
+                partKey: createVideoCachePartKey(normalized, patchCid),
+                aiFields,
+                patchSummaryLength: String(patch?.summary || "").length,
+                patchSegmentsCount: Array.isArray(patch?.segments) ? patch.segments.length : null,
+                patchRumorsPresent: Object.prototype.hasOwnProperty.call(patch || {}, "rumors") ? !!normalizeRumors(patch.rumors) : null,
+                patchHistoryCount: Array.isArray(patch?.history) ? patch.history.length : null
+            });
+        }
         if (patchCid > 0) {
             const partKey = createVideoCachePartKey(normalized, patchCid);
-            const parts = current.parts && typeof current.parts === "object" ? cloneData(current.parts) : {};
+            const currentPart = parts[partKey] && typeof parts[partKey] === "object" ? parts[partKey] : {};
+            const partPatch = getPartCacheFields(patch);
+            const currentRootCid = Number(current?.cid || 0);
+            const inheritedRootSubtitle = hasSubtitlePatch && (currentRootCid === 0 || currentRootCid === patchCid)
+                ? TOP_LEVEL_SUBTITLE_CACHE_FIELDS.reduce((acc, field) => {
+                    if (Object.prototype.hasOwnProperty.call(current, field)) acc[field] = cloneData(current[field]);
+                    return acc;
+                }, {})
+                : {};
             parts[partKey] = {
-                ...(parts[partKey] && typeof parts[partKey] === "object" ? parts[partKey] : {}),
-                ...getPartCacheFields(merged),
+                ...currentPart,
+                ...inheritedRootSubtitle,
+                ...partPatch,
                 bvid: normalized,
-                cid: patchCid
+                cid: patchCid,
+                tid: Object.prototype.hasOwnProperty.call(patch, "tid") ? patch.tid : (currentPart.tid || null),
+                updatedAt: Number(patch?.updatedAt || Date.now())
             };
-            merged.parts = parts;
             if (Array.isArray(patch?.rawSubtitle) && patch.rawSubtitle.length) {
-                const language = String(patch.subtitleLanguage || merged.subtitleLanguage || "default").trim() || "default";
+                const language = String(patch.subtitleLanguage || parts[partKey].subtitleLanguage || "default").trim() || "default";
                 const subtitleKey = createSubtitleCacheKey({ bvid: normalized, cid: patchCid, language });
-                const variants = current.subtitleVariants && typeof current.subtitleVariants === "object" ? cloneData(current.subtitleVariants) : {};
+                const variants = current.subtitleVariants && typeof current.subtitleVariants === "object"
+                    ? cloneData(current.subtitleVariants)
+                    : {};
                 variants[subtitleKey] = {
                     bvid: normalized,
                     cid: patchCid,
                     language,
-                    languageLabel: String(patch.subtitleLanguageLabel || merged.subtitleLanguageLabel || language),
+                    languageLabel: String(patch.subtitleLanguageLabel || parts[partKey].subtitleLanguageLabel || language),
                     subtitleUrl: String(patch.subtitleUrl || ""),
                     rawSubtitle: cloneData(patch.rawSubtitle),
-                    processedSubtitle: cloneData(Array.isArray(merged.processedSubtitle) ? merged.processedSubtitle : []),
-                    rawHash: String(merged.rawHash || ""),
-                    processedHash: String(merged.processedHash || ""),
+                    processedSubtitle: cloneData(Array.isArray(parts[partKey].processedSubtitle) ? parts[partKey].processedSubtitle : []),
+                    rawHash: String(parts[partKey].rawHash || ""),
+                    processedHash: String(parts[partKey].processedHash || ""),
                     updatedAt: Date.now()
                 };
-                merged.subtitleVariants = variants;
+                rootSubtitlePatch.subtitleVariants = variants;
             }
+        } else if (patch?.parts && typeof patch.parts === "object") {
+            Object.keys(parts).forEach((partKey) => delete parts[partKey]);
+            Object.assign(parts, cloneData(patch.parts));
+        } else if (!hasSubtitlePatch) {
+            throw new Error("写入分 P 缓存时缺少 cid");
         }
+        const merged = {
+            ...current,
+            ...rootSubtitlePatch,
+            bvid: normalized,
+            schemaVersion: VIDEO_CACHE_SCHEMA_VERSION,
+            subtitleVariants: rootSubtitlePatch.subtitleVariants || current.subtitleVariants || {},
+            updatedAt: Number(patch?.updatedAt || Date.now()),
+            parts
+        };
         if (isEqualJSON(current, merged)) {
             cacheMemory.set(normalized, cloneData(merged));
             return merged;
@@ -6666,6 +7124,7 @@ async function mergeCacheByBvid(bvid, patch) {
             logCache.debug("cache_write", { key });
             logCache.info("cache_merge", { key, fields: Object.keys(patch || {}) });
             logBackground.debug("storage_update", { key });
+            logCacheDirectorySnapshot(merged, "write");
             return merged;
         } catch (error) {
             if (!isStorageQuotaError(error)) throw error;
@@ -6677,7 +7136,7 @@ async function mergeCacheByBvid(bvid, patch) {
                 key,
                 fields: Object.keys(patch || {}),
                 dropped_fields: ["processedSubtitle", "processedHash"],
-                raw_count: Array.isArray(fallback.rawSubtitle) ? fallback.rawSubtitle.length : 0
+                part_count: Object.keys(fallback.parts || {}).length
             });
             logBackground.warn("storage_quota_fallback", {
                 bvid: normalized,
@@ -6812,7 +7271,7 @@ function getTaskModelName(settings) {
 }
 
 function buildCloudSelectColumns(tasks) {
-    const columns = new Set(["bvid", "updated_at"]);
+    const columns = new Set(["bvid", "cid", "updated_at"]);
     (Array.isArray(tasks) ? tasks : []).forEach((task) => {
         if (task === "subtitle") {
             [
@@ -6890,41 +7349,93 @@ function buildTaskSourcePatch(tasks, source) {
     return patch;
 }
 
-async function fetchCloudVideoCacheRow(bvid, tasks, settings) {
+function buildCloudPartFilter(bvid, partContext = {}) {
+    const identity = resolvePartContext(bvid, partContext);
+    return {
+        identity,
+        params: {
+            bvid: `eq.${identity.bvid}`,
+            cid: identity.cid > 0 ? `eq.${identity.cid}` : "is.null"
+        }
+    };
+}
+
+async function fetchCloudVideoCacheRow(bvid, tasks, settings, partContext = {}) {
     if (!isSupabaseEnabled(settings)) return null;
-    const normalizedBvid = normalizeBvid(bvid);
-    if (!normalizedBvid) return null;
+    const { identity, params } = buildCloudPartFilter(bvid, partContext);
+    if (!identity.bvid || !(identity.cid > 0)) return null;
+    logPartScopeDiagnostic("cloud_read_query", {
+        bvid: identity.bvid,
+        cid: identity.cid || null,
+        partKey: identity.partKey,
+        tasks,
+        filters: params
+    });
     const rows = await supabaseSelect(settings, settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE, {
         select: buildCloudSelectColumns(tasks).join(","),
-        bvid: `eq.${normalizedBvid}`,
+        ...params,
         limit: "1"
     }, {
         requestName: "cloud_video_cache_fetch",
         errorMessage: "Supabase 查询失败"
     });
-    return Array.isArray(rows) && rows.length ? rows[0] : null;
+    const row = Array.isArray(rows) && rows.length ? rows[0] : null;
+    logPartScopeDiagnostic("cloud_read_result", {
+        bvid: identity.bvid,
+        requestedCid: identity.cid || null,
+        returnedCid: Number(row?.cid || 0) || null,
+        matched: !!row,
+        tasks,
+        ...(row ? buildPartScopeCacheMeta(buildCloudPatchFromRow(row, tasks)) : {})
+    });
+    return row;
 }
 
-async function hydrateCloudCacheIfNeeded(bvid, tasks, settings) {
-    const current = await getCache(bvid);
+async function hydrateCloudCacheIfNeeded(bvid, tasks, settings, partContext = {}) {
+    const identity = resolvePartContext(bvid, partContext);
+    if (!(identity.cid > 0)) {
+        logPartScopeDiagnostic("cloud_hydrate_deferred", {
+            bvid: identity.bvid,
+            reason: "route_cid_pending",
+            requestedTasks: Array.isArray(tasks) ? tasks : []
+        }, `hydrate-deferred:${identity.bvid}`);
+        return { hydratedTasks: [], cache: null };
+    }
+    const rawCache = await getCache(bvid);
+    const current = getPartCacheForContext(rawCache, bvid, identity) || {};
     if (!isSupabaseEnabled(settings)) return { hydratedTasks: [], cache: current };
     if (await shouldSkipCloudCacheRead(bvid, settings)) return { hydratedTasks: [], cache: current };
-    const missingTasks = (Array.isArray(tasks) ? tasks : []).filter((task) => !hasTaskResult(current, task));
+    const requestedTasks = Array.isArray(tasks) ? tasks : [];
+    const missingTasks = requestedTasks.filter((task) => !hasTaskResult(current, task));
+    logPartScopeDiagnostic("cloud_hydrate_decision", {
+        bvid: identity.bvid,
+        cid: identity.cid || null,
+        partKey: identity.partKey,
+        requestedTasks,
+        missingTasks,
+        ...buildPartScopeCacheMeta(current)
+    }, `hydrate:${identity.partKey || identity.bvid}:${requestedTasks.join(",")}`);
     if (!missingTasks.length) return { hydratedTasks: [], cache: current };
     try {
-        const row = await fetchCloudVideoCacheRow(bvid, missingTasks, settings);
+        const row = await fetchCloudVideoCacheRow(bvid, missingTasks, settings, identity);
         if (!row) return { hydratedTasks: [], cache: current };
         const patch = buildCloudPatchFromRow(row, missingTasks);
         const hydratedTasks = missingTasks.filter((task) => hasTaskResult(patch, task));
         if (!hydratedTasks.length) return { hydratedTasks: [], cache: current };
         await mergeCacheByBvid(bvid, {
+            ...(identity.cid > 0 ? { cid: identity.cid } : {}),
+            ...(identity.tid ? { tid: identity.tid } : {}),
             ...patch,
             ...buildTaskSourcePatch(hydratedTasks, "cloud"),
             cloudSyncedAt: Date.now(),
             updatedAt: Date.now()
         });
         logCache.info("cloud_cache_backfill", { bvid: normalizeBvid(bvid), tasks: hydratedTasks });
-        return { hydratedTasks, cache: await getCache(bvid) };
+        const latest = await getCache(bvid);
+        return {
+            hydratedTasks,
+            cache: getPartCacheForContext(latest, bvid, identity) || {}
+        };
     } catch (error) {
         logBackground.error("cloud_cache_fetch_fail", {
             bvid: normalizeBvid(bvid),
@@ -6935,8 +7446,10 @@ async function hydrateCloudCacheIfNeeded(bvid, tasks, settings) {
     }
 }
 
-function buildSupabaseVideoPatch(bvid, settings, patch) {
+function buildSupabaseVideoPatch(bvid, settings, patch, partContext = {}) {
     const row = { bvid: normalizeBvid(bvid) };
+    const identity = resolvePartContext(bvid, partContext);
+    if (identity.cid > 0) row.cid = identity.cid;
     const modelName = getTaskModelName(settings);
     if (Object.prototype.hasOwnProperty.call(patch, "title")) {
         const title = String(patch.title || "").trim();
@@ -7012,16 +7525,17 @@ function filterCloudFeaturePatch(patch) {
     return next;
 }
 
-async function fetchVideoCacheMetaRow(bvid, settings, columns = []) {
+async function fetchVideoCacheMetaRow(bvid, settings, columns = [], partContext = {}) {
     if (!isSupabaseEnabled(settings)) return null;
-    const normalizedBvid = normalizeBvid(bvid);
-    const fieldList = ["bvid", ...(Array.isArray(columns) ? columns : [])]
+    const { identity, params } = buildCloudPartFilter(bvid, partContext);
+    const fieldList = ["bvid", "cid", ...(Array.isArray(columns) ? columns : [])]
         .filter(Boolean)
         .filter((value, index, arr) => arr.indexOf(value) === index);
-    if (!normalizedBvid) return null;
+    if (!identity.bvid || !(identity.cid > 0)) return null;
     const table = settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE;
     logCache.debug("cloud_meta_fetch_start", {
-        bvid: normalizedBvid,
+        bvid: identity.bvid,
+        cid: identity.cid || null,
         detail: {
             table,
             fields: fieldList
@@ -7029,7 +7543,7 @@ async function fetchVideoCacheMetaRow(bvid, settings, columns = []) {
     });
     const rows = await supabaseSelect(settings, table, {
         select: fieldList.join(","),
-        bvid: `eq.${normalizedBvid}`,
+        ...params,
         limit: "1"
     }, {
         requestName: "video_cache_meta_fetch",
@@ -7037,7 +7551,8 @@ async function fetchVideoCacheMetaRow(bvid, settings, columns = []) {
     });
     const row = Array.isArray(rows) && rows.length ? rows[0] : null;
     logCache.debug("cloud_meta_fetch_success", {
-        bvid: normalizedBvid,
+        bvid: identity.bvid,
+        cid: identity.cid || null,
         detail: {
             table,
             found: !!row,
@@ -7048,7 +7563,7 @@ async function fetchVideoCacheMetaRow(bvid, settings, columns = []) {
 }
 
 function getVideoCacheUploadFields(row) {
-    return Object.keys(row || {}).filter((key) => key !== "bvid" && key !== "updated_at");
+    return Object.keys(row || {}).filter((key) => key !== "bvid" && key !== "cid" && key !== "updated_at");
 }
 
 function isSupabaseDuplicateKeyError(error) {
@@ -7065,6 +7580,11 @@ async function saveVideoCacheRow(bvid, settings, row, existingRow = null) {
     const normalizedBvid = normalizeBvid(bvid);
     if (!isSupabaseEnabled(settings) || !normalizedBvid || !row || typeof row !== "object") return false;
     const table = settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE;
+    const rowCid = Number(row?.cid || 0);
+    const rowFilter = {
+        bvid: `eq.${normalizedBvid}`,
+        cid: rowCid > 0 ? `eq.${rowCid}` : "is.null"
+    };
     const hasExisting = !!(existingRow && typeof existingRow === "object" && String(existingRow.bvid || "").trim());
     const method = hasExisting ? "PATCH" : "POST";
     const fields = getVideoCacheUploadFields(row);
@@ -7078,10 +7598,18 @@ async function saveVideoCacheRow(bvid, settings, row, existingRow = null) {
             fields
         }
     });
+    logPartScopeDiagnostic("cloud_write_target", {
+        bvid: normalizedBvid,
+        cid: rowCid || null,
+        partKey: createVideoCachePartKey(normalizedBvid, rowCid),
+        method,
+        filters: method === "PATCH" ? rowFilter : {},
+        fields
+    });
     try {
         await supabaseWrite(settings, table, row, {
             method,
-            params: hasExisting ? { bvid: `eq.${normalizedBvid}` } : {},
+            params: hasExisting ? rowFilter : {},
             requestName: "video_cache_write",
             errorMessage: `video_cache ${method} 失败`
         });
@@ -7108,7 +7636,7 @@ async function saveVideoCacheRow(bvid, settings, row, existingRow = null) {
             });
             await supabaseWrite(settings, table, row, {
                 method: "PATCH",
-                params: { bvid: `eq.${normalizedBvid}` },
+                params: rowFilter,
                 requestName: "video_cache_write_retry_patch",
                 errorMessage: "video_cache POST 冲突后 PATCH 失败"
             });
@@ -7142,15 +7670,21 @@ async function saveVideoCacheRow(bvid, settings, row, existingRow = null) {
 
 async function persistCloudSubtitlePatch(bvid, settings, cache, extra = {}) {
     if (!isSupabaseEnabled(settings)) return false;
-    const normalizedBvid = normalizeBvid(bvid);
-    if (!normalizedBvid) return false;
-    const rawSubtitle = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
-    const processedSubtitle = Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle : [];
-    const subtitleSource = String(extra.subtitleSource || cache?.subtitleSource || "");
+    const identity = resolvePartContext(bvid, {
+        cid: Number(extra?.cid || cache?.cid || 0),
+        tid: String(extra?.tid || cache?.tid || "")
+    });
+    if (!identity.bvid || !(identity.cid > 0)) return false;
+    const partCache = selectCachePart(cache, identity);
+    if (!partCache) return false;
+    const rawSubtitle = Array.isArray(partCache?.rawSubtitle) ? partCache.rawSubtitle : [];
+    const processedSubtitle = Array.isArray(partCache?.processedSubtitle) ? partCache.processedSubtitle : [];
+    const subtitleSource = String(extra.subtitleSource || partCache?.subtitleSource || "");
     const minRows = isAsrSubtitleSource(subtitleSource) ? 1 : 10;
     if (!hasEnoughSubtitleRows(rawSubtitle, minRows) || !hasEnoughSubtitleRows(processedSubtitle, minRows)) {
         logCache.info("cloud_subtitle_skip", {
-            bvid: normalizedBvid,
+            bvid: identity.bvid,
+            cid: identity.cid,
             raw_count: rawSubtitle.length,
             processed_count: processedSubtitle.length,
             reason: "subtitle_too_short",
@@ -7160,20 +7694,21 @@ async function persistCloudSubtitlePatch(bvid, settings, cache, extra = {}) {
         return false;
     }
     try {
-        const current = await fetchVideoCacheMetaRow(normalizedBvid, settings, ["subtitle_upload_count"]);
-        const row = buildSupabaseVideoPatch(normalizedBvid, settings, {
-            title: String(extra.title || cache?.title || ""),
+        const current = await fetchVideoCacheMetaRow(identity.bvid, settings, ["subtitle_upload_count"], identity);
+        const row = buildSupabaseVideoPatch(identity.bvid, settings, {
+            title: String(extra.title || partCache?.title || ""),
             rawSubtitle,
             processedSubtitle,
             subtitleSource,
             subtitleUploadCount: Math.max(0, Number(current?.subtitle_upload_count || 0)) + 1,
             subtitleUploadedAt: new Date().toISOString()
-        });
-        const meaningfulKeys = Object.keys(row).filter((key) => key !== "bvid" && key !== "updated_at");
+        }, identity);
+        const meaningfulKeys = getVideoCacheUploadFields(row);
         if (!meaningfulKeys.length) return false;
         logCache.info("cloud_subtitle_write_start", {
             task: "cloud",
-            bvid: normalizedBvid,
+            bvid: identity.bvid,
+            cid: identity.cid,
             detail: {
                 fields: meaningfulKeys,
                 raw_count: rawSubtitle.length,
@@ -7182,10 +7717,11 @@ async function persistCloudSubtitlePatch(bvid, settings, cache, extra = {}) {
                 next_upload_count: row.subtitle_upload_count || 0
             }
         });
-        await saveVideoCacheRow(normalizedBvid, settings, row, current);
+        await saveVideoCacheRow(identity.bvid, settings, row, current);
         logCache.info("cloud_subtitle_write", {
             task: "cloud",
-            bvid: normalizedBvid,
+            bvid: identity.bvid,
+            cid: identity.cid,
             detail: {
                 fields: meaningfulKeys,
                 raw_count: rawSubtitle.length,
@@ -7197,14 +7733,15 @@ async function persistCloudSubtitlePatch(bvid, settings, cache, extra = {}) {
         return true;
     } catch (error) {
         logBackground.error("cloud_subtitle_write_fail", {
-            bvid: normalizedBvid,
+            bvid: identity.bvid,
+            cid: identity.cid,
             error: error.message || "cloud subtitle write failed"
         });
         return false;
     }
 }
 
-async function incrementCloudVideoCallCount(bvid, settings, task) {
+async function incrementCloudVideoCallCount(bvid, settings, task, partContext = {}) {
     if (!isSupabaseEnabled(settings)) return false;
     const normalizedTask = String(task || "").trim();
     const fieldMap = {
@@ -7213,22 +7750,23 @@ async function incrementCloudVideoCallCount(bvid, settings, task) {
         rumors: "rumors_call_count"
     };
     const targetField = fieldMap[normalizedTask];
-    const normalizedBvid = normalizeBvid(bvid);
-    if (!targetField || !normalizedBvid) return false;
+    const identity = resolvePartContext(bvid, partContext);
+    if (!targetField || !identity.bvid || !(identity.cid > 0)) return false;
     try {
-        const current = await fetchVideoCacheMetaRow(normalizedBvid, settings, [targetField]);
+        const current = await fetchVideoCacheMetaRow(identity.bvid, settings, [targetField], identity);
         const nextValue = Math.max(0, Number(current?.[targetField] || 0)) + 1;
         const patchKey = normalizedTask === "summary"
             ? "summaryCallCount"
             : normalizedTask === "segments"
                 ? "segmentsCallCount"
                 : "rumorsCallCount";
-        const row = buildSupabaseVideoPatch(normalizedBvid, settings, {
+        const row = buildSupabaseVideoPatch(identity.bvid, settings, {
             [patchKey]: nextValue
-        });
+        }, identity);
         logCache.info("cloud_call_count_increment_start", {
             task: "cloud",
-            bvid: normalizedBvid,
+            bvid: identity.bvid,
+            cid: identity.cid,
             detail: {
                 feature: normalizedTask,
                 field: targetField,
@@ -7236,10 +7774,11 @@ async function incrementCloudVideoCallCount(bvid, settings, task) {
                 next_value: nextValue
             }
         });
-        await saveVideoCacheRow(normalizedBvid, settings, row, current);
+        await saveVideoCacheRow(identity.bvid, settings, row, current);
         logCache.info("cloud_call_count_increment", {
             task: "cloud",
-            bvid: normalizedBvid,
+            bvid: identity.bvid,
+            cid: identity.cid,
             detail: {
                 feature: normalizedTask,
                 field: targetField,
@@ -7249,7 +7788,8 @@ async function incrementCloudVideoCallCount(bvid, settings, task) {
         return true;
     } catch (error) {
         logBackground.error("cloud_call_count_increment_fail", {
-            bvid: normalizedBvid,
+            bvid: identity.bvid,
+            cid: identity.cid,
             task: normalizedTask,
             error: error.message || "cloud call count increment failed"
         });
@@ -7257,16 +7797,19 @@ async function incrementCloudVideoCallCount(bvid, settings, task) {
     }
 }
 
-async function persistCloudFeaturePatch(bvid, settings, patch) {
+async function persistCloudFeaturePatch(bvid, settings, patch, partContext = {}) {
     if (!isSupabaseEnabled(settings)) return false;
+    const identity = resolvePartContext(bvid, partContext);
+    if (!identity.bvid || !(identity.cid > 0)) return false;
     const filteredPatch = filterCloudFeaturePatch(patch || {});
-    const cache = await getCache(bvid);
+    const rawCache = await getCache(bvid);
+    const cache = getPartCacheForContext(rawCache, bvid, identity) || {};
     const title = String(cache?.title || "").trim();
     const row = buildSupabaseVideoPatch(bvid, settings, {
         ...filteredPatch,
         ...(title ? { title } : {})
-    });
-    const meaningfulKeys = Object.keys(row).filter((key) => key !== "bvid" && key !== "updated_at");
+    }, identity);
+    const meaningfulKeys = getVideoCacheUploadFields(row);
     if (!row.bvid || !meaningfulKeys.length) {
         logCache.info("cloud_cache_skip", {
             bvid: normalizeBvid(bvid),
@@ -7276,10 +7819,11 @@ async function persistCloudFeaturePatch(bvid, settings, patch) {
         return false;
     }
     try {
-        const current = await fetchVideoCacheMetaRow(row.bvid, settings, ["updated_at"]);
+        const current = await fetchVideoCacheMetaRow(row.bvid, settings, ["updated_at"], identity);
         logCache.info("cloud_feature_write_start", {
             task: "cloud",
             bvid: row.bvid,
+            cid: identity.cid,
             detail: {
                 fields: meaningfulKeys,
                 feature_fields: Object.keys(filteredPatch),
@@ -7290,6 +7834,7 @@ async function persistCloudFeaturePatch(bvid, settings, patch) {
         logCache.info("cloud_cache_write", {
             task: "cloud",
             bvid: row.bvid,
+            cid: identity.cid,
             detail: {
                 fields: meaningfulKeys,
                 feature_fields: Object.keys(filteredPatch),
@@ -7300,6 +7845,7 @@ async function persistCloudFeaturePatch(bvid, settings, patch) {
     } catch (error) {
         logBackground.error("cloud_cache_write_fail", {
             bvid: row.bvid,
+            cid: identity.cid,
             fields: meaningfulKeys,
             error: error.message || "cloud write failed"
         });
@@ -7325,7 +7871,8 @@ async function getUsageVideoContext(bvid, metrics = {}) {
     let title = normalizeUsageTitle(metrics?.title || "");
     if (normalizedBvid && !title) {
         try {
-            const cache = await getCache(normalizedBvid);
+            const directory = await getCache(normalizedBvid);
+            const cache = selectCachePart(directory, { bvid: normalizedBvid, cid: Number(metrics?.cid || 0) });
             title = normalizeUsageTitle(cache?.title || "");
         } catch (_) {}
     }

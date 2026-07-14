@@ -274,6 +274,7 @@ const {
 const {
     buildSrtContent,
     buildTimestampedSubtitleText,
+    getActiveSubtitleIndex,
     getRawSubtitlePlainText: getRawSubtitlePlainTextFromCache,
     getRawSubtitleRows: getRawSubtitleRowsFromCache
 } = globalThis.BilitatoContentSubtitle || {};
@@ -297,7 +298,6 @@ const {
     isStorageChangeStateDirty: isStorageChangeStateDirtyFromPage,
     normalizeSubtitleOptions: normalizeSubtitleOptionsFromPage,
     pickSubtitle: pickSubtitleFromPage,
-    resolveCidFromState,
     resolveCurrentBvidFromState
 } = globalThis.BilitatoContentPage || {};
 const {
@@ -405,6 +405,7 @@ const appState = {
         statusText: "",
         startedAt: 0
     },
+    asrRequestDispatched: false,
     transcriptionDeclinedBvid: "",
     transcriptionSuppressUntil: 0,
     transcriptionSuppressBvid: "",
@@ -430,6 +431,7 @@ const appState = {
     pseudoProgressValue: 0,
     pseudoProgressStartedAt: 0,
     pseudoProgressTimer: null,
+    visibleProgressCompletedTaskIds: new Set(),
     saveStatusTimer: null,
     navActionActive: "",
     navActionActiveTimer: null,
@@ -501,22 +503,226 @@ function logSubtitleDiagnostic(event, detail = {}) {
     } catch (_) {}
 }
 
+const partScopeDiagnosticSignatures = new Map();
+
+function buildPartScopeUiMeta(cache = appState.cache) {
+    return {
+        routeBvid: normalizeBvidCase(resolveCurrentBvid() || "").toLowerCase(),
+        routeP: String(getRoutePartId() || ""),
+        routeCid: Number(resolveCid() || 0),
+        tabStateBvid: normalizeBvidCase(appState.tabState?.activeBvid || "").toLowerCase(),
+        tabStateCid: Number(appState.tabState?.activeCid || 0),
+        tabStateTid: String(appState.tabState?.activeTid || ""),
+        cacheBvid: normalizeBvidCase(cache?.bvid || "").toLowerCase(),
+        cacheCid: Number(cache?.cid || 0),
+        cacheTid: String(cache?.tid || ""),
+        hasSummary: !!String(cache?.summary || "").trim(),
+        segmentsCount: Array.isArray(cache?.segments) ? cache.segments.length : 0,
+        hasRumors: !!(cache?.rumors && (String(cache.rumors?.overview || "").trim() || Array.isArray(cache.rumors?.claims) && cache.rumors.claims.length)),
+        historyCount: Array.isArray(cache?.history) ? cache.history.length : 0,
+        summarySource: String(cache?.summaryCacheSource || ""),
+        segmentsSource: String(cache?.segmentsCacheSource || ""),
+        rumorsSource: String(cache?.rumorsCacheSource || ""),
+        availablePartKeys: cache?.parts && typeof cache.parts === "object" ? Object.keys(cache.parts).slice(0, 50) : []
+    };
+}
+
+function logPartScopeDiagnostic(event, detail = {}, dedupeKey = "") {
+    if (!isDebugLoggingEnabled()) return;
+    const payload = { event, ts: Date.now(), layer: "content", ...buildPartScopeUiMeta(), ...detail };
+    if (dedupeKey) {
+        const signature = JSON.stringify(payload, (key, value) => key === "ts" ? undefined : value);
+        if (partScopeDiagnosticSignatures.get(dedupeKey) === signature) return;
+        partScopeDiagnosticSignatures.set(dedupeKey, signature);
+    }
+    console.log("[PART_SCOPE_DIAG]", payload);
+}
+
 const subtitleUiCoordinator = {
     routeKey: "",
     phase: "idle",
     generation: 0,
+    rows: [],
+    rowsRouteKey: "",
+    rowsSource: "",
+    rowsCid: 0,
+    stateVersion: 0,
+    renderedStateSignature: "",
+    renderScheduled: false,
+    initialAlignmentPending: false,
     timeoutTimer: null,
-    lastRenderSignature: "",
     lastCacheApplySignature: "",
     scrollUnlockAt: 0,
     displaySource: "",
-    displayCommitted: false,
     pendingRequestUrls: new Set(),
     controlProbeTimer: null,
+    controlProbeObserver: null,
     lastRouteSwitchKey: "",
     lastRouteSwitchAt: 0
 };
 const playInfoWaiters = new Set();
+
+function getCurrentSubtitleRouteKey() {
+    return `${String(getBvidFromUrl(location.href) || "").toLowerCase()}|${String(getRoutePartId() || "")}`;
+}
+
+function getCurrentSubtitleStateRows() {
+    const routeKey = getCurrentSubtitleRouteKey();
+    if (subtitleUiCoordinator.rowsRouteKey === routeKey) {
+        return Array.isArray(subtitleUiCoordinator.rows) ? subtitleUiCoordinator.rows : [];
+    }
+    return [];
+}
+
+function getSubtitleRowsStateDigest(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    return makeShortDigest(list.map((row) => [
+        Number(row?.start ?? row?.from ?? 0),
+        Number(row?.end ?? row?.to ?? 0),
+        String(row?.text ?? row?.content ?? "")
+    ].join("\u0001")).join("\u0002"));
+}
+
+function getSubtitlePresentationSignature() {
+    const rows = getCurrentSubtitleStateRows();
+    const rowsMeta = getSubtitleDiagnosticRowsMeta(rows);
+    const transcription = getTranscriptionState();
+    return [
+        getCurrentSubtitleRouteKey(),
+        subtitleUiCoordinator.generation,
+        subtitleUiCoordinator.stateVersion,
+        subtitleUiCoordinator.phase,
+        rowsMeta.rowCount,
+        getSubtitleRowsStateDigest(rows),
+        subtitleUiCoordinator.rowsSource,
+        String(appState.tabState?.subtitleSource || ""),
+        String(appState.tabState?.subtitleLanguage || ""),
+        String(appState.activeSubtitleId || ""),
+        Array.isArray(appState.subtitleOptions) ? appState.subtitleOptions.length : 0,
+        String(transcription.phase || ""),
+        Number(transcription.progress || 0),
+        String(transcription.statusText || ""),
+        !!appState.asrSession?.active,
+        Number(appState.asrSession?.progress || 0),
+        String(appState.asrSession?.statusText || "")
+    ].join("|");
+}
+
+function renderSubtitleIfNeeded(container, reason = "state_change") {
+    if (!container || appState.activePage !== "CC") return false;
+    const signature = getSubtitlePresentationSignature();
+    const hasPanel = !!container.querySelector?.(".cc-panel");
+    const rows = getCurrentSubtitleStateRows();
+    const domMatchesState = rows.length > 0
+        ? doesCcDomMatchRows(container, rows)
+        : (isSubtitleUiLoading() ? doesCcDomMatchLoading(container) : hasPanel);
+    if (hasPanel && domMatchesState && subtitleUiCoordinator.renderedStateSignature === signature) return false;
+    renderCC(container);
+    subtitleUiCoordinator.renderedStateSignature = signature;
+    logSubtitleDiagnostic("ui_rendered", {
+        source: reason,
+        routeKey: subtitleUiCoordinator.routeKey,
+        phase: subtitleUiCoordinator.phase,
+        rowCount: getCurrentSubtitleStateRows().length,
+        stateVersion: subtitleUiCoordinator.stateVersion
+    });
+    if (subtitleUiCoordinator.initialAlignmentPending
+        && subtitleUiCoordinator.scrollUnlockAt <= Date.now()
+        && getCurrentSubtitleStateRows().length > 0) {
+        subtitleUiCoordinator.initialAlignmentPending = false;
+        if (typeof requestAnimationFrame === "function") {
+            requestAnimationFrame(() => scrollToCurrentSubtitle(true, "auto"));
+        } else {
+            scrollToCurrentSubtitle(true, "auto");
+        }
+    }
+    return true;
+}
+
+function scheduleSubtitleRender(reason = "state_change") {
+    if (subtitleUiCoordinator.renderScheduled) return;
+    subtitleUiCoordinator.renderScheduled = true;
+    const run = () => {
+        subtitleUiCoordinator.renderScheduled = false;
+        const container = panelShadowRoot?.getElementById?.("page-CC");
+        renderSubtitleIfNeeded(container, reason);
+    };
+    if (typeof requestAnimationFrame === "function") requestAnimationFrame(run);
+    else Promise.resolve().then(run);
+}
+
+function markSubtitleStateChanged(reason, detail = {}) {
+    subtitleUiCoordinator.stateVersion += 1;
+    subtitleUiCoordinator.renderedStateSignature = "";
+    logSubtitleDiagnostic("state_changed", {
+        source: reason,
+        routeKey: subtitleUiCoordinator.routeKey,
+        phase: subtitleUiCoordinator.phase,
+        rowCount: Array.isArray(subtitleUiCoordinator.rows) ? subtitleUiCoordinator.rows.length : 0,
+        stateVersion: subtitleUiCoordinator.stateVersion,
+        ...detail
+    });
+    scheduleSubtitleRender(reason);
+}
+
+function commitSubtitleRows(rows, options = {}) {
+    const list = Array.isArray(rows) ? rows : [];
+    if (!list.length) return false;
+    const currentBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+    const currentP = Number(getRoutePartId() || 1);
+    const incomingBvid = normalizeBvidCase(options.bvid || currentBvid || "");
+    const incomingP = Number(options.p || currentP || 0);
+    const incomingCid = Number(options.cid || 0);
+    const currentCid = Number(resolveCid() || 0);
+    if ((currentBvid && incomingBvid && currentBvid !== incomingBvid)
+        || (currentP > 0 && incomingP > 0 && currentP !== incomingP)
+        || (currentCid > 0 && incomingCid > 0 && currentCid !== incomingCid)) {
+        logSubtitleDiagnostic("state_update_rejected", {
+            source: String(options.source || "unknown"),
+            reason: "route_identity_mismatch",
+            incomingBvid,
+            incomingP,
+            incomingCid,
+            currentBvid,
+            currentP,
+            currentCid
+        });
+        return false;
+    }
+    const routeKey = getCurrentSubtitleRouteKey();
+    const existingRows = subtitleUiCoordinator.rowsRouteKey === routeKey && Array.isArray(subtitleUiCoordinator.rows)
+        ? subtitleUiCoordinator.rows
+        : [];
+    const source = String(options.source || "unknown");
+    const replace = options.replace === true || source === "inject" || source === "language_switch" || !existingRows.length;
+    if (!replace) {
+        logSubtitleDiagnostic("state_update_skipped", {
+            source,
+            reason: "current_rows_already_authoritative",
+            routeKey,
+            incomingRowCount: list.length,
+            currentRowCount: existingRows.length
+        });
+        return false;
+    }
+    const previousMeta = getSubtitleDiagnosticRowsMeta(existingRows);
+    const nextMeta = getSubtitleDiagnosticRowsMeta(list);
+    const unchanged = previousMeta.rowCount === nextMeta.rowCount
+        && getSubtitleRowsStateDigest(existingRows) === getSubtitleRowsStateDigest(list)
+        && subtitleUiCoordinator.rowsRouteKey === routeKey;
+    subtitleUiCoordinator.rows = list;
+    subtitleUiCoordinator.rowsRouteKey = routeKey;
+    subtitleUiCoordinator.rowsSource = source;
+    subtitleUiCoordinator.rowsCid = incomingCid || currentCid || 0;
+    subtitleUiCoordinator.phase = "ready";
+    subtitleUiCoordinator.displaySource = source;
+    if (!existingRows.length || subtitleUiCoordinator.initialAlignmentPending) {
+        subtitleUiCoordinator.initialAlignmentPending = true;
+    }
+    if (unchanged) return false;
+    markSubtitleStateChanged(source, { rowCount: list.length });
+    return true;
+}
 
 function isDuplicateSubtitleRouteSwitch(bvid, p) {
     const key = `${String(bvid || "").toLowerCase()}|${String(p || "")}`;
@@ -531,18 +737,21 @@ function isDuplicateSubtitleRouteSwitch(bvid, p) {
 }
 
 function beginSubtitleUiCycle(bvid = "", p = "") {
-    const routeKey = `${String(bvid || getBvidFromUrl(location.href) || "").toLowerCase()}|${String(p || new URL(location.href).searchParams.get("p") || "")}`;
+    const routeKey = `${String(bvid || getBvidFromUrl(location.href) || "").toLowerCase()}|${String(p || getRoutePartId() || "")}`;
     if (["probing", "loading", "requesting"].includes(subtitleUiCoordinator.phase) && subtitleUiCoordinator.routeKey === routeKey) {
         return;
     }
     subtitleUiCoordinator.routeKey = routeKey;
     subtitleUiCoordinator.phase = "probing";
     subtitleUiCoordinator.generation += 1;
-    subtitleUiCoordinator.lastRenderSignature = "";
+    subtitleUiCoordinator.rows = [];
+    subtitleUiCoordinator.rowsRouteKey = routeKey;
+    subtitleUiCoordinator.rowsSource = "";
+    subtitleUiCoordinator.rowsCid = 0;
+    subtitleUiCoordinator.initialAlignmentPending = true;
     subtitleUiCoordinator.lastCacheApplySignature = "";
     subtitleUiCoordinator.scrollUnlockAt = Number.POSITIVE_INFINITY;
     subtitleUiCoordinator.displaySource = "";
-    subtitleUiCoordinator.displayCommitted = false;
     subtitleUiCoordinator.pendingRequestUrls = new Set();
     const generation = subtitleUiCoordinator.generation;
     appState.followCurrentIndex = -1;
@@ -552,6 +761,7 @@ function beginSubtitleUiCycle(bvid = "", p = "") {
     armSubtitleScrollAlignment(routeKey, generation);
     startSubtitleControlProbe(routeKey, generation);
     logSubtitleDiagnostic("ui_phase_changed", { phase: "probing", routeKey, generation });
+    markSubtitleStateChanged("route_cycle_started");
 }
 
 function armSubtitleScrollAlignment(routeKey, generation) {
@@ -575,7 +785,9 @@ function armSubtitleScrollAlignment(routeKey, generation) {
         subtitleUiCoordinator.scrollUnlockAt = 0;
         cleanup();
         logSubtitleDiagnostic("scroll_alignment_ready", { source, routeKey, generation });
-        if (shouldAlign) scrollToCurrentSubtitle(true, "auto");
+        if (shouldAlign && scrollToCurrentSubtitle(true, "auto")) {
+            subtitleUiCoordinator.initialAlignmentPending = false;
+        }
     };
     const onMediaEvent = (event) => {
         const video = event.target;
@@ -607,66 +819,92 @@ function scheduleSubtitleUiDeadline(routeKey, generation, timeoutMs, nextPhase) 
         if (subtitleUiCoordinator.generation !== generation || subtitleUiCoordinator.routeKey !== routeKey) return;
         subtitleUiCoordinator.timeoutTimer = null;
         subtitleUiCoordinator.phase = nextPhase;
-        subtitleUiCoordinator.lastRenderSignature = "";
         logSubtitleDiagnostic("ui_phase_changed", { phase: nextPhase, routeKey, generation, source: "deadline" });
-        renderContent();
-    }, Math.max(1000, Number(timeoutMs || SUBTITLE_DETECT_TIMEOUT_MS || 5000)));
+        markSubtitleStateChanged("deadline", { nextPhase });
+    }, Math.max(100, Number(timeoutMs || SUBTITLE_DETECT_TIMEOUT_MS || 5000)));
 }
 
 function stopSubtitleControlProbe() {
-    if (!subtitleUiCoordinator.controlProbeTimer) return;
-    clearInterval(subtitleUiCoordinator.controlProbeTimer);
-    subtitleUiCoordinator.controlProbeTimer = null;
+    if (subtitleUiCoordinator.controlProbeTimer) {
+        clearInterval(subtitleUiCoordinator.controlProbeTimer);
+        subtitleUiCoordinator.controlProbeTimer = null;
+    }
+    if (subtitleUiCoordinator.controlProbeObserver) {
+        subtitleUiCoordinator.controlProbeObserver.disconnect();
+        subtitleUiCoordinator.controlProbeObserver = null;
+    }
 }
 
 function isSubtitlePlayerReady() {
     const video = document.querySelector("video");
-    const controls = document.querySelector(".bpx-player-control-bottom, .bilibili-player-video-control-bottom");
-    const commonControl = document.querySelector(".bpx-player-ctrl-play, .bpx-player-ctrl-volume, .bpx-player-ctrl-setting");
-    return !!video && Number(video.readyState || 0) >= 1 && !!controls && !!commonControl;
+    return !!video && Number(video.readyState || 0) >= 1;
+}
+
+function isSubtitleControlBarReady() {
+    return !!document.querySelector([
+        ".bpx-player-control-bottom",
+        ".bilibili-player-video-control-bottom",
+        ".bpx-player-ctrl-play",
+        ".bilibili-player-video-btn-start"
+    ].join(", "));
+}
+
+function isUsableSubtitleControl(node) {
+    if (!node || !node.isConnected) return false;
+    if (node.hidden || node.getAttribute?.("aria-hidden") === "true") return false;
+    if (node.hasAttribute?.("disabled") || node.getAttribute?.("aria-disabled") === "true") return false;
+    if (/disabled|hidden/i.test(String(node.className || ""))) return false;
+    const style = globalThis.getComputedStyle?.(node);
+    if (style && (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0)) return false;
+    if (typeof node.getClientRects === "function" && node.getClientRects().length === 0) return false;
+    return true;
 }
 
 function startSubtitleControlProbe(routeKey, generation) {
     stopSubtitleControlProbe();
     const startedAt = Date.now();
-    let readyWithoutSubtitleSince = 0;
-    subtitleUiCoordinator.controlProbeTimer = setInterval(() => {
+    let controlBarReadyAt = 0;
+    const evaluate = () => {
         if (subtitleUiCoordinator.generation !== generation || subtitleUiCoordinator.routeKey !== routeKey) {
             stopSubtitleControlProbe();
             return;
         }
         const subtitleButton = document.querySelector(".bpx-player-ctrl-subtitle, .bilibili-player-video-btn-subtitle");
-        if (subtitleButton) {
+        if (isUsableSubtitleControl(subtitleButton)) {
             subtitleUiCoordinator.phase = "loading";
             stopSubtitleControlProbe();
-            scheduleSubtitleUiDeadline(routeKey, generation, 5000, "trigger_failed");
+            scheduleSubtitleUiDeadline(routeKey, generation, 500, "unavailable");
             logSubtitleDiagnostic("ui_phase_changed", { phase: "loading", routeKey, generation, source: "subtitle_control_found" });
-            renderContent();
+            markSubtitleStateChanged("subtitle_control_found");
             return;
         }
-        if (!Number.isFinite(subtitleUiCoordinator.scrollUnlockAt)) {
-            readyWithoutSubtitleSince = 0;
-            return;
-        }
-        if (isSubtitlePlayerReady()) {
-            if (!readyWithoutSubtitleSince) readyWithoutSubtitleSince = Date.now();
-            if (Date.now() - readyWithoutSubtitleSince >= 500) {
+        if (isSubtitlePlayerReady() && isSubtitleControlBarReady()) {
+            if (!controlBarReadyAt) {
+                controlBarReadyAt = Date.now();
+                logSubtitleDiagnostic("subtitle_probe_started", { routeKey, generation, stableWindowMs: 500 });
+            }
+            if (Date.now() - controlBarReadyAt >= 500) {
                 subtitleUiCoordinator.phase = "unavailable";
                 stopSubtitleControlProbe();
                 logSubtitleDiagnostic("ui_phase_changed", { phase: "unavailable", routeKey, generation, source: "subtitle_control_absent" });
-                renderContent();
-                return;
+                markSubtitleStateChanged("subtitle_control_absent");
             }
-        } else {
-            readyWithoutSubtitleSince = 0;
+            return;
         }
-        if (Date.now() - startedAt >= 5000) {
+        controlBarReadyAt = 0;
+        if (Date.now() - startedAt >= 2000) {
             subtitleUiCoordinator.phase = "probe_failed";
             stopSubtitleControlProbe();
             logSubtitleDiagnostic("ui_phase_changed", { phase: "probe_failed", routeKey, generation, source: "player_not_ready" });
-            renderContent();
+            markSubtitleStateChanged("player_not_ready");
         }
-    }, 100);
+    };
+    subtitleUiCoordinator.controlProbeTimer = setInterval(evaluate, 100);
+    if (typeof MutationObserver === "function") {
+        subtitleUiCoordinator.controlProbeObserver = new MutationObserver(evaluate);
+        subtitleUiCoordinator.controlProbeObserver.observe(document.documentElement, { childList: true, subtree: true });
+    }
+    evaluate();
 }
 
 function isSubtitleRequestForCurrentRoute(detail = {}) {
@@ -681,7 +919,7 @@ function isSubtitleRequestForCurrentRoute(detail = {}) {
 }
 
 function extendSubtitleUiLoadingForRequest(detail = {}) {
-    if (!["probing", "loading", "requesting"].includes(subtitleUiCoordinator.phase)) return;
+    if (!["probing", "loading", "requesting", "unavailable", "probe_failed"].includes(subtitleUiCoordinator.phase)) return;
     if (!isSubtitleRequestForCurrentRoute(detail)) return;
     stopSubtitleControlProbe();
     const routeKey = subtitleUiCoordinator.routeKey;
@@ -691,7 +929,7 @@ function extendSubtitleUiLoadingForRequest(detail = {}) {
     subtitleUiCoordinator.phase = "requesting";
     scheduleSubtitleUiDeadline(routeKey, generation, 10000, "timeout");
     logSubtitleDiagnostic("ui_loading_extended", { source: detail?.source || "inject", routeKey, generation, timeoutMs: 10000, pendingRequests: subtitleUiCoordinator.pendingRequestUrls.size });
-    renderContent();
+    markSubtitleStateChanged("subtitle_request_observed");
 }
 
 function completeSubtitleUiRequest(detail = {}) {
@@ -705,7 +943,7 @@ function completeSubtitleUiRequest(detail = {}) {
 }
 
 function markSubtitleUiReady(source = "unknown", bvid = "", p = "") {
-    const routeKey = `${String(bvid || getBvidFromUrl(location.href) || "").toLowerCase()}|${String(p || new URL(location.href).searchParams.get("p") || "")}`;
+    const routeKey = `${String(bvid || getBvidFromUrl(location.href) || "").toLowerCase()}|${String(p || getRoutePartId() || "")}`;
     if (subtitleUiCoordinator.routeKey && subtitleUiCoordinator.routeKey !== routeKey) return;
     const alreadyReadyForRoute = subtitleUiCoordinator.phase === "ready" && subtitleUiCoordinator.routeKey === routeKey;
     subtitleUiCoordinator.routeKey = routeKey;
@@ -713,25 +951,34 @@ function markSubtitleUiReady(source = "unknown", bvid = "", p = "") {
     stopSubtitleControlProbe();
     subtitleUiCoordinator.pendingRequestUrls.clear();
     if (!alreadyReadyForRoute || source === "language_switch") subtitleUiCoordinator.displaySource = source;
-    if (!alreadyReadyForRoute) subtitleUiCoordinator.lastRenderSignature = "";
     if (subtitleUiCoordinator.timeoutTimer) {
         clearTimeout(subtitleUiCoordinator.timeoutTimer);
         subtitleUiCoordinator.timeoutTimer = null;
     }
     logSubtitleDiagnostic("ui_phase_changed", { phase: "ready", source, routeKey, generation: subtitleUiCoordinator.generation });
+    if (!alreadyReadyForRoute || source === "language_switch") {
+        markSubtitleStateChanged("subtitle_ready", { readySource: source });
+    }
 }
 
 function isSubtitleUiLoading() {
-    const routeKey = `${String(getBvidFromUrl(location.href) || "").toLowerCase()}|${String(new URL(location.href).searchParams.get("p") || "")}`;
+    const routeKey = getCurrentSubtitleRouteKey();
     return ["probing", "loading", "requesting"].includes(subtitleUiCoordinator.phase) && subtitleUiCoordinator.routeKey === routeKey;
 }
 
 function doesCcDomMatchRows(panel, rows) {
     if (!panel?.querySelector) return false;
     const expectedCount = Array.isArray(rows) ? rows.length : 0;
-    const actualCount = panel.querySelectorAll?.("#cc-list .cc-row")?.length || 0;
+    const actualRows = panel.querySelectorAll?.("#cc-list .cc-row") || [];
+    const actualCount = actualRows.length || 0;
+    const expectedFirst = String(rows?.[0]?.text ?? rows?.[0]?.content ?? "").replace(/\s+/g, " ").trim();
+    const expectedLast = String(rows?.[expectedCount - 1]?.text ?? rows?.[expectedCount - 1]?.content ?? "").replace(/\s+/g, " ").trim();
+    const actualFirst = String(actualRows?.[0]?.querySelector?.(".cc-text")?.textContent || "").replace(/\s+/g, " ").trim();
+    const actualLast = String(actualRows?.[actualCount - 1]?.querySelector?.(".cc-text")?.textContent || "").replace(/\s+/g, " ").trim();
     return expectedCount > 0
         && actualCount === expectedCount
+        && actualFirst === expectedFirst
+        && actualLast === expectedLast
         && !panel.querySelector(".subtitle-empty-container");
 }
 
@@ -751,7 +998,7 @@ function retrySubtitleLoad() {
         routeKey: subtitleUiCoordinator.routeKey,
         generation: subtitleUiCoordinator.generation
     });
-    renderContent();
+    scheduleSubtitleRender("retry_requested");
     window.postMessage({ type: "BILI_RETRY_SUBTITLE_CAPTURE" }, "*");
 }
 
@@ -1341,6 +1588,7 @@ async function onInjectMessage(event) {
             const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
             const infoBvid = normalizeBvidCase(normalizedInfo?._bvid || "");
             if (normalizedInfo && (!pageBvid || !infoBvid || infoBvid === pageBvid)) {
+                acceptConfirmedRouteCid(infoBvid || pageBvid, Number(normalizedInfo?._cid || 0), "playinfo");
                 appState.playInfo = normalizedInfo;
                 appState.playInfoUpdatedAt = Date.now();
                 appState.isPlayInfoReady = hasUsablePlayInfoForBvid(normalizedInfo, pageBvid || infoBvid);
@@ -1381,6 +1629,12 @@ async function onInjectMessage(event) {
             activeTid: getRoutePartId() || null,
             updatedAt: Date.now()
         };
+        chrome.runtime.sendMessage({
+            action: "SET_ACTIVE_PART",
+            bvid: routeBvid,
+            cid: appState.injectCid,
+            tid: getRoutePartId() || null
+        }).catch(() => {});
         clearCCListImmediately();
         renderContent();
         waitForAlignedPlayInfo(routeBvid).catch(() => {});
@@ -1406,6 +1660,9 @@ async function onInjectMessage(event) {
     }
     const payloadP = Number(event.data?.p || event.data?.tid || 0);
     const currentUrlP = Number(getRoutePartId() || 1);
+    if ((!payloadP || !currentUrlP || payloadP === currentUrlP) && cid > 0) {
+        acceptConfirmedRouteCid(bvid || currentUrlBvid, cid, "subtitle_payload");
+    }
     const payloadRouteKey = `${String(bvid || currentUrlBvid || "").toLowerCase()}|${String(payloadP || currentUrlP || "")}`;
     const canDirectRenderCurrentRoute = (!payloadP || !currentUrlP || payloadP === currentUrlP)
         && (!subtitleUiCoordinator.routeKey || subtitleUiCoordinator.routeKey === payloadRouteKey);
@@ -1455,8 +1712,13 @@ async function onInjectMessage(event) {
             cid: Number(pendingPayload.cid || 0),
             ...getSubtitleDiagnosticRowsMeta(subtitles)
         });
-        renderCC(immediateContainer, subtitles);
-        subtitleUiCoordinator.displayCommitted = true;
+        commitSubtitleRows(subtitles, {
+            source: languageSwitch ? "language_switch" : "inject",
+            bvid: pendingPayload.bvid,
+            p: pendingPayload.p || currentUrlP,
+            cid: pendingPayload.cid,
+            replace: true
+        });
     } else if (immediateContainer) {
         logSubtitleDiagnostic("direct_render_skipped", {
             source: "inject",
@@ -1487,8 +1749,13 @@ async function onInjectMessage(event) {
         });
         return;
     }
-    const container = panelShadowRoot?.getElementById("page-CC") || document.getElementById("page-CC");
-    if (container) renderCC(container, subtitles);
+    commitSubtitleRows(subtitles, {
+        source: languageSwitch ? "language_switch" : "inject",
+        bvid: pendingPayload.bvid,
+        p: pendingPayload.p || currentUrlP,
+        cid: pendingPayload.cid,
+        replace: true
+    });
 }
 
 function onStorageChanged(changes, areaName) {
@@ -1538,7 +1805,10 @@ function onStorageChanged(changes, areaName) {
         }
     }
     const tabKey = getTabStateKey();
-    if (tabKey && changes[tabKey]?.newValue) mergeIncomingTabState(changes[tabKey].newValue);
+    if (tabKey && changes[tabKey]?.newValue) {
+        mergeIncomingTabState(changes[tabKey].newValue);
+        syncStepProgressByTaskState(appState.tabState);
+    }
     const afterBvid = normalizeBvidCase(appState.tabState?.activeBvid);
     const activeCid = Number(appState.tabState?.activeCid || 0);
     const routeMismatch = !!(routeBvid && afterBvid && String(afterBvid) !== routeBvid);
@@ -1558,15 +1828,52 @@ function onStorageChanged(changes, areaName) {
     const candidateCacheKeys = [...new Set([beforeBvid, afterBvid, routeBvid].filter(Boolean).map((bvid) => `cache_${bvid}`))];
     if (!shouldResetForSwitch && !routeMismatch) {
         const currentRoute = normalizeBvidCase(getBvidFromUrl(location.href));
-        const nextCache = candidateCacheKeys
-            .map((key) => changes[key]?.newValue)
+        const storageCandidates = candidateCacheKeys
+            .map((key) => {
+                const directory = changes[key]?.newValue;
+                if (directory) logCacheDirectoryStructure(directory, key);
+                return {
+                    key,
+                    directory,
+                    cache: selectCacheDirectoryPart(
+                        directory,
+                        currentRoute || afterBvid || beforeBvid,
+                        getCurrentRouteCid()
+                    )
+                };
+            })
+            .filter((item) => item.cache);
+        storageCandidates.forEach(({ key, cache }) => {
+            logPartScopeDiagnostic("storage_cache_candidate", {
+                storageKey: key,
+                currentRoute: currentRoute.toLowerCase(),
+                candidateBvid: normalizeBvidCase(cache?.bvid || "").toLowerCase(),
+                candidateCid: Number(cache?.cid || 0),
+                candidateTid: String(cache?.tid || ""),
+                acceptedByRouteCheck: isCacheForCurrentRouteVideo(cache, currentRoute || afterBvid || beforeBvid),
+                candidateHasSummary: !!String(cache?.summary || "").trim(),
+                candidateSegmentsCount: Array.isArray(cache?.segments) ? cache.segments.length : 0,
+                candidateHasRumors: !!cache?.rumors,
+                candidateHistoryCount: Array.isArray(cache?.history) ? cache.history.length : 0
+            }, `storage-candidate:${key}:${Number(cache?.cid || 0)}:${String(cache?.tid || "")}`);
+        });
+        const nextCache = storageCandidates
+            .map((item) => item.cache)
             .find((cache) => {
                 const cacheBvid = normalizeBvidCase(cache?.bvid || "");
                 return cacheBvid && (!currentRoute || cacheBvid === currentRoute) && isCacheForCurrentRouteVideo(cache, currentRoute || afterBvid || beforeBvid);
             });
         if (nextCache) {
+            const previousSubtitleSignature = getSubtitleCacheApplySignature(appState.cache);
+            const nextSubtitleSignature = getSubtitleCacheApplySignature(nextCache);
             appState.cache = nextCache;
-            applyCacheSubtitleState(appState.cache, currentRoute || afterBvid || beforeBvid);
+            logPartScopeDiagnostic("storage_cache_accepted", {
+                selectedCid: Number(nextCache?.cid || 0),
+                selectedTid: String(nextCache?.tid || "")
+            }, `storage-accepted:${normalizeBvidCase(nextCache?.bvid || "")}:${Number(nextCache?.cid || 0)}:${String(nextCache?.tid || "")}`);
+            if (previousSubtitleSignature !== nextSubtitleSignature) {
+                applyCacheSubtitleState(appState.cache, currentRoute || afterBvid || beforeBvid);
+            }
         }
     }
     if (routeMismatch) {
@@ -1592,7 +1899,8 @@ function onStorageChanged(changes, areaName) {
     if (isStorageChangeStateDirty(changes, shouldResetForSwitch, routeMismatch, afterBvid)) {
         appState.isStateDirty = true;
     }
-    if (Number.isFinite(activeCid) && activeCid > 0) appState.injectCid = activeCid;
+    const confirmedRouteCid = getCurrentRouteCid();
+    if (confirmedRouteCid > 0) appState.injectCid = confirmedRouteCid;
     beginSubtitleObservation(appState.injectBvid || afterBvid || routeBvid);
     flushPendingSubtitleIfReady();
     renderContent();
@@ -1919,6 +2227,7 @@ function finishAsymptoticPseudoProgress(taskId, failed) {
         updateProgress(100, activeTaskId, { error: true });
         return;
     }
+    if (activeTaskId.startsWith("tasks:")) appState.visibleProgressCompletedTaskIds.add(activeTaskId);
     updateProgress(100, activeTaskId);
 }
 
@@ -2087,7 +2396,7 @@ function syncStepProgressByTaskState(tabState) {
         || (String(appState.progressTaskId || "").startsWith("tasks:") ? appState.progressTaskId : "");
     if (processingTasks.length) {
         if (!activeTaskId) return;
-        startAsymptoticPseudoProgress(buildTasksProgressTaskId(processingTasks), 18);
+        startAsymptoticPseudoProgress(activeTaskId, 18);
         return;
     }
     const hasError = entries.some(([, value]) => value === "error" || value === "timeout");
@@ -2120,7 +2429,11 @@ async function loadBootstrapData() {
         };
     }
     const bootstrapCache = res?.cache || null;
-    appState.cache = bootstrapCache && normalizeBvidCase(bootstrapCache?.bvid || "") === bootstrapBvid ? bootstrapCache : null;
+    appState.cache = bootstrapCache
+        && normalizeBvidCase(bootstrapCache?.bvid || "") === bootstrapBvid
+        && isCacheForCurrentRouteVideo(bootstrapCache, bootstrapBvid)
+        ? bootstrapCache
+        : null;
     appState.settings = res?.settings || null;
     appState.providers = res?.providers || null;
     appState.cloudCachePrefs = normalizeCloudCachePrefs(res?.cloudCachePrefs);
@@ -2882,7 +3195,7 @@ function renderContent() {
 
         if (appState.activePage === id) {
             container.style.display = "flex";
-            if (id === "CC") renderCC(container);
+            if (id === "CC") renderSubtitleIfNeeded(container, "content_render");
             else if (id === "chat") renderChat(container);
             else if (id === "summary") renderSummary(container);
             else if (id === "real") renderReal(container);
@@ -3216,6 +3529,12 @@ function renderSummary(panel) {
     const segments = dedupeDisplayedLineOnlyContentSegments(appState.cache?.segments, appState.cache);
     const summaryStatus = getCurrentVideoTaskStatus("summary");
     const segmentsStatus = getCurrentVideoTaskStatus("segments");
+    logPartScopeDiagnostic("ui_render_read", {
+        feature: "summary_segments",
+        summaryStatus,
+        segmentsStatus,
+        accepted: isCacheForCurrentRouteVideo(appState.cache, resolveCurrentBvid())
+    }, "render:summary_segments");
     const summaryTaskErrorView = (summaryStatus === "error" || summaryStatus === "timeout")
         ? getCurrentVideoTaskErrorView("summary")
         : null;
@@ -3568,10 +3887,10 @@ function bindSummaryResizeDivider(panel) {
     });
 }
 
-function renderCC(panel, rowsOverride) {
+function renderCC(panel) {
     logSubtitleDiagnostic("render_called", {
-        source: Array.isArray(rowsOverride) ? "rows_override" : "cache_state",
-        ...getSubtitleDiagnosticRowsMeta(rowsOverride)
+        source: "subtitle_state",
+        ...getSubtitleDiagnosticRowsMeta(getCurrentSubtitleStateRows())
     });
     const transcription = getTranscriptionState();
     const sessionBvid = normalizeBvidCase(appState.asrSession?.active ? appState.asrSession?.bvid : "");
@@ -3580,53 +3899,9 @@ function renderCC(panel, rowsOverride) {
     const currentBvid = sessionBvid || transcriptionBvid || routeOrStateBvid;
     const cacheBvid = normalizeBvidCase(appState.cache?.bvid || "");
     const cacheReadyForCurrent = !!currentBvid && cacheBvid === currentBvid;
-    const rows = Array.isArray(rowsOverride) ? rowsOverride : (cacheReadyForCurrent ? getRawSubtitleRowsFromCache(appState.cache) : []);
-    if (!Array.isArray(rowsOverride)
-        && subtitleUiCoordinator.phase === "ready"
-        && subtitleUiCoordinator.displaySource === "inject"
-        && subtitleUiCoordinator.displayCommitted) {
-        logSubtitleDiagnostic("render_skipped", {
-            source: "cache_state",
-            reason: "cache_persistence_only_after_inject_display_committed",
-            routeKey: subtitleUiCoordinator.routeKey
-        });
-        return;
-    }
-    if (rows.length > 0 && subtitleUiCoordinator.phase === "ready") {
-        const rowsMeta = getSubtitleDiagnosticRowsMeta(rows);
-        const readySignature = [
-            subtitleUiCoordinator.routeKey,
-            rowsMeta.rowCount,
-            rowsMeta.firstThreeLines,
-            String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || ""),
-            String(appState.cache?.subtitleLanguage || appState.tabState?.subtitleLanguage || "")
-        ].join("|");
-        if (subtitleUiCoordinator.lastRenderSignature === readySignature && doesCcDomMatchRows(panel, rows)) {
-            logSubtitleDiagnostic("render_skipped", {
-                source: Array.isArray(rowsOverride) ? "rows_override" : "cache_state",
-                reason: "duplicate_ready_state",
-                routeKey: subtitleUiCoordinator.routeKey
-            });
-            return;
-        }
-        subtitleUiCoordinator.lastRenderSignature = readySignature;
-        subtitleUiCoordinator.scrollUnlockAt = Math.max(
-            subtitleUiCoordinator.scrollUnlockAt,
-            Date.now() + 300
-        );
-    }
+    const rows = getCurrentSubtitleStateRows();
     if (isSubtitleUiLoading() && rows.length === 0) {
         const routeKey = subtitleUiCoordinator.routeKey;
-        const signature = `${routeKey}|loading|empty`;
-        if (subtitleUiCoordinator.lastRenderSignature === signature && doesCcDomMatchLoading(panel)) {
-            logSubtitleDiagnostic("render_skipped", {
-                source: Array.isArray(rowsOverride) ? "rows_override" : "cache_state",
-                reason: "duplicate_loading_empty_state",
-                routeKey
-            });
-            return;
-        }
-        subtitleUiCoordinator.lastRenderSignature = signature;
         const existingPanel = panel.querySelector?.(".cc-panel");
         if (existingPanel) {
             const statusNode = existingPanel.querySelector(".cc-transcribe-status");
@@ -3647,10 +3922,8 @@ function renderCC(panel, rowsOverride) {
             logSubtitleDiagnostic("loading_updated_in_place", { routeKey });
             return;
         }
-    } else if (rows.length > 0) {
-        subtitleUiCoordinator.lastRenderSignature = "";
     }
-    if (!Array.isArray(rowsOverride) && cacheBvid && currentBvid && cacheBvid !== currentBvid) {
+    if (cacheBvid && currentBvid && cacheBvid !== currentBvid) {
         logContent.warn("cc_cache_mismatch_drop", {
             task: "subtitle",
             bvid: currentBvid,
@@ -3698,30 +3971,6 @@ function renderCC(panel, rowsOverride) {
     const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
     const isNoTimestampSubtitle = subtitleSource === "siliconflow" || subtitleSource === "funasr";
     const shouldShowRegenerate = rows.length > 0 && isAsrSubtitle && !running;
-
-    const domRenderSignature = [
-        String(new URL(location.href).pathname || ""),
-        String(new URL(location.href).searchParams.get("p") || ""),
-        subtitleUiCoordinator.phase,
-        rows.length,
-        getSubtitleDiagnosticRowsMeta(rows).firstThreeLines,
-        String(rows[rows.length - 1]?.text ?? rows[rows.length - 1]?.content ?? "").slice(0, 120),
-        subtitleSource,
-        isAsrSubtitle,
-        running
-    ].join("|");
-    const domMatchesRender = rows.length > 0
-        ? doesCcDomMatchRows(panel, rows)
-        : (isSubtitleUiLoading() ? doesCcDomMatchLoading(panel) : !!panel.querySelector?.(".cc-panel"));
-    if (panel.dataset.subtitleDiagRenderSignature === domRenderSignature && domMatchesRender) {
-        logSubtitleDiagnostic("render_skipped", {
-            source: Array.isArray(rowsOverride) ? "rows_override" : "cache_state",
-            reason: "duplicate_dom_state",
-            routeKey: subtitleUiCoordinator.routeKey
-        });
-        return;
-    }
-    panel.dataset.subtitleDiagRenderSignature = domRenderSignature;
 
     const subtitleCacheSource = String(appState.cache?.subtitleCacheSource || "").toLowerCase();
     const subtitlePhase = subtitleUiCoordinator.phase;
@@ -3784,15 +4033,20 @@ function renderCC(panel, rowsOverride) {
         const existingCcPanel = panel.querySelector?.(".cc-panel");
         const existingList = existingCcPanel?.querySelector("#cc-list");
         if (existingCcPanel && existingList) {
-            existingList.innerHTML = rowsHtml;
+            if (!doesCcDomMatchRows(panel, rows)) {
+                const previousScrollTop = existingList.scrollTop;
+                existingList.innerHTML = rowsHtml;
+                if (!subtitleUiCoordinator.initialAlignmentPending) {
+                    existingList.scrollTop = previousScrollTop;
+                }
+            }
             const statusNode = existingCcPanel.querySelector(".cc-transcribe-status");
             const actionsNode = existingCcPanel.querySelector(".cc-transcribe-actions");
             if (statusNode) statusNode.textContent = sourceText;
             if (actionsNode) actionsNode.innerHTML = `${languageBtnHtml}${regenBtnHtml}`;
             bindCCSearch(panel);
-            scrollToCurrentSubtitle(true, "auto");
             logSubtitleDiagnostic("rows_updated_in_place", {
-                source: Array.isArray(rowsOverride) ? "rows_override" : "cache_state",
+                source: "subtitle_state",
                 rowCount: rows.length,
                 routeKey: subtitleUiCoordinator.routeKey
             });
@@ -3929,13 +4183,11 @@ function renderCC(panel, rowsOverride) {
                 showToast("复制失败");
             }
         };
-
         list.addEventListener("wheel", pauseFollow);
         list.addEventListener("touchmove", pauseFollow, { passive: true });
         list.addEventListener("scroll", updateFollowButtonDirection, { passive: true });
         list.addEventListener("click", onCCListClick);
 
-        scrollToCurrentSubtitle(true, "auto");
     }
 }
 
@@ -4015,6 +4267,12 @@ function renderChat(panel) {
     }
     const history = Array.isArray(appState.cache?.history) ? appState.cache.history : [];
     const pending = Array.isArray(appState.chatPending) ? appState.chatPending : [];
+    logPartScopeDiagnostic("ui_render_read", {
+        feature: "chat",
+        historyCount: history.length,
+        pendingCount: pending.length,
+        accepted: isCacheForCurrentRouteVideo(appState.cache, resolveCurrentBvid())
+    }, "render:chat");
     
     const signature = JSON.stringify({
         cacheBvid: normalizeBvidCase(appState.cache?.bvid || ""),
@@ -4188,6 +4446,12 @@ function renderReal(panel) {
     const rumors = appState.cache?.rumors;
     const claims = Array.isArray(rumors?.claims) ? rumors.claims : [];
     const rumorsStatus = getCurrentVideoTaskStatus("rumors");
+    logPartScopeDiagnostic("ui_render_read", {
+        feature: "rumors",
+        rumorsStatus,
+        claimsCount: claims.length,
+        accepted: isCacheForCurrentRouteVideo(appState.cache, resolveCurrentBvid())
+    }, "render:rumors");
     const hasRumorsCache = !!String(rumors?.overview || "").trim() || claims.length > 0;
     const rumorsNoTimestamp = isNoTimestampSubtitleCache(appState.cache) || rumors?.no_timestamp || claims.some((item) => item?.no_timestamp);
     
@@ -5538,6 +5802,7 @@ async function runTasks(tasks, options = {}) {
 
     const taskId = buildTasksProgressTaskId(tasks);
     try {
+        appState.visibleProgressCompletedTaskIds.delete(taskId);
         tasks.forEach((t) => appState.sessionGeneratedTasks.add(t));
         tasks.forEach((t) => {
             if (t === "summary" || t === "segments") clearPanelError("summary");
@@ -5552,6 +5817,13 @@ async function runTasks(tasks, options = {}) {
             ...((options && typeof options === "object" && options.taskContext) ? options.taskContext : {})
         };
         const runtimeAction = String(options?.overrideAction || "RUN_TASKS");
+        logPartScopeDiagnostic("task_request_identity", {
+            feature: tasks.join(","),
+            runtimeAction,
+            requestedBvid: normalizeBvidCase(resolveCurrentBvid() || "").toLowerCase(),
+            requestedCid: Number(taskContext.cid || 0),
+            requestedTid: String(taskContext.tid || "")
+        });
         const res = await chrome.runtime.sendMessage({
             action: runtimeAction,
             tasks,
@@ -5566,9 +5838,13 @@ async function runTasks(tasks, options = {}) {
             runtimeError.retryAfterSec = res?.retryAfterSec;
             throw runtimeError;
         }
-        finishAsymptoticPseudoProgress(taskId, false);
+        if (!appState.visibleProgressCompletedTaskIds.has(taskId)) {
+            finishAsymptoticPseudoProgress(taskId, false);
+        }
     } catch (error) {
-        finishAsymptoticPseudoProgress(taskId, true);
+        if (!appState.visibleProgressCompletedTaskIds.has(taskId)) {
+            finishAsymptoticPseudoProgress(taskId, true);
+        }
         logContent.error("task_abort", {
             task: "generate",
             code: error?.code || "",
@@ -5587,6 +5863,7 @@ async function runTasks(tasks, options = {}) {
     } finally {
         setLocalPendingTasks(tasks, false);
         renderContent();
+        appState.visibleProgressCompletedTaskIds.delete(taskId);
     }
 }
 
@@ -5610,11 +5887,22 @@ async function handleSendChat() {
     startAsymptoticPseudoProgress(progressTaskId, 14);
     rerenderChatKeepInputAndScroll("");
     const port = getChatStreamPort();
+    logPartScopeDiagnostic("task_request_identity", {
+        feature: "chat",
+        messageId,
+        requestedBvid: normalizeBvidCase(resolveCurrentBvid() || "").toLowerCase(),
+        requestedCid: Number(resolveCid() || 0),
+        requestedTid: String(getTidFromUrl(location.href) || "")
+    });
     port.postMessage({
         action: "RUN_CHAT_STREAM",
         text,
         messageId,
-        bvid: normalizeBvidCase(resolveCurrentBvid() || "")
+        bvid: normalizeBvidCase(resolveCurrentBvid() || ""),
+        taskContext: {
+            cid: resolveCid(),
+            tid: getTidFromUrl(location.href)
+        }
     });
 }
 
@@ -5766,6 +6054,25 @@ function onChatStreamMessage(message) {
     const type = String(message?.type || "");
     const messageId = String(message?.messageId || "");
     if (!messageId) return;
+    const currentPartKey = `${normalizeBvidCase(resolveCurrentBvid() || "").toLowerCase()}::${Number(resolveCid() || 0)}`;
+    const messagePartKey = String(message?.partKey || "");
+    if (messagePartKey && messagePartKey !== currentPartKey) {
+        logPartScopeDiagnostic("chat_stream_rejected", {
+            feature: "chat",
+            messageId,
+            messagePartKey,
+            currentPartKey,
+            reason: "part_key_mismatch"
+        });
+        return;
+    }
+    logPartScopeDiagnostic("chat_stream_accepted", {
+        feature: "chat",
+        messageId,
+        messagePartKey,
+        currentPartKey,
+        type
+    }, `chat-stream:${messageId}:${type}`);
     const progressTaskId = buildChatProgressTaskId(messageId);
     const assistantId = `a_${messageId}`;
     if (type === "delta") {
@@ -5921,6 +6228,7 @@ function resetPageStateByBvidSwitch() {
     appState.transcriptionSuppressUntil = 0;
     appState.transcriptionCapsuleVisible = false;
     appState.transcriptionCapsuleMeta = null;
+    appState.asrRequestDispatched = false;
     appState.subtitleDomDetected = false;
     appState.subtitleObserveUntil = 0;
     appState.subtitleCheckTargetBvid = "";
@@ -5970,11 +6278,8 @@ function resetAllState() {
     logSubtitleDiagnostic("clear_requested", { source: "resetAllState" });
     resetPageStateByBvidSwitch();
     clearStreamCache();
-    const ccContainer = panelShadowRoot ? panelShadowRoot.getElementById("page-CC") : null;
-    if (ccContainer) {
-        appState.renderedSubtitleIndex = -1;
-        renderCC(ccContainer, []);
-    }
+    appState.renderedSubtitleIndex = -1;
+    scheduleSubtitleRender("reset_all_state");
 }
 
 function resetAppState() {
@@ -6227,6 +6532,16 @@ function applyCacheSubtitleState(cache, targetBvid = "") {
                 routeKey: subtitleUiCoordinator.routeKey
             });
         }
+        const subtitleSource = String(cache?.subtitleSource || "").toLowerCase();
+        const replaceCurrentRows = isAsrSubtitleSourceValue(subtitleSource)
+            || subtitleUiCoordinator.displaySource === "language_switch";
+        commitSubtitleRows(getRawSubtitleRowsFromCache(cache), {
+            source: replaceCurrentRows ? (subtitleUiCoordinator.displaySource === "language_switch" ? "language_switch" : "asr_cache") : "cache",
+            bvid: target,
+            p: cache?.tid || getRoutePartId(),
+            cid: Number(cache?.cid || 0),
+            replace: replaceCurrentRows
+        });
     }
     const subtitleSource = String(cache?.subtitleSource || "");
     appState.tabState = {
@@ -6246,12 +6561,18 @@ function applyCacheSubtitleState(cache, targetBvid = "") {
 
 function startCloudReadForCurrentVideo(options = {}) {
     const target = normalizeBvidCase(options?.bvid || resolveCurrentBvid() || "");
-    if (!target) return;
+    const cid = getCurrentRouteCid();
+    if (!target || !(cid > 0)) return;
     const silent = options?.silent !== false;
     const nextRequestId = Number(appState.cloudReadState?.requestId || 0) + 1;
     appState.cloudReadState = createCloudReadState(target, "loading", nextRequestId);
     if (!silent) renderContent();
-    const request = chrome.runtime.sendMessage({ action: "GET_CACHE", bvid: target });
+    const request = chrome.runtime.sendMessage({
+        action: "GET_CACHE",
+        bvid: target,
+        cid,
+        tid: getRoutePartId()
+    });
     const timeout = new Promise((_, reject) => {
         setTimeout(() => reject(new Error("CLOUD_TIMEOUT")), CLOUD_READ_TIMEOUT_MS);
     });
@@ -6819,10 +7140,10 @@ function startFocusTicker() {
 }
 
 function scrollToCurrentSubtitle(force, behavior = "smooth") {
-    if (!force && subtitleUiCoordinator.scrollUnlockAt > Date.now()) return;
-    if (force && subtitleUiCoordinator.scrollUnlockAt > Date.now() && behavior === "auto") return;
-    const rows = getRawSubtitleRowsFromCache(appState.cache);
-    if (!rows.length) return;
+    if (!force && subtitleUiCoordinator.scrollUnlockAt > Date.now()) return false;
+    if (force && subtitleUiCoordinator.scrollUnlockAt > Date.now() && behavior === "auto") return false;
+    const rows = getCurrentSubtitleStateRows();
+    if (!rows.length) return false;
     let canFollowScroll = appState.followEnabled;
     if (!appState.followEnabled && !force) {
         if (Date.now() - appState.followPausedAt >= FOLLOW_RESUME_MS) {
@@ -6838,7 +7159,7 @@ function scrollToCurrentSubtitle(force, behavior = "smooth") {
     }
     const t = getPlayerTime();
     // Allow highlighting even if time is 0 or paused, as long as it's valid
-    if (!Number.isFinite(t)) return;
+    if (!Number.isFinite(t)) return false;
     
     const index = getActiveSubtitleIndex(rows, t);
     const changed = index !== appState.followCurrentIndex;
@@ -6861,18 +7182,10 @@ function scrollToCurrentSubtitle(force, behavior = "smooth") {
             const scrollBehavior = behavior === "auto" ? "auto" : behavior;
             const top = target.offsetTop - list.clientHeight / 2 + target.clientHeight / 2;
             list.scrollTo({ top: Math.max(0, top), behavior: scrollBehavior });
+            return true;
         }
     }
-}
-
-function getActiveSubtitleIndex(rows, t) {
-    for (let i = 0; i < rows.length; i += 1) {
-        const start = Number(rows[i].start || 0);
-        const nextStart = i < rows.length - 1 ? Number(rows[i + 1].start || start) : Number(rows[i].end ?? start + 6);
-        const end = Number.isFinite(Number(rows[i].end)) ? Number(rows[i].end) : nextStart;
-        if (start <= t && t < end) return i;
-    }
-    return -1;
+    return index >= 0;
 }
 
 function highlightSubtitleRow(index) {
@@ -7289,7 +7602,7 @@ function evaluateTranscriptionNeedAfterDelay(meta) {
     if (appState.subtitleDomDetected || hasNativeCCSubtitleDom()) return;
     appState.transcriptionCapsuleMeta = {
         bvid,
-        cid: Number(resolveCid() || meta?.cid || appState.tabState?.activeCid || 0),
+        cid: Number(resolveCid() || 0),
         tid: meta?.tid || appState.tabState?.activeTid || null,
         title: String(meta?.title || "").trim()
     };
@@ -7319,7 +7632,7 @@ function hasNativeCCSubtitleDom() {
 async function startTranscriptionFromCapsule() {
     const fallbackMeta = {
         bvid: normalizeBvidCase(appState.injectBvid || resolveCurrentBvid()),
-        cid: Number(resolveCid() || appState.injectCid || appState.tabState?.activeCid || 0),
+        cid: Number(resolveCid() || 0),
         tid: appState.tabState?.activeTid || getTidFromUrl(location.href),
         title: cleanBilibiliTitle(document.title)
     };
@@ -7349,6 +7662,36 @@ async function startTranscriptionFromCapsule() {
         showToast("正在转录中，请稍候...");
         return;
     }
+    const confirmedCid = await waitForConfirmedRouteCid(bvid);
+    if (!(confirmedCid > 0)) {
+        logContent.warn("asr_start_blocked", {
+            task: "asr",
+            bvid,
+            code: "PART_IDENTITY_PENDING"
+        });
+        showToast("正在确认当前分 P，请稍后再试");
+        return;
+    }
+    const confirmedMeta = {
+        ...meta,
+        cid: confirmedCid,
+        tid: getRoutePartId() || meta?.tid || null
+    };
+    acceptConfirmedRouteCid(bvid, confirmedCid, "asr_preflight");
+    const finishWithExistingSubtitle = (toastText = "已读取已有字幕") => {
+        if (!hasUsableSubtitleCache(appState.cache, bvid)) return false;
+        appState.asrRequestDispatched = false;
+        applyCacheSubtitleState(appState.cache, bvid);
+        clearAsrSession();
+        resetTranscriptionState({ phase: "done", progress: 100 });
+        appState.transcriptionCapsuleVisible = false;
+        appState.transcriptionCapsuleMeta = null;
+        updateProgress(100, progressTaskId);
+        renderContent();
+        if (toastText) showToast(toastText);
+        return true;
+    };
+    if (finishWithExistingSubtitle("已读取已有字幕")) return;
     clearPanelError("CC");
     const asrRunId = `asr_${bvid}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     appState.progressTaskId = "";
@@ -7386,14 +7729,7 @@ async function startTranscriptionFromCapsule() {
         appState.cloudReadState = createCloudReadState(bvid, "idle", Number(appState.cloudReadState?.requestId || 0) + 1);
         const synced = await syncCacheFromBackgroundWithRetry(bvid, 2, 150, { skipCloud: false });
         if (synced && hasUsableSubtitleCache(appState.cache, bvid)) {
-            applyCacheSubtitleState(appState.cache, bvid);
-            clearAsrSession();
-            resetTranscriptionState({ phase: "done", progress: 100 });
-            appState.transcriptionCapsuleVisible = false;
-            appState.transcriptionCapsuleMeta = null;
-            updateProgress(100, progressTaskId);
-            renderContent();
-            showToast("已读取云端字幕");
+            finishWithExistingSubtitle("已读取已有字幕");
             return;
         }
     }
@@ -7416,7 +7752,7 @@ async function startTranscriptionFromCapsule() {
         bvid,
         detail: {
             run_id: asrRunId,
-            cid: Number(meta?.cid || 0),
+            cid: confirmedCid,
             route_bvid: normalizeBvidCase(getBvidFromUrl(location.href) || ""),
             inject_bvid: injectBvid,
             playinfo_bvid: normalizeBvidCase(appState.playInfo?._bvid || ""),
@@ -7429,10 +7765,17 @@ async function startTranscriptionFromCapsule() {
     renderContent();
     renderSubtitleTimelinePanel(document.getElementById("panel-body"));
     try {
-        const freshPlayInfo = await ensureAsrPlayInfoForBvid(bvid).catch(() => null);
+        const freshPlayInfo = await ensureAsrPlayInfoForBvid(bvid, confirmedCid).catch(() => null);
         if (!hasUsablePlayInfoForBvid(freshPlayInfo, bvid)) {
             throw { code: "ASR_PLAYINFO_NOT_FRESH", message: "当前视频信息还没刷新完成，请稍等 1-2 秒后重试" };
         }
+        if (finishWithExistingSubtitle("已读取已有字幕")) return;
+        const lateSynced = await syncCacheFromBackground(bvid, {
+            preserveCacheOnMiss: true,
+            force: true,
+            skipCloud: false
+        });
+        if (lateSynced && finishWithExistingSubtitle("已读取已有字幕")) return;
         const audioUrl = freshPlayInfo?.audio?.[0]?.url || "";
         logContent.info("asr_audio_payload_selected", {
             task: "asr",
@@ -7446,17 +7789,21 @@ async function startTranscriptionFromCapsule() {
                 ...summarizeMediaLocator(audioUrl)
             }
         });
+        appState.asrRequestDispatched = true;
         const res = await chrome.runtime.sendMessage({
             action: "GET_AUDIO_URL",
             payload: {
-                ...meta,
-                cid: Number(resolveCid() || meta?.cid || 0),
+                ...confirmedMeta,
+                cid: confirmedCid,
                 audioUrl,
                 asrRunId
             }
         });
+        appState.asrRequestDispatched = false;
         if (!res?.ok) throw new Error(res?.error || "Groq 转录失败");
     } catch (error) {
+        appState.asrRequestDispatched = false;
+        if (finishWithExistingSubtitle("已读取已有字幕")) return;
         clearAsrSession();
         logContent.error("asr_start_failed", {
             task: "asr",
@@ -7491,6 +7838,11 @@ async function handleRegenerateGroqSubtitle() {
     }
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
     if (!(subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr")) return;
+    const confirmedCid = await waitForConfirmedRouteCid(injectBvid);
+    if (!(confirmedCid > 0)) {
+        showToast("正在确认当前分 P，请稍后再试");
+        return;
+    }
     appState.subtitleTimeline = [];
     appState.cache = {
         ...(appState.cache || {}),
@@ -7511,13 +7863,13 @@ async function handleRegenerateGroqSubtitle() {
     renderContent();
     const payload = {
         bvid: injectBvid,
-        cid: Number(resolveCid() || appState.injectCid || appState.tabState?.activeCid || 0),
+        cid: confirmedCid,
         tid: appState.tabState?.activeTid || getTidFromUrl(location.href),
         title: cleanBilibiliTitle(document.title)
     };
     try {
-        await chrome.runtime.sendMessage({ action: "CLEAR_SUBTITLE_CACHE", bvid: injectBvid });
-        const freshPlayInfo = await ensureAsrPlayInfoForBvid(injectBvid).catch(() => null);
+        await chrome.runtime.sendMessage({ action: "CLEAR_SUBTITLE_CACHE", bvid: injectBvid, cid: confirmedCid, tid: payload.tid });
+        const freshPlayInfo = await ensureAsrPlayInfoForBvid(injectBvid, confirmedCid).catch(() => null);
         if (!hasUsablePlayInfoForBvid(freshPlayInfo, injectBvid)) {
             throw { code: "ASR_PLAYINFO_NOT_FRESH", message: "当前视频信息还没刷新完成，请稍等 1-2 秒后重试" };
         }
@@ -7541,7 +7893,7 @@ async function handleRegenerateGroqSubtitle() {
             action: "GET_AUDIO_URL",
             payload: {
                 ...payload,
-                cid: Number(resolveCid() || payload.cid || 0),
+                cid: confirmedCid,
                 audioUrl,
                 asrRunId
             }
@@ -7912,7 +8264,13 @@ async function saveOfficialSubtitleRows(option, rows, cached = null) {
         languageKey
     });
     subtitleUiCoordinator.displaySource = "language_switch";
-    renderContent();
+    commitSubtitleRows(rows, {
+        source: "language_switch",
+        bvid,
+        p: getRoutePartId(),
+        cid: resolveCid(),
+        replace: true
+    });
     syncCacheFromBackground(bvid, { preserveCacheOnMiss: true, force: true, skipCloud: true })
         .then(() => {
             if (appState.activePage === "CC") renderContent();
@@ -7997,12 +8355,16 @@ async function switchOfficialSubtitleLanguage(optionId) {
                 languageKey: "zh"
             });
             subtitleUiCoordinator.displaySource = "language_switch";
-            subtitleUiCoordinator.displayCommitted = false;
-            subtitleUiCoordinator.lastRenderSignature = "";
             subtitleUiCoordinator.lastCacheApplySignature = "";
             const ccPanel = panelShadowRoot?.getElementById?.("page-CC");
             if (ccPanel) delete ccPanel.dataset.subtitleDiagRenderSignature;
-            renderContent();
+            commitSubtitleRows(zhCached.rows, {
+                source: "language_switch",
+                bvid,
+                p: getRoutePartId(),
+                cid: resolveCid(),
+                replace: true
+            });
             showToast("已切换为中文");
             return;
         }
@@ -8104,7 +8466,7 @@ function waitForSubtitleSwitchForward(marker, timeoutMs = 8000) {
 }
 
 function resolveCid() {
-    return getCurrentRouteCid() || resolveCidFromState(appState);
+    return getCurrentRouteCid();
 }
 
 function resolveCurrentBvid() {
@@ -8186,15 +8548,61 @@ function getRoutePartId() {
 }
 
 function getCurrentRouteCid() {
-    const candidates = [
-        appState.injectCid,
-        appState.tabState?.activeCid
-    ];
+    const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+    const routeTid = getRoutePartId();
+    const injectBvid = normalizeBvidCase(appState.injectBvid || "");
+    const tabStateBvid = normalizeBvidCase(appState.tabState?.activeBvid || "");
+    const tabStateTid = String(appState.tabState?.activeTid || "").trim();
+    const playInfoBvid = normalizeBvidCase(appState.playInfo?._bvid || "");
+    const candidates = [];
+    if (!routeBvid || !injectBvid || routeBvid === injectBvid) candidates.push(appState.injectCid);
+    if ((!routeBvid || (tabStateBvid && routeBvid === tabStateBvid))
+        && (routeTid ? (tabStateTid && routeTid === tabStateTid) : !tabStateTid)) {
+        candidates.push(appState.tabState?.activeCid);
+    }
+    if ((!routeBvid || (playInfoBvid && routeBvid === playInfoBvid))) candidates.push(appState.playInfo?._cid);
     for (const value of candidates) {
         const cid = Number(value || 0);
         if (Number.isFinite(cid) && cid > 0) return cid;
     }
     return 0;
+}
+
+function acceptConfirmedRouteCid(bvid, cid, source = "unknown") {
+    const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+    const confirmedBvid = normalizeBvidCase(bvid || "");
+    const confirmedCid = Number(cid || 0);
+    if (!routeBvid || !confirmedBvid || routeBvid !== confirmedBvid || !(confirmedCid > 0)) return false;
+    const previousCid = getCurrentRouteCid();
+    appState.injectBvid = routeBvid;
+    appState.injectCid = confirmedCid;
+    appState.tabState = {
+        ...(appState.tabState || {}),
+        activeBvid: routeBvid,
+        activeCid: confirmedCid,
+        activeTid: getRoutePartId() || null,
+        updatedAt: Date.now()
+    };
+    chrome.runtime.sendMessage({
+        action: "SET_ACTIVE_PART",
+        bvid: routeBvid,
+        cid: confirmedCid,
+        tid: getRoutePartId() || null
+    }).catch(() => {});
+    if (previousCid !== confirmedCid) {
+        logPartScopeDiagnostic("route_cid_confirmed", {
+            source,
+            previousCid,
+            confirmedCid
+        });
+        appState.isStateDirty = true;
+        syncCacheFromBackground(routeBvid, {
+            preserveCacheOnMiss: true,
+            force: true,
+            skipCloud: true
+        }).catch(() => {});
+    }
+    return true;
 }
 
 function isCacheForCurrentRouteVideo(cache, targetBvid = "") {
@@ -8208,12 +8616,76 @@ function isCacheForCurrentRouteVideo(cache, targetBvid = "") {
     const routeCid = getCurrentRouteCid();
     const cacheCid = Number(cache?.cid || 0);
     if (routeBvid && cacheBvid && routeBvid !== cacheBvid) return false;
-    if (routeCid > 0 && cacheCid > 0 && routeCid !== cacheCid) return false;
+    if (!(routeCid > 0) || !(cacheCid > 0) || routeCid !== cacheCid) return false;
     if (!routeTid) return true;
 
     const cacheTid = String(cache?.tid || "").trim();
     if (cacheTid) return cacheTid === routeTid;
     return false;
+}
+
+function selectCacheDirectoryPart(cache, targetBvid = "", targetCid = 0) {
+    if (!cache || typeof cache !== "object") return null;
+    const bvid = normalizeBvidCase(cache.bvid || targetBvid || "");
+    const cid = Number(targetCid || 0);
+    if (!bvid) return null;
+    if (!(cid > 0)) return null;
+    const partKey = `${bvid.toLowerCase()}::${cid}`;
+    const part = cache.parts && typeof cache.parts === "object" ? cache.parts[partKey] : null;
+    if (part && typeof part === "object") {
+        return { ...cache, ...part, parts: cache.parts, subtitleVariants: cache.subtitleVariants };
+    }
+    return null;
+}
+
+function logCacheDirectoryStructure(cache, source = "storage") {
+    if (!isDebugLoggingEnabled() || !cache || typeof cache !== "object") return;
+    const parts = cache.parts && typeof cache.parts === "object" ? cache.parts : {};
+    const directory = Object.fromEntries(Object.entries(parts).map(([partKey, part]) => [partKey, {
+        cid: Number(part?.cid || 0),
+        tid: String(part?.tid || ""),
+        title: String(part?.title || ""),
+        subtitleRows: Array.isArray(part?.rawSubtitle) ? part.rawSubtitle.length : 0,
+        subtitleVariants: part?.subtitleVariants && typeof part.subtitleVariants === "object"
+            ? Object.keys(part.subtitleVariants).length
+            : 0,
+        hasSummary: !!String(part?.summary || "").trim(),
+        segmentsCount: Array.isArray(part?.segments) ? part.segments.length : 0,
+        hasRumors: !!part?.rumors,
+        historyCount: Array.isArray(part?.history) ? part.history.length : 0,
+        metricsCount: Array.isArray(part?.metrics) ? part.metrics.length : 0,
+        updatedAt: Number(part?.updatedAt || 0)
+    }]));
+    const payload = {
+        source,
+        topLevel: {
+            bvid: normalizeBvidCase(cache.bvid || "").toLowerCase(),
+            schemaVersion: Number(cache.schemaVersion || 0),
+            updatedAt: Number(cache.updatedAt || 0),
+            keys: Object.keys(cache).sort(),
+            partCount: Object.keys(parts).length
+        },
+        parts: directory
+    };
+    const signature = JSON.stringify(payload, (key, value) => key === "updatedAt" ? undefined : value);
+    const dedupeKey = `cache-directory:${source}`;
+    if (partScopeDiagnosticSignatures.get(dedupeKey) === signature) return;
+    partScopeDiagnosticSignatures.set(dedupeKey, signature);
+    console.log("[CACHE_DIRECTORY]", payload);
+}
+
+function getSubtitleCacheApplySignature(cache = {}) {
+    return [
+        normalizeBvidCase(cache?.bvid || "").toLowerCase(),
+        Number(cache?.cid || 0),
+        String(cache?.tid || ""),
+        String(cache?.rawHash || ""),
+        String(cache?.processedHash || ""),
+        Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0,
+        Array.isArray(cache?.processedSubtitle) ? cache.processedSubtitle.length : 0,
+        String(cache?.subtitleSource || ""),
+        String(cache?.subtitleLanguage || "")
+    ].join("|");
 }
 
 function makeShortDigest(value) {
@@ -8663,6 +9135,12 @@ function startRouteWatcher() {
         appState.injectCid = 0;
         appState.injectBvidChangedAt = Date.now();
         appState.isStateDirty = true;
+        chrome.runtime.sendMessage({
+            action: "SET_ACTIVE_PART",
+            bvid: current,
+            cid: 0,
+            tid: routeP || null
+        }).catch(() => {});
         startSubtitleCheckTimer();
         beginSubtitleObservation(current);
         clearCCListImmediately();
@@ -8686,8 +9164,8 @@ function clearCCListImmediately() {
     if (!container || appState.activePage !== "CC") return;
     appState.renderedSubtitleIndex = -1;
     delete container.dataset.subtitleDiagRenderSignature;
-    subtitleUiCoordinator.lastRenderSignature = "";
-    renderCC(container, []);
+    subtitleUiCoordinator.renderedStateSignature = "";
+    scheduleSubtitleRender("clear_cc_list");
 }
 
 async function requestFromInject(timeoutMs = 500) {
@@ -8710,14 +9188,40 @@ async function requestFromInject(timeoutMs = 500) {
     });
 }
 
-async function waitForAlignedPlayInfo(targetBvid) {
+async function waitForConfirmedRouteCid(targetBvid, timeoutMs = 7000) {
     const expectedBvid = normalizeBvidCase(targetBvid || "");
+    if (!expectedBvid) return 0;
+    const deadline = Date.now() + Math.max(500, Number(timeoutMs || 0));
+    while (Date.now() < deadline) {
+        const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+        if (routeBvid !== expectedBvid) return 0;
+        const currentCid = getCurrentRouteCid();
+        if (currentCid > 0) return currentCid;
+        const incoming = normalizeIncomingPlayInfo(await requestFromInject(500));
+        const incomingBvid = normalizeBvidCase(incoming?._bvid || "");
+        const incomingCid = Number(incoming?._cid || 0);
+        if (incoming && incomingBvid === expectedBvid && incomingCid > 0) {
+            acceptConfirmedRouteCid(expectedBvid, incomingCid, "asr_cid_wait");
+            appState.playInfo = incoming;
+            appState.playInfoUpdatedAt = Date.now();
+            appState.isPlayInfoReady = hasUsablePlayInfoForBvid(incoming, expectedBvid);
+            return incomingCid;
+        }
+        await sleep(100);
+    }
+    return 0;
+}
+
+async function waitForAlignedPlayInfo(targetBvid, targetCid = 0) {
+    const expectedBvid = normalizeBvidCase(targetBvid || "");
+    const expectedCid = Number(targetCid || 0);
     if (!expectedBvid) return null;
     logContent.info("playinfo_received", { source: "route_wait_start", bvid: expectedBvid });
 
     const freshData = await new Promise((resolve) => {
             const waiter = {
                 bvid: expectedBvid,
+                cid: expectedCid,
                 resolve,
                 timer: null
             };
@@ -8746,28 +9250,32 @@ function resolvePlayInfoWaiters(info) {
     const normalized = normalizeIncomingPlayInfo(info);
     for (const waiter of [...playInfoWaiters]) {
         if (!hasUsablePlayInfoForBvid(normalized, waiter.bvid)) continue;
+        if (Number(waiter.cid || 0) > 0 && Number(normalized?._cid || 0) !== Number(waiter.cid)) continue;
         clearTimeout(waiter.timer);
         playInfoWaiters.delete(waiter);
         waiter.resolve(normalized);
     }
 }
 
-function isAsrPlayInfoFreshForBvid(info, targetBvid, maxAgeMs = 30000) {
+function isAsrPlayInfoFreshForBvid(info, targetBvid, targetCid = 0) {
     const expectedBvid = normalizeBvidCase(targetBvid || "");
+    const expectedCid = Number(targetCid || 0);
     const normalized = normalizeIncomingPlayInfo(info);
     if (!hasUsablePlayInfoForBvid(normalized, expectedBvid)) return false;
+    if (!(expectedCid > 0) || Number(normalized?._cid || 0) !== expectedCid) return false;
     return true;
 }
 
-async function ensureAsrPlayInfoForBvid(targetBvid) {
+async function ensureAsrPlayInfoForBvid(targetBvid, targetCid = getCurrentRouteCid()) {
     const expectedBvid = normalizeBvidCase(targetBvid || "");
-    if (!expectedBvid) return null;
-    if (isAsrPlayInfoFreshForBvid(appState.playInfo, expectedBvid)) {
+    const expectedCid = Number(targetCid || 0);
+    if (!expectedBvid || !(expectedCid > 0)) return null;
+    if (isAsrPlayInfoFreshForBvid(appState.playInfo, expectedBvid, expectedCid)) {
         return appState.playInfo;
     }
     clearStreamCache();
-    const fresh = await waitForAlignedPlayInfo(expectedBvid);
-    if (isAsrPlayInfoFreshForBvid(fresh, expectedBvid)) {
+    const fresh = await waitForAlignedPlayInfo(expectedBvid, expectedCid);
+    if (isAsrPlayInfoFreshForBvid(fresh, expectedBvid, expectedCid)) {
         return fresh;
     }
     logContent.warn("asr_playinfo_not_fresh", {
@@ -8862,7 +9370,8 @@ async function syncActiveCacheByBvid(expectedBvid) {
     try {
         const res = await chrome.storage.local.get([`cache_${target}`]);
         if (normalizeBvidCase(appState.tabState?.activeBvid || "") !== target) return;
-        const nextCache = res?.[`cache_${target}`] || null;
+        const directory = res?.[`cache_${target}`] || null;
+        const nextCache = selectCacheDirectoryPart(directory, target, getCurrentRouteCid());
         appState.cache = nextCache && normalizeBvidCase(nextCache?.bvid || "") === target && isCacheForCurrentRouteVideo(nextCache, target) ? nextCache : null;
         applyCacheSubtitleState(appState.cache, target);
         if (hasUsableSubtitleCache(appState.cache, target)) {
@@ -8891,6 +9400,23 @@ function hasSubtitleCacheForBvid(targetBvid) {
 
 function reconcileTranscriptionState(targetBvid) {
     const target = normalizeBvidCase(targetBvid || getStableCurrentBvid() || "");
+    const hasSubtitle = hasSubtitleCacheForBvid(target);
+    if (hasSubtitle) {
+        if (appState.asrRequestDispatched && (isAsrSessionActiveForCurrent(target)
+            || (normalizeBvidCase(getTranscriptionBvid() || "") === target && isTranscriptionRunning()))) {
+            chrome.runtime.sendMessage({ action: "ABORT_TRANSCRIPTION", bvid: target }).catch(() => {});
+            logContent.info("asr_existing_subtitle_abort", {
+                task: "asr",
+                bvid: target,
+                detail: { reason: "usable_subtitle_cache_arrived" }
+            });
+        }
+        clearAsrSession();
+        resetTranscriptionState({ phase: "done", progress: 100 });
+        appState.transcriptionCapsuleVisible = false;
+        appState.transcriptionCapsuleMeta = null;
+        return;
+    }
     if (isAsrSessionActiveForCurrent(target)) {
         const session = updateAsrSession({ bvid: target });
         patchTranscriptionState({
@@ -8907,15 +9433,7 @@ function reconcileTranscriptionState(targetBvid) {
     const stateProgress = Math.max(0, Math.min(100, Number(appState.tabState?.transcriptionProgress ?? 0)));
     const localProgress = Math.max(0, Math.min(100, Number(localState.progress ?? 0)));
     const progress = localState.phase === "running" ? Math.max(stateProgress, localProgress) : Math.max(stateProgress, localProgress);
-    const hasSubtitle = hasSubtitleCacheForBvid(target);
     const sameTask = !!(target && requestBvid && target === requestBvid);
-
-    if (hasSubtitle) {
-        resetTranscriptionState();
-        appState.transcriptionCapsuleVisible = false;
-        appState.transcriptionCapsuleMeta = null;
-        return;
-    }
 
     const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
     const shouldKeepRunning = localState.phase === "running" || (sameTask && isAsrSubtitle && progress > 0 && progress < 100);
@@ -8932,6 +9450,14 @@ function reconcileTranscriptionState(targetBvid) {
 async function syncCacheFromBackground(bvid, options = {}) {
     const target = normalizeBvidCase(bvid || getBvidFromUrl(location.href) || "");
     if (!target) return;
+    const requestedCid = getCurrentRouteCid();
+    if (!(requestedCid > 0)) {
+        logPartScopeDiagnostic("cache_request_deferred", {
+            requestedBvid: target.toLowerCase(),
+            reason: "route_cid_pending"
+        }, `cache-deferred:${target}`);
+        return false;
+    }
     const now = Date.now();
     if (options.force !== true && !appState.isStateDirty && appState.lastCacheSyncBvid === target && now - Number(appState.lastCacheSyncTime || 0) < CACHE_SYNC_THROTTLE_MS) {
         return;
@@ -8942,7 +9468,7 @@ async function syncCacheFromBackground(bvid, options = {}) {
         const res = await chrome.runtime.sendMessage({
             action: "GET_CACHE",
             bvid: target,
-            cid: resolveCid(),
+            cid: requestedCid,
             tid: getTidFromUrl(location.href),
             skipCloud: options.skipCloud !== false
         });
@@ -8951,7 +9477,30 @@ async function syncCacheFromBackground(bvid, options = {}) {
         const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href));
         if (routeBvid && routeBvid !== target) return;
         const cache = res.cache || null;
+        logPartScopeDiagnostic("cache_response_received", {
+            requestedBvid: target.toLowerCase(),
+            requestedCid,
+            returnedBvid: normalizeBvidCase(cache?.bvid || "").toLowerCase(),
+            returnedCid: Number(cache?.cid || 0),
+            returnedTid: String(cache?.tid || ""),
+            responseHasSummary: !!String(cache?.summary || "").trim(),
+            responseSegmentsCount: Array.isArray(cache?.segments) ? cache.segments.length : 0,
+            responseHasRumors: !!cache?.rumors,
+            responseHistoryCount: Array.isArray(cache?.history) ? cache.history.length : 0
+        }, `cache-response:${target}:${requestedCid}`);
         if (!cache || normalizeBvidCase(cache?.bvid || "") !== target || !isCacheForCurrentRouteVideo(cache, target)) {
+            logPartScopeDiagnostic("cache_response_rejected", {
+                requestedBvid: target.toLowerCase(),
+                requestedCid,
+                returnedBvid: normalizeBvidCase(cache?.bvid || "").toLowerCase(),
+                returnedCid: Number(cache?.cid || 0),
+                returnedTid: String(cache?.tid || ""),
+                reason: !cache
+                    ? "empty_cache"
+                    : normalizeBvidCase(cache?.bvid || "") !== target
+                        ? "bvid_mismatch"
+                        : "route_identity_mismatch"
+            });
             if (options.preserveCacheOnMiss !== true) {
                 appState.cache = null;
             }
@@ -8964,6 +9513,12 @@ async function syncCacheFromBackground(bvid, options = {}) {
             return false;
         }
         appState.cache = cache;
+        logPartScopeDiagnostic("cache_response_accepted", {
+            requestedBvid: target.toLowerCase(),
+            requestedCid,
+            selectedCid: Number(cache?.cid || 0),
+            selectedTid: String(cache?.tid || "")
+        });
         if (res.tabState) mergeIncomingTabState(res.tabState);
         applyCacheSubtitleState(cache, target);
         appState.subtitleCapturedBvid = target;
@@ -9521,7 +10076,7 @@ function buildCompatIdentityPayload(type, qn) {
         type,
         qn: Number(qn || 0) || undefined,
         bvid: normalizeBvidCase(resolveCurrentBvid() || getBvidFromUrl(location.href) || ""),
-        cid: Number(resolveCid() || appState.injectCid || appState.tabState?.activeCid || 0),
+        cid: Number(resolveCid() || 0),
         tid: appState.tabState?.activeTid || getTidFromUrl(location.href),
         title: cleanBilibiliTitle(document.title)
     };

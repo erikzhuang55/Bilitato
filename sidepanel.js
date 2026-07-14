@@ -36,6 +36,7 @@ const state = {
     segmentsExpanded: false,
     initialized: false,
     activeBvid: "",
+    activePartKey: "",
     switchingToEmbedded: false
 };
 
@@ -69,6 +70,49 @@ function getBvid() {
     return String(state.tabState?.activeBvid || state.cache?.bvid || "").trim();
 }
 
+function getActiveCid() {
+    if (state.tabState && Object.prototype.hasOwnProperty.call(state.tabState, "activeCid")) {
+        return Number(state.tabState.activeCid || 0);
+    }
+    return Number(state.cache?.cid || 0);
+}
+
+function getActivePartKey() {
+    const bvid = getBvid().toLowerCase();
+    const cid = getActiveCid();
+    return bvid && cid > 0 ? `${bvid}::${cid}` : "";
+}
+
+const partScopeDiagnosticSignatures = new Map();
+
+function logPartScopeDiagnostic(event, detail = {}, dedupeKey = "") {
+    if (!state.settings?.debugMode) return;
+    const cache = state.cache || {};
+    const payload = {
+        event,
+        ts: Date.now(),
+        layer: "sidepanel",
+        activeBvid: getBvid().toLowerCase(),
+        activeCid: getActiveCid(),
+        activeTid: String(state.tabState?.activeTid || ""),
+        cacheBvid: String(cache?.bvid || "").toLowerCase(),
+        cacheCid: Number(cache?.cid || 0),
+        cacheTid: String(cache?.tid || ""),
+        hasSummary: !!String(cache?.summary || "").trim(),
+        segmentsCount: Array.isArray(cache?.segments) ? cache.segments.length : 0,
+        hasRumors: !!cache?.rumors,
+        historyCount: Array.isArray(cache?.history) ? cache.history.length : 0,
+        availablePartKeys: cache?.parts && typeof cache.parts === "object" ? Object.keys(cache.parts).slice(0, 50) : [],
+        ...detail
+    };
+    if (dedupeKey) {
+        const signature = JSON.stringify(payload, (key, value) => key === "ts" ? undefined : value);
+        if (partScopeDiagnosticSignatures.get(dedupeKey) === signature) return;
+        partScopeDiagnosticSignatures.set(dedupeKey, signature);
+    }
+    console.log("[PART_SCOPE_DIAG]", payload);
+}
+
 function isCacheForActiveVideo(cache, tabState) {
     if (!cache) return false;
     const activeBvid = String(tabState?.activeBvid || "").trim().toLowerCase();
@@ -77,6 +121,9 @@ function isCacheForActiveVideo(cache, tabState) {
     const activeCid = Number(tabState?.activeCid || 0);
     const cacheCid = Number(cache?.cid || 0);
     if (activeCid > 0 && cacheCid > 0 && activeCid !== cacheCid) return false;
+    const activeTid = String(tabState?.activeTid || "").trim();
+    const cacheTid = String(cache?.tid || "").trim();
+    if (activeTid && cacheTid && activeTid !== cacheTid) return false;
     return true;
 }
 
@@ -166,7 +213,40 @@ async function refreshState({ quiet = false, hydrate = false } = {}) {
         });
         if (!result?.ok) throw new Error(result?.error || "读取视频状态失败");
         const nextBvid = String(result.tabState?.activeBvid || result.cache?.bvid || result.bvid || "");
-        if (state.activeBvid && nextBvid && state.activeBvid !== nextBvid) {
+        const nextCid = result.tabState && Object.prototype.hasOwnProperty.call(result.tabState, "activeCid")
+            ? Number(result.tabState.activeCid || 0)
+            : Number(result.cache?.cid || 0);
+        const nextTid = String(result.tabState?.activeTid || result.cache?.tid || "").trim();
+        const nextPartKey = nextBvid && nextCid > 0
+            ? `${nextBvid.toLowerCase()}::${nextCid}`
+            : nextBvid && nextTid
+                ? `${nextBvid.toLowerCase()}::p:${nextTid}`
+                : "";
+        if (result.settings?.debugMode) {
+            const responseCache = result.cache || {};
+            const diagnostic = {
+                event: "bootstrap_response_received",
+                layer: "sidepanel",
+                nextBvid: nextBvid.toLowerCase(),
+                nextCid,
+                nextTid,
+                nextPartKey,
+                returnedBvid: String(responseCache?.bvid || "").toLowerCase(),
+                returnedCid: Number(responseCache?.cid || 0),
+                returnedTid: String(responseCache?.tid || ""),
+                accepted: !!result.cache && isCacheForActiveVideo(responseCache, result.tabState),
+                hasSummary: !!String(responseCache?.summary || "").trim(),
+                segmentsCount: Array.isArray(responseCache?.segments) ? responseCache.segments.length : 0,
+                hasRumors: !!responseCache?.rumors,
+                historyCount: Array.isArray(responseCache?.history) ? responseCache.history.length : 0
+            };
+            const signature = JSON.stringify(diagnostic);
+            if (partScopeDiagnosticSignatures.get("bootstrap-response") !== signature) {
+                partScopeDiagnosticSignatures.set("bootstrap-response", signature);
+                console.log("[PART_SCOPE_DIAG]", { ...diagnostic, ts: Date.now() });
+            }
+        }
+        if (state.activePartKey && nextPartKey && state.activePartKey !== nextPartKey) {
             if (state.chatStreaming && state.chatPort) {
                 state.chatPort.postMessage({
                     action: "ABORT_CHAT_STREAM",
@@ -183,9 +263,14 @@ async function refreshState({ quiet = false, hydrate = false } = {}) {
             state.activeSubtitleId = "";
         }
         state.activeBvid = nextBvid;
+        state.activePartKey = nextPartKey;
         state.tabState = result.tabState || null;
         state.cache = isCacheForActiveVideo(result.cache, state.tabState) ? result.cache : null;
         state.settings = result.settings || {};
+        logPartScopeDiagnostic("bootstrap_cache_applied", {
+            selected: !!state.cache,
+            selectedPartKey: getActivePartKey()
+        }, "bootstrap-cache-applied");
         state.cloudCachePrefs = normalizeCloudCachePrefs(result.cloudCachePrefs);
         if (!state.initialized) {
             const preferred = String(state.settings.defaultOpenPage || "CC");
@@ -664,6 +749,12 @@ function renderCC() {
 function renderSummary() {
     const summary = String(state.cache?.summary || "").trim();
     const segments = Array.isArray(state.cache?.segments) ? state.cache.segments : [];
+    logPartScopeDiagnostic("ui_render_read", {
+        feature: "summary_segments",
+        summaryStatus: taskStatus("summary"),
+        segmentsStatus: taskStatus("segments"),
+        accepted: isCacheForActiveVideo(state.cache, state.tabState)
+    }, "render:summary_segments");
     const segmentHtml = segments.map((item) => {
         const start = Number(item?.start ?? item?.start_sec ?? 0);
         const end = Number(item?.end ?? item?.end_sec ?? start);
@@ -716,6 +807,11 @@ function renderChat() {
         return `<section class="page chat-page-shell">${noApiKeyHtml()}</section>`;
     }
     const history = Array.isArray(state.cache?.history) ? state.cache.history : [];
+    logPartScopeDiagnostic("ui_render_read", {
+        feature: "chat",
+        accepted: isCacheForActiveVideo(state.cache, state.tabState),
+        streamingPartKey: state.chatStreaming?.partKey || ""
+    }, "render:chat");
     const displayHistory = state.chatStreaming
         ? [...history, { role: "user", content: state.chatStreaming.question }, { role: "assistant", content: state.chatStreaming.answer, streaming: true }]
         : history;
@@ -775,6 +871,12 @@ function renderReal() {
         ? state.cache.rumors.claims
         : (Array.isArray(state.cache?.rumors) ? state.cache.rumors : []);
     const overview = String(state.cache?.rumors?.overview || "").trim();
+    logPartScopeDiagnostic("ui_render_read", {
+        feature: "rumors",
+        rumorsStatus: taskStatus("rumors"),
+        claimsCount: claims.length,
+        accepted: isCacheForActiveVideo(state.cache, state.tabState)
+    }, "render:rumors");
     const loading = taskStatus("rumors") === "processing";
     if (!String(state.settings?.apiKey || "").trim() && !claims.length) {
         return `<section class="page real-page-shell">${noApiKeyHtml()}</section>`;
@@ -1150,13 +1252,19 @@ async function runTask(tasks, label) {
     state.error = "";
     render();
     try {
+        logPartScopeDiagnostic("task_request_identity", {
+            feature: tasks.join(","),
+            requestedBvid: getBvid().toLowerCase(),
+            requestedCid: getActiveCid(),
+            requestedTid: String(state.tabState?.activeTid || state.cache?.tid || "")
+        });
         await runtimeMessage({
             action: "RUN_TASKS",
             tasks,
             force: true,
             bvid: getBvid(),
             taskContext: {
-                cid: Number(state.tabState?.activeCid || state.cache?.cid || 0),
+                cid: getActiveCid(),
                 tid: String(state.tabState?.activeTid || state.cache?.tid || "")
             }
         });
@@ -1169,14 +1277,44 @@ async function runTask(tasks, label) {
 
 function startChatStream(text) {
     const messageId = `side_${Date.now().toString(36)}`;
+    const requestPartKey = getActivePartKey();
     state.chatDraft = "";
-    state.chatStreaming = { messageId, question: text, answer: "" };
+    state.chatStreaming = { messageId, question: text, answer: "", partKey: requestPartKey };
     state.error = "";
     render();
     const port = chrome.runtime.connect({ name: "chat-stream" });
     state.chatPort = port;
+    logPartScopeDiagnostic("task_request_identity", {
+        feature: "chat",
+        messageId,
+        requestPartKey,
+        requestedBvid: getBvid().toLowerCase(),
+        requestedCid: getActiveCid(),
+        requestedTid: String(state.tabState?.activeTid || state.cache?.tid || "")
+    });
     port.onMessage.addListener((message) => {
         if (String(message?.messageId || "") !== messageId) return;
+        const messagePartKey = String(message?.partKey || "");
+        const currentPartKey = getActivePartKey();
+        if (messagePartKey && messagePartKey !== currentPartKey) {
+            logPartScopeDiagnostic("chat_stream_rejected", {
+                feature: "chat",
+                messageId,
+                requestPartKey,
+                messagePartKey,
+                currentPartKey,
+                reason: "part_key_mismatch"
+            });
+            return;
+        }
+        logPartScopeDiagnostic("chat_stream_accepted", {
+            feature: "chat",
+            messageId,
+            requestPartKey,
+            messagePartKey,
+            currentPartKey,
+            type: String(message?.type || "")
+        }, `chat-stream:${messageId}:${message?.type || ""}`);
         if (message.type === "delta") {
             state.chatStreaming.answer += String(message.delta || "");
             const answerNode = document.querySelector('[data-streaming-answer="true"] .chat-item');
@@ -1227,7 +1365,11 @@ function startChatStream(text) {
         tabId: state.tabId,
         text,
         messageId,
-        bvid: getBvid()
+        bvid: getBvid(),
+        taskContext: {
+            cid: getActiveCid(),
+            tid: String(state.tabState?.activeTid || state.cache?.tid || "")
+        }
     });
 }
 

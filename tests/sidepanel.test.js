@@ -11,6 +11,7 @@ const sidepanel = readFileSync(new URL("../sidepanel.js", import.meta.url), "utf
 const sidepanelHtml = readFileSync(new URL("../sidepanel.html", import.meta.url), "utf8");
 const sidepanelCss = readFileSync(new URL("../sidepanel.css", import.meta.url), "utf8");
 const inject = readFileSync(new URL("../inject.js", import.meta.url), "utf8");
+const videoCacheCidMigration = readFileSync(new URL("../supabase/migrations/20260710095455_add_cid_isolation_to_video_cache.sql", import.meta.url), "utf8");
 
 describe("native side panel", () => {
   it("declares the Chrome side panel entry and permissions", () => {
@@ -203,7 +204,8 @@ describe("native side panel", () => {
     expect(content).toContain('document.addEventListener("timeupdate", onMediaEvent, true)');
     expect(content).toContain('fallbackTimer = setTimeout(() => unlock("fallback", false), 5000)');
     expect(content).toContain("listNode.scrollTop = 0");
-    expect(content).toMatch(/scrollUnlockAt = Math\.max\([\s\S]*?subtitleUiCoordinator\.scrollUnlockAt,[\s\S]*?Date\.now\(\) \+ 300/);
+    expect(content).toContain("const rows = getCurrentSubtitleStateRows()");
+    expect(content).not.toMatch(/scrollUnlockAt = Math\.max\([\s\S]*?subtitleUiCoordinator\.scrollUnlockAt,[\s\S]*?Date\.now\(\) \+ 300/);
   });
 
   it("deduplicates route, playinfo, and subtitle follow polling", () => {
@@ -231,7 +233,12 @@ describe("native side panel", () => {
   it("separates absent subtitles, capture failures, and slow subtitle responses", () => {
     expect(content).toContain('subtitleUiCoordinator.phase = "probing"');
     expect(content).toContain('source: "subtitle_control_absent"');
-    expect(content).toContain('scheduleSubtitleUiDeadline(routeKey, generation, 5000, "trigger_failed")');
+    expect(content).toContain('scheduleSubtitleUiDeadline(routeKey, generation, 500, "unavailable")');
+    expect(content).toContain("function isUsableSubtitleControl(node)");
+    expect(content).toContain("function isSubtitleControlBarReady()");
+    expect(content).toContain("controlProbeObserver: null");
+    expect(content).toContain('stableWindowMs: 500');
+    expect(content).toContain("Date.now() - startedAt >= 2000");
     expect(content).toContain('scheduleSubtitleUiDeadline(routeKey, generation, 10000, "timeout")');
     expect(content).toContain('data-action="${buttonAction}"');
     expect(content).toContain('const buttonAction = retryableSubtitleLoad ? "subtitle-load-retry" : "transcription-start"');
@@ -239,9 +246,10 @@ describe("native side panel", () => {
     expect(inject).toContain('event.data?.type === "BILI_RETRY_SUBTITLE_CAPTURE"');
   });
 
-  it("waits for player alignment before declaring that subtitles are absent", () => {
-    expect(content).toContain("if (!Number.isFinite(subtitleUiCoordinator.scrollUnlockAt))");
-    expect(content).toMatch(/if \(!Number\.isFinite\(subtitleUiCoordinator\.scrollUnlockAt\)\) \{[\s\S]*?readyWithoutSubtitleSince = 0;[\s\S]*?return;/);
+  it("detects missing subtitle controls independently from scroll alignment", () => {
+    expect(content).not.toContain("if (!Number.isFinite(subtitleUiCoordinator.scrollUnlockAt))");
+    expect(content).toMatch(/if \(isSubtitlePlayerReady\(\) && isSubtitleControlBarReady\(\)\)[\s\S]*?markSubtitleStateChanged\("subtitle_control_absent"\);/);
+    expect(content).toMatch(/function isSubtitlePlayerReady\(\) \{[\s\S]*?return !!video && Number\(video\.readyState \|\| 0\) >= 1;/);
   });
 
   it("keeps subtitle fallback naming focused on transcription availability", () => {
@@ -271,7 +279,7 @@ describe("native side panel", () => {
 
   it("allows the cached Chinese CC variant to replace the injected display", () => {
     expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?subtitleUiCoordinator\.displaySource = "language_switch"/);
-    expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?subtitleUiCoordinator\.displayCommitted = false/);
+    expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?source: "language_switch"[\s\S]*?replace: true/);
     expect(content).toMatch(/if \(targetKey === "zh"\)[\s\S]*?delete ccPanel\.dataset\.subtitleDiagRenderSignature/);
   });
 
@@ -300,8 +308,28 @@ describe("native side panel", () => {
     expect(background).toContain("cid: Number.isFinite(effectiveCid) ? effectiveCid : 0");
     expect(background).toContain("cid: Number(result?.identity?.cid || payload?.cid || 0)");
     expect(background).toContain("Number(params.get(\"p\") || state.p || fallbackData.page || 1)");
-    expect(content).toContain("cid: Number(resolveCid() || meta?.cid || 0)");
-    expect(content).toContain("cid: Number(resolveCid() || payload.cid || 0)");
+    expect(inject).toContain('_cid: Number.isFinite(currentCid) && currentCid > 0 ? currentCid : 0');
+    expect(inject).toContain('emitLog("playinfo_stale_skip"');
+    expect(inject).toContain("const stateMatchesRoute =");
+    expect(content).toContain("const confirmedCid = await waitForConfirmedRouteCid(bvid)");
+    expect(content).toContain("cid: confirmedCid");
+  });
+
+  it("restores existing ASR subtitles before starting another transcription", () => {
+    expect(content).toContain("function getCurrentRouteCid()");
+    expect(content).toContain("routeBvid === tabStateBvid");
+    expect(content).toContain("function waitForConfirmedRouteCid(");
+    expect(content).toContain('code: "PART_IDENTITY_PENDING"');
+    expect(content).toContain('reason: "route_cid_pending"');
+    expect(content).toContain('action: "SET_ACTIVE_PART"');
+    expect(content).toContain("finishWithExistingSubtitle");
+    expect(content).toContain("asrRequestDispatched: false");
+    expect(content).toContain('action: "ABORT_TRANSCRIPTION"');
+    expect(content).toContain('reason: "usable_subtitle_cache_arrived"');
+    expect(background).toContain('const hasExplicitCid = Object.prototype.hasOwnProperty.call(msg || {}, "cid")');
+    expect(background).toContain("cid: Number(hasExplicitCid ? msg.cid : (tabState?.activeCid || 0))");
+    expect(background).toContain("if (!(cid > 0)) return null");
+    expect(background).toContain("if (!identity.bvid || !(identity.cid > 0)) return null");
   });
 
   it("adds confirmed local cache cleanup actions in settings", () => {
@@ -386,7 +414,7 @@ describe("native side panel", () => {
     expect(sidepanel).toContain("showCopyFeedback");
     expect(sidepanel).toContain("summaryWasAtBottom");
     expect(sidepanel).toContain("state.chatGuideHidden = false");
-    expect(sidepanel).toContain("state.activeBvid !== nextBvid");
+    expect(sidepanel).toContain("state.activePartKey !== nextPartKey");
     expect(sidepanel).toContain('if (kind === "copy") showCopyFeedback(anchor, "复制")');
     expect(sidepanel).toContain('showToast("反馈提交成功")');
     expect(sidepanelCss).toContain("z-index: 2147483647");
@@ -408,6 +436,51 @@ describe("native side panel", () => {
     expect(sidepanelCss).toContain(".chat-footer");
     expect(sidepanelCss).toContain(".claim-card.fake");
     expect(sidepanelCss).not.toContain("border-bottom: 1px solid #f1f2f3");
+  });
+
+  it("isolates AI results and chat streams by video part", () => {
+    expect(background).toContain("function createVideoCachePartKey(bvid, cid)");
+    expect(background).toContain("function getPartCacheForContext");
+    expect(background).toContain("taskStateByPart");
+    expect(background).toContain('msg.action === "SET_ACTIVE_PART"');
+    expect(background).toContain('cid: identity.cid > 0 ? `eq.${identity.cid}` : "is.null"');
+    expect(background).toContain("buildSupabaseVideoPatch(bvid, settings, patch, partContext = {})");
+    expect(background).toContain("params: hasExisting ? rowFilter : {}");
+    expect(videoCacheCidMigration).toContain("video_cache_bvid_cid_unique");
+    expect(videoCacheCidMigration).toContain("where cid is not null");
+    expect(background).toContain('safePortPost(port, { type: "done", messageId, partKey: identity.partKey');
+    expect(content).toContain("messagePartKey !== currentPartKey");
+    expect(content).toContain('action: "SET_ACTIVE_PART"');
+    expect(sidepanel).toContain("messagePartKey !== currentPartKey");
+  });
+
+  it("logs part-scoped AI cache decisions only in debug mode", () => {
+    expect(background).toContain('console.log("[PART_SCOPE_DIAG]"');
+    expect(background).toContain("if (!currentDebugMode) return");
+    expect(background).toContain('"cloud_read_query"');
+    expect(background).toContain('"cache_write_target"');
+    expect(content).toContain('console.log("[PART_SCOPE_DIAG]"');
+    expect(content).toContain("if (!isDebugLoggingEnabled()) return");
+    expect(content).toContain('"storage_cache_candidate"');
+    expect(content).toContain('"ui_render_read"');
+    expect(sidepanel).toContain("if (!state.settings?.debugMode) return");
+    expect(sidepanel).toContain('"bootstrap_response_received"');
+  });
+
+  it("finishes visible task progress before background post-processing returns", () => {
+    expect(content).toContain("visibleProgressCompletedTaskIds: new Set()");
+    expect(content).toContain("syncStepProgressByTaskState(appState.tabState)");
+    expect(content).toContain("startAsymptoticPseudoProgress(activeTaskId, 18)");
+    expect(content).toContain("if (!appState.visibleProgressCompletedTaskIds.has(taskId))");
+  });
+
+  it("renders subtitles from one route-scoped state without empty-cache replacement", () => {
+    expect(content).toContain("function commitSubtitleRows(rows, options = {})");
+    expect(content).toContain("function renderSubtitleIfNeeded(container, reason = \"state_change\")");
+    expect(content).toContain("function scheduleSubtitleRender(reason = \"state_change\")");
+    expect(content).toContain('reason: "current_rows_already_authoritative"');
+    expect(content).toContain("const rows = getCurrentSubtitleStateRows()");
+    expect(content.match(/renderCC\(/g)?.length || 0).toBe(2);
   });
 
   it("declares the content action listener at top level", () => {

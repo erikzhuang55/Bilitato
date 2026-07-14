@@ -36,9 +36,33 @@
         }).join("\n");
     }
 
+    function getActiveSubtitleIndex(rows, currentTime) {
+        const list = Array.isArray(rows) ? rows : [];
+        const time = Number(currentTime);
+        if (!Number.isFinite(time)) return -1;
+        const starts = list.map((row) => Number(row?.start ?? row?.from ?? NaN));
+        const hasProgressingTimeline = starts.some((start, index) => index > 0
+            && Number.isFinite(start)
+            && Number.isFinite(starts[index - 1])
+            && start > starts[index - 1]);
+        if (list.length > 1 && !hasProgressingTimeline) return -1;
+        for (let index = 0; index < list.length; index += 1) {
+            const start = starts[index];
+            if (!Number.isFinite(start)) continue;
+            const explicitEnd = Number(list[index]?.end ?? list[index]?.to ?? NaN);
+            const nextStart = index < list.length - 1 ? starts[index + 1] : NaN;
+            const end = Number.isFinite(explicitEnd) && explicitEnd > start
+                ? explicitEnd
+                : (Number.isFinite(nextStart) && nextStart > start ? nextStart : start + 6);
+            if (start <= time && time < end) return index;
+        }
+        return -1;
+    }
+
     globalThis.BilitatoContentSubtitle = {
         buildSrtContent,
         buildTimestampedSubtitleText,
+        getActiveSubtitleIndex,
         getRawSubtitlePlainText,
         getRawSubtitleRows,
         getSubtitleRowText

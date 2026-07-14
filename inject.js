@@ -128,10 +128,21 @@
                     const playData = dashData?.data || dashData?.result || dashData;
                     const dash = playData?.dash;
                     if (dash) {
-                        const currentBvid = window.location.href.match(/BV[a-zA-Z0-9]{10}/)?.[0] || "";
+                        const requestBvid = String(this.__biliRequestMeta?.bvid || "").trim();
+                        const routeBvid = window.location.href.match(/BV[a-zA-Z0-9]{10}/)?.[0] || "";
+                        if (requestBvid && routeBvid && requestBvid.toLowerCase() !== routeBvid.toLowerCase()) {
+                            emitLog("playinfo_stale_skip", { request_bvid: requestBvid, route_bvid: routeBvid });
+                            return;
+                        }
+                        const currentBvid = requestBvid || routeBvid;
+                        let currentCid = 0;
+                        try {
+                            currentCid = Number(new URL(url, location.href).searchParams.get("cid") || 0);
+                        } catch (_) {}
                         latestPlayinfo = {
                             ...playData,
                             _bvid: currentBvid,
+                            _cid: Number.isFinite(currentCid) && currentCid > 0 ? currentCid : 0,
                             _ts: Date.now()
                         };
                         emitLog("playinfo_updated", { source: "xhr_playurl", url_host: getUrlHost(url), bvid: currentBvid });
@@ -677,12 +688,21 @@
         const videoData = state.videoData || {};
         const pages = Array.isArray(videoData.pages) ? videoData.pages : [];
         const url = new URL(location.href);
-        const bvid = location.pathname.match(/\/video\/(BV[a-zA-Z0-9]+)/)?.[1] || videoData.bvid || state.bvid || "";
+        const routeBvid = location.pathname.match(/\/video\/(BV[a-zA-Z0-9]+)/)?.[1] || "";
+        const stateBvid = String(videoData.bvid || state.bvid || "").trim();
+        const stateMatchesRoute = !routeBvid || !stateBvid || routeBvid.toLowerCase() === stateBvid.toLowerCase();
+        const bvid = routeBvid || stateBvid;
         const p = Math.max(1, Number(url.searchParams.get("p") || state.p || 1));
-        const currentPage = pages.find((item) => Number(item?.page) === p) || pages[p - 1] || null;
+        const currentPage = stateMatchesRoute
+            ? (pages.find((item) => Number(item?.page) === p) || pages[p - 1] || null)
+            : null;
         const video = document.querySelector("video");
         const duration = Number(currentPage?.duration) || Number(video?.duration) || 0;
-        const cid = Number(currentPage?.cid) || Number(state.cid) || 0;
+        const playInfoMatchesRoute = String(latestPlayinfo?._bvid || "").toLowerCase() === String(bvid || "").toLowerCase();
+        const cid = Number(currentPage?.cid)
+            || (playInfoMatchesRoute ? Number(latestPlayinfo?._cid) : 0)
+            || (stateMatchesRoute ? Number(state.cid) : 0)
+            || 0;
         return {
             bvid: String(bvid || "").trim(),
             p,
@@ -840,6 +860,7 @@
                 video: resultVideo,
                 audio,
                 _bvid: String(data._bvid || getBvidFromUrl(location.href) || "").trim(),
+                _cid: Number(data._cid || resolveCurrentVideoMeta().cid || 0),
                 _ts: Number(data._ts || 0)
             };
         } catch (e) {

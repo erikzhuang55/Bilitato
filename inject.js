@@ -598,7 +598,7 @@
             
             // Immediately dispatch postMessage on detection without delay
             const meta = resolveCurrentVideoMeta();
-            window.postMessage({ type: "BILI_ROUTE_SWITCH", bvid: current, cid: meta.cid || 0, tid: getRouteTid() }, "*");
+            window.postMessage({ type: "BILI_ROUTE_SWITCH", bvid: current, cid: meta.cid || 0, tid: getRouteTid(), partCount: meta.partCount || 0 }, "*");
             
             routeMetaReadyAt = Date.now() + 800;
             hardResetForRoute(current, "route_monitor");
@@ -630,7 +630,7 @@
             ...getSubtitleDiagnosticRowsMeta(body)
         });
         emitLog("subtitle_parsed", { count: body.length, bvid, cid });
-        window.postMessage({ type: "BILI_SUBTITLE_HANDSHAKE", bvid, cid }, "*");
+        window.postMessage({ type: "BILI_SUBTITLE_HANDSHAKE", bvid, cid, partCount: meta.partCount || 0 }, "*");
         setTimeout(() => {
             window.postMessage({
                 type: "BILI_SUBTITLE_DATA",
@@ -640,6 +640,7 @@
                 p: meta.p || 1,
                 part: meta.part || "",
                 duration: meta.duration || 0,
+                partCount: meta.partCount || 0,
                 language: meta.language || "",
                 languageLabel: meta.languageLabel || "",
                 subtitleUrl: String(subtitleUrl || "")
@@ -708,7 +709,8 @@
             p,
             cid: Number.isFinite(cid) ? cid : 0,
             part: String(currentPage?.part || ""),
-            duration: Number.isFinite(duration) ? duration : 0
+            duration: Number.isFinite(duration) ? duration : 0,
+            partCount: stateMatchesRoute ? pages.length : 0
         };
     }
 
@@ -856,11 +858,13 @@
                 audio.sort((a, b) => b.bandwidth - a.bandwidth);
             }
             
+            const currentMeta = resolveCurrentVideoMeta();
             return {
                 video: resultVideo,
                 audio,
                 _bvid: String(data._bvid || getBvidFromUrl(location.href) || "").trim(),
-                _cid: Number(data._cid || resolveCurrentVideoMeta().cid || 0),
+                _cid: Number(data._cid || currentMeta.cid || 0),
+                _partCount: Number(currentMeta.partCount || 0),
                 _ts: Number(data._ts || 0)
             };
         } catch (e) {

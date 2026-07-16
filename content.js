@@ -356,6 +356,7 @@ const appState = {
     subtitleCapturedBvid: "",
     injectBvid: "",
     injectCid: 0,
+    injectPartCount: 0,
     logPollTimer: null,
     injectReady: false,
     injectRetryTimer: null,
@@ -1554,6 +1555,8 @@ async function onInjectMessage(event) {
             appState.injectRetryTimer = null;
         }
         if (msgType === "BILI_SUBTITLE_HANDSHAKE") {
+            const partCount = Number(event?.data?.partCount || 0);
+            if (partCount > 0) appState.injectPartCount = partCount;
             pushSubtitleTimeline("handshake", {
                 bvid: String(event?.data?.bvid || "").trim(),
                 cid: Number(event?.data?.cid || 0)
@@ -1588,6 +1591,8 @@ async function onInjectMessage(event) {
             const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
             const infoBvid = normalizeBvidCase(normalizedInfo?._bvid || "");
             if (normalizedInfo && (!pageBvid || !infoBvid || infoBvid === pageBvid)) {
+                const partCount = Number(normalizedInfo?._partCount || 0);
+                if (partCount > 0) appState.injectPartCount = partCount;
                 acceptConfirmedRouteCid(infoBvid || pageBvid, Number(normalizedInfo?._cid || 0), "playinfo");
                 appState.playInfo = normalizedInfo;
                 appState.playInfoUpdatedAt = Date.now();
@@ -1617,23 +1622,27 @@ async function onInjectMessage(event) {
         if (isDuplicateSubtitleRouteSwitch(routeBvid, routeP)) return;
         resetAllState();
         const routeCid = Number(event.data?.cid || 0);
+        const routePartCount = Number(event.data?.partCount || 0);
         beginSubtitleUiCycle(routeBvid, routeP);
         appState.routeWatchBvid = routeBvid;
         appState.routeWatchKey = getCurrentRouteVideoKey();
         appState.injectBvid = routeBvid;
         appState.injectCid = Number.isFinite(routeCid) && routeCid > 0 ? routeCid : 0;
+        appState.injectPartCount = Number.isFinite(routePartCount) && routePartCount > 0 ? routePartCount : 0;
         appState.tabState = {
             ...(appState.tabState || {}),
             activeBvid: routeBvid || appState.tabState?.activeBvid || "",
             activeCid: appState.injectCid,
             activeTid: getRoutePartId() || null,
+            activePartCount: appState.injectPartCount,
             updatedAt: Date.now()
         };
         chrome.runtime.sendMessage({
             action: "SET_ACTIVE_PART",
             bvid: routeBvid,
             cid: appState.injectCid,
-            tid: getRoutePartId() || null
+            tid: getRoutePartId() || null,
+            partCount: appState.injectPartCount
         }).catch(() => {});
         clearCCListImmediately();
         renderContent();
@@ -1653,6 +1662,8 @@ async function onInjectMessage(event) {
     }
     const bvid = normalizeBvidCase(event.data?.bvid) || normalizeBvidCase(resolveCurrentBvid());
     const cid = Number(event.data?.cid || 0);
+    const partCount = Number(event.data?.partCount || 0);
+    if (partCount > 0) appState.injectPartCount = partCount;
     const currentUrlBvid = normalizeBvidCase(getBvidFromUrl(location.href));
     if (bvid && currentUrlBvid && bvid !== currentUrlBvid) {
         pushSubtitleTimeline("drop_mismatch_bvid", { payloadBvid: bvid, currentBvid: currentUrlBvid });
@@ -1675,6 +1686,7 @@ async function onInjectMessage(event) {
         p: Number(event.data?.p || 0) || undefined,
         part: String(event.data?.part || ""),
         duration: Number(event.data?.duration || 0) || 0,
+        partCount: Number(event.data?.partCount || 0) || 0,
         subtitleLanguage: String(event.data?.language || ""),
         subtitleLanguageLabel: String(event.data?.languageLabel || ""),
         subtitleUrl: String(event.data?.subtitleUrl || "")
@@ -3338,8 +3350,13 @@ async function submitFeedbackFromPanel() {
         content,
         includeLogs: includeLogsInput?.checked !== false
     };
-    if (!title || !content) {
-        setFeedbackState({ errorText: "标题和内容都要填一下", statusText: "" });
+    if (!isMeaningfulFeedbackText(title)) {
+        setFeedbackState({ errorText: "标题不能为空哦", statusText: "" });
+        renderContent();
+        return;
+    }
+    if (!isMeaningfulFeedbackText(content)) {
+        setFeedbackState({ errorText: "内容不能为空哦", statusText: "" });
         renderContent();
         return;
     }
@@ -3376,6 +3393,11 @@ async function submitFeedbackFromPanel() {
         });
         renderContent();
     }
+}
+
+function isMeaningfulFeedbackText(value) {
+    const normalized = String(value || "").trim().replace(/[。.!！?？]+$/g, "").trim();
+    return !!normalized && !/^(无|暂无|没有|无内容|没内容|不知道|不清楚)$/i.test(normalized);
 }
 
 function renderFeedbackCenter() {
@@ -5814,6 +5836,7 @@ async function runTasks(tasks, options = {}) {
             ...(durationMeta ? { videoDuration: durationMeta } : {}),
             cid: resolveCid(),
             tid: getTidFromUrl(location.href),
+            partCount: getCurrentRoutePartCount(),
             ...((options && typeof options === "object" && options.taskContext) ? options.taskContext : {})
         };
         const runtimeAction = String(options?.overrideAction || "RUN_TASKS");
@@ -5901,7 +5924,8 @@ async function handleSendChat() {
         bvid: normalizeBvidCase(resolveCurrentBvid() || ""),
         taskContext: {
             cid: resolveCid(),
-            tid: getTidFromUrl(location.href)
+            tid: getTidFromUrl(location.href),
+            partCount: getCurrentRoutePartCount()
         }
     });
 }
@@ -6571,7 +6595,8 @@ function startCloudReadForCurrentVideo(options = {}) {
         action: "GET_CACHE",
         bvid: target,
         cid,
-        tid: getRoutePartId()
+        tid: getRoutePartId(),
+        partCount: getCurrentRoutePartCount()
     });
     const timeout = new Promise((_, reject) => {
         setTimeout(() => reject(new Error("CLOUD_TIMEOUT")), CLOUD_READ_TIMEOUT_MS);
@@ -8568,6 +8593,22 @@ function getCurrentRouteCid() {
     return 0;
 }
 
+function getCurrentRoutePartCount() {
+    const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+    const injectBvid = normalizeBvidCase(appState.injectBvid || "");
+    const playInfoBvid = normalizeBvidCase(appState.playInfo?._bvid || "");
+    const tabStateBvid = normalizeBvidCase(appState.tabState?.activeBvid || "");
+    const candidates = [];
+    if (!routeBvid || !injectBvid || routeBvid === injectBvid) candidates.push(appState.injectPartCount);
+    if (!routeBvid || !playInfoBvid || routeBvid === playInfoBvid) candidates.push(appState.playInfo?._partCount);
+    if (!routeBvid || !tabStateBvid || routeBvid === tabStateBvid) candidates.push(appState.tabState?.activePartCount);
+    for (const value of candidates) {
+        const partCount = Number(value || 0);
+        if (Number.isFinite(partCount) && partCount > 0) return Math.floor(partCount);
+    }
+    return 0;
+}
+
 function acceptConfirmedRouteCid(bvid, cid, source = "unknown") {
     const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
     const confirmedBvid = normalizeBvidCase(bvid || "");
@@ -8581,13 +8622,15 @@ function acceptConfirmedRouteCid(bvid, cid, source = "unknown") {
         activeBvid: routeBvid,
         activeCid: confirmedCid,
         activeTid: getRoutePartId() || null,
+        activePartCount: getCurrentRoutePartCount(),
         updatedAt: Date.now()
     };
     chrome.runtime.sendMessage({
         action: "SET_ACTIVE_PART",
         bvid: routeBvid,
         cid: confirmedCid,
-        tid: getRoutePartId() || null
+        tid: getRoutePartId() || null,
+        partCount: getCurrentRoutePartCount()
     }).catch(() => {});
     if (previousCid !== confirmedCid) {
         logPartScopeDiagnostic("route_cid_confirmed", {
@@ -9122,6 +9165,7 @@ function startRouteWatcher() {
             activeBvid: current,
             activeCid: 0,
             activeTid: routeP || null,
+            activePartCount: 0,
             updatedAt: Date.now(),
             taskStatus: {
                 ...(appState.tabState?.taskStatus || {}),
@@ -9133,13 +9177,15 @@ function startRouteWatcher() {
         };
         appState.injectBvid = current;
         appState.injectCid = 0;
+        appState.injectPartCount = 0;
         appState.injectBvidChangedAt = Date.now();
         appState.isStateDirty = true;
         chrome.runtime.sendMessage({
             action: "SET_ACTIVE_PART",
             bvid: current,
             cid: 0,
-            tid: routeP || null
+            tid: routeP || null,
+            partCount: 0
         }).catch(() => {});
         startSubtitleCheckTimer();
         beginSubtitleObservation(current);
@@ -9470,6 +9516,7 @@ async function syncCacheFromBackground(bvid, options = {}) {
             bvid: target,
             cid: requestedCid,
             tid: getTidFromUrl(location.href),
+            partCount: getCurrentRoutePartCount(),
             skipCloud: options.skipCloud !== false
         });
         if (!res?.ok) return;

@@ -352,6 +352,11 @@ function sanitizeFeedbackText(value, maxLength) {
     return String(value || "").trim().slice(0, maxLength);
 }
 
+function isMeaningfulFeedbackText(value) {
+    const normalized = String(value || "").trim().replace(/[。.!！?？]+$/g, "").trim();
+    return !!normalized && !/^(无|暂无|没有|无内容|没内容|不知道|不清楚)$/i.test(normalized);
+}
+
 function normalizeFeedbackRow(row = {}) {
     return {
         id: String(row.id || ""),
@@ -464,8 +469,8 @@ async function submitFeedbackFromContent(msg, sender) {
     const type = ["bug", "suggestion", "question"].includes(String(msg.type || "bug")) ? String(msg.type || "bug") : "bug";
     const title = sanitizeFeedbackText(msg.title, 120);
     const content = sanitizeFeedbackText(msg.content, 3000);
-    if (!title) throw new Error("请填写反馈标题");
-    if (!content) throw new Error("请填写反馈内容");
+    if (!isMeaningfulFeedbackText(title)) throw new Error("标题不能为空哦");
+    if (!isMeaningfulFeedbackText(content)) throw new Error("内容不能为空哦");
     const includeLogs = msg.includeLogs !== false;
     const contentLogs = Array.isArray(msg.logs) ? msg.logs.filter(isFeedbackDiagnosticLog).slice(-80) : [];
     const backgroundLogs = globalLogs.filter(isFeedbackDiagnosticLog).slice(-120);
@@ -1088,6 +1093,7 @@ async function handleMessage(msg, sender) {
             activeBvid: bvid,
             activeCid: Number.isFinite(cid) && cid > 0 ? cid : 0,
             activeTid: String(msg?.tid || "").trim() || null,
+            activePartCount: Math.max(0, Math.floor(Number(msg?.partCount || 0))),
             updatedAt: Date.now()
         });
         return {};
@@ -1186,7 +1192,8 @@ async function handleMessage(msg, sender) {
         if (tabState?.activeBvid && msg?.skipCloud !== true) {
             await hydrateCloudCacheIfNeeded(tabState.activeBvid, CLOUD_CACHE_KEYS, settings, {
                 cid: Number(tabState?.activeCid || 0),
-                tid: String(tabState?.activeTid || "")
+                tid: String(tabState?.activeTid || ""),
+                partCount: Number(tabState?.activePartCount || 0)
             });
         }
         const rawCache = tabState?.activeBvid ? await getCache(tabState.activeBvid) : null;
@@ -1215,7 +1222,8 @@ async function handleMessage(msg, sender) {
             if (bvid && msg?.skipCloud !== true) {
                 await hydrateCloudCacheIfNeeded(bvid, CLOUD_CACHE_KEYS, settings, {
                     cid: Number(tabState?.activeCid || 0),
-                    tid: String(tabState?.activeTid || "")
+                    tid: String(tabState?.activeTid || ""),
+                    partCount: Number(tabState?.activePartCount || 0)
                 });
             }
             const rawCache = bvid ? await getCache(bvid) : null;
@@ -1237,7 +1245,8 @@ async function handleMessage(msg, sender) {
         const hasExplicitCid = Object.prototype.hasOwnProperty.call(msg || {}, "cid");
         const cacheContext = {
             cid: Number(hasExplicitCid ? msg.cid : (tabState?.activeCid || 0)),
-            tid: String(msg.tid || tabState?.activeTid || "")
+            tid: String(msg.tid || tabState?.activeTid || ""),
+            partCount: Number(msg.partCount || tabState?.activePartCount || 0)
         };
         if (msg?.skipCloud !== true) {
             await hydrateCloudCacheIfNeeded(expected, CLOUD_CACHE_KEYS, settings, cacheContext);
@@ -3186,10 +3195,12 @@ function normalizeTaskContext(raw) {
     const cid = Number(source.cid || 0);
     const bvid = normalizeBvid(source.bvid || "");
     const partKey = createVideoCachePartKey(bvid, cid);
+    const partCount = Math.max(0, Math.floor(Number(source.partCount || 0)));
     return {
         bvid,
         cid: Number.isFinite(cid) && cid > 0 ? cid : 0,
         tid: String(source.tid || "").trim(),
+        partCount,
         partKey,
         videoDuration: {
             totalSeconds: Number.isFinite(totalSeconds) && totalSeconds > 0 ? Math.floor(totalSeconds) : 0,
@@ -3222,6 +3233,7 @@ function resolvePartContext(bvid, context = {}) {
         bvid: normalizedBvid,
         cid: normalizedCid,
         tid: String(context?.tid || "").trim(),
+        partCount: Math.max(0, Math.floor(Number(context?.partCount || 0))),
         partKey: createVideoCachePartKey(normalizedBvid, normalizedCid)
     };
 }
@@ -6687,6 +6699,7 @@ async function updateTabState(tabId, patch) {
         activeBvid: null,
         activeCid: 0,
         activeTid: null,
+        activePartCount: 0,
         taskStatus: createIdleTaskStatus(),
         taskErrors: {},
         taskRetryState: {},
@@ -7367,24 +7380,48 @@ async function fetchCloudVideoCacheRow(bvid, tasks, settings, partContext = {}) 
     logPartScopeDiagnostic("cloud_read_query", {
         bvid: identity.bvid,
         cid: identity.cid || null,
+        partCount: identity.partCount,
         partKey: identity.partKey,
         tasks,
         filters: params
     });
-    const rows = await supabaseSelect(settings, settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE, {
-        select: buildCloudSelectColumns(tasks).join(","),
+    const table = settings.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE;
+    const select = buildCloudSelectColumns(tasks).join(",");
+    let rows = await supabaseSelect(settings, table, {
+        select,
         ...params,
         limit: "1"
     }, {
         requestName: "cloud_video_cache_fetch",
         errorMessage: "Supabase 查询失败"
     });
+    let source = "exact_cid";
+    if ((!Array.isArray(rows) || !rows.length) && identity.partCount === 1) {
+        source = "legacy_bvid";
+        logPartScopeDiagnostic("cloud_read_legacy_fallback", {
+            bvid: identity.bvid,
+            requestedCid: identity.cid,
+            partCount: identity.partCount,
+            tasks
+        });
+        rows = await supabaseSelect(settings, table, {
+            select,
+            bvid: `eq.${identity.bvid}`,
+            cid: "is.null",
+            limit: "1"
+        }, {
+            requestName: "cloud_video_cache_legacy_fetch",
+            errorMessage: "Supabase 旧缓存查询失败"
+        });
+    }
     const row = Array.isArray(rows) && rows.length ? rows[0] : null;
     logPartScopeDiagnostic("cloud_read_result", {
         bvid: identity.bvid,
         requestedCid: identity.cid || null,
         returnedCid: Number(row?.cid || 0) || null,
         matched: !!row,
+        source,
+        partCount: identity.partCount,
         tasks,
         ...(row ? buildPartScopeCacheMeta(buildCloudPatchFromRow(row, tasks)) : {})
     });
@@ -7410,6 +7447,7 @@ async function hydrateCloudCacheIfNeeded(bvid, tasks, settings, partContext = {}
     logPartScopeDiagnostic("cloud_hydrate_decision", {
         bvid: identity.bvid,
         cid: identity.cid || null,
+        partCount: identity.partCount,
         partKey: identity.partKey,
         requestedTasks,
         missingTasks,

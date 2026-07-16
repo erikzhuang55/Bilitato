@@ -866,6 +866,11 @@ function feedbackStatusLabel(value) {
     return { pending: "处理中", processing: "处理中", resolved: "已处理", closed: "已关闭" }[String(value || "").toLowerCase()] || "处理中";
 }
 
+function isMeaningfulFeedbackText(value) {
+    const normalized = String(value || "").trim().replace(/[。.!！?？]+$/g, "").trim();
+    return !!normalized && !/^(无|暂无|没有|无内容|没内容|不知道|不清楚)$/i.test(normalized);
+}
+
 function renderReal() {
     const claims = Array.isArray(state.cache?.rumors?.claims)
         ? state.cache.rumors.claims
@@ -1265,7 +1270,8 @@ async function runTask(tasks, label) {
             bvid: getBvid(),
             taskContext: {
                 cid: getActiveCid(),
-                tid: String(state.tabState?.activeTid || state.cache?.tid || "")
+                tid: String(state.tabState?.activeTid || state.cache?.tid || ""),
+                partCount: Number(state.tabState?.activePartCount || 0)
             }
         });
         await refreshState({ quiet: true });
@@ -1368,7 +1374,8 @@ function startChatStream(text) {
         bvid: getBvid(),
         taskContext: {
             cid: getActiveCid(),
-            tid: String(state.tabState?.activeTid || state.cache?.tid || "")
+            tid: String(state.tabState?.activeTid || state.cache?.tid || ""),
+            partCount: Number(state.tabState?.activePartCount || 0)
         }
     });
 }
@@ -1652,7 +1659,8 @@ async function handleAction(actionNode) {
         const content = document.getElementById("feedback-content")?.value.trim() || "";
         const type = document.getElementById("feedback-type")?.value || "bug";
         const includeLogs = document.getElementById("feedback-include-logs")?.checked !== false;
-        if (!title || !content) throw new Error("请填写反馈标题和内容");
+        if (!isMeaningfulFeedbackText(title)) throw new Error("标题不能为空哦");
+        if (!isMeaningfulFeedbackText(content)) throw new Error("内容不能为空哦");
         const logs = includeLogs ? (await runtimeMessage({ action: "GET_LOGS" })).logs || [] : [];
         const result = await runtimeMessage({
             action: "SUBMIT_FEEDBACK",

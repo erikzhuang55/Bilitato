@@ -438,6 +438,18 @@ describe("native side panel", () => {
     expect(sidepanelCss).not.toContain("border-bottom: 1px solid #f1f2f3");
   });
 
+  it("rejects empty or placeholder-only feedback before submission", () => {
+    expect(background).toContain("function isMeaningfulFeedbackText(value)");
+    expect(background).toContain("标题不能为空哦");
+    expect(background).toContain("内容不能为空哦");
+    expect(content).toContain("function isMeaningfulFeedbackText(value)");
+    expect(content).toContain("if (!isMeaningfulFeedbackText(title))");
+    expect(content).toContain("if (!isMeaningfulFeedbackText(content))");
+    expect(sidepanel).toContain("function isMeaningfulFeedbackText(value)");
+    expect(sidepanel).toContain("if (!isMeaningfulFeedbackText(title))");
+    expect(sidepanel).toContain("if (!isMeaningfulFeedbackText(content))");
+  });
+
   it("isolates AI results and chat streams by video part", () => {
     expect(background).toContain("function createVideoCachePartKey(bvid, cid)");
     expect(background).toContain("function getPartCacheForContext");
@@ -452,6 +464,17 @@ describe("native side panel", () => {
     expect(content).toContain("messagePartKey !== currentPartKey");
     expect(content).toContain('action: "SET_ACTIVE_PART"');
     expect(sidepanel).toContain("messagePartKey !== currentPartKey");
+  });
+
+  it("falls back to legacy cloud rows only for confirmed single-part videos", () => {
+    expect(inject).toContain("partCount: stateMatchesRoute ? pages.length : 0");
+    expect(inject).toContain("_partCount: Number(currentMeta.partCount || 0)");
+    expect(content).toContain("function getCurrentRoutePartCount()");
+    expect(content).toContain("partCount: getCurrentRoutePartCount()");
+    expect(background).toContain("identity.partCount === 1");
+    expect(background).toContain('source = "legacy_bvid"');
+    expect(background).toContain('requestName: "cloud_video_cache_legacy_fetch"');
+    expect(background).toContain('cid: "is.null"');
   });
 
   it("logs part-scoped AI cache decisions only in debug mode", () => {

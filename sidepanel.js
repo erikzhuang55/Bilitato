@@ -992,6 +992,7 @@ function renderSettings() {
             </div>
             <div class="settings-group">
                 <div class="settings-group-title">调用与显示</div>
+                <div class="field"><label>插件显示</label><select id="setting-plugin-display-mode"><option value="expanded" ${settings.pluginDisplayMode !== "collapsed" ? "selected" : ""}>默认展开</option><option value="collapsed" ${settings.pluginDisplayMode === "collapsed" ? "selected" : ""}>默认缩起</option></select></div>
                 <div class="field"><label>深/浅模式</label><select id="setting-theme-mode"><option value="system" ${settings.themeMode !== "light" && settings.themeMode !== "dark" ? "selected" : ""}>跟随系统</option><option value="light" ${settings.themeMode === "light" ? "selected" : ""}>浅色模式</option><option value="dark" ${settings.themeMode === "dark" ? "selected" : ""}>深色模式</option></select></div>
                 <div class="field"><label>默认页面</label><select id="setting-default-page">${["CC", "summary", "chat", "real"].map((key) => `<option value="${key}" ${settings.defaultOpenPage === key ? "selected" : ""}>${{CC:"字幕",summary:"总结",chat:"聊天",real:"验真"}[key]}</option>`).join("")}</select></div>
                 <div class="field"><label>调用模式</label><select id="setting-pref-mode"><option value="quality" ${settings.prefMode !== "efficiency" ? "selected" : ""}>高速模式</option><option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>省流模式</option></select></div>
@@ -1410,6 +1411,7 @@ async function saveSettings({ silent = false } = {}) {
         themeMode: document.getElementById("setting-theme-mode")?.value || "system",
         prefMode: document.getElementById("setting-pref-mode")?.value || "quality",
         defaultOpenPage: document.getElementById("setting-default-page")?.value || "CC",
+        pluginDisplayMode: document.getElementById("setting-plugin-display-mode")?.value === "collapsed" ? "collapsed" : "expanded",
         sentryEnabled: document.getElementById("setting-sentry")?.value === "true",
         disableCloudCacheRead: document.getElementById("setting-disable-cloud-all")?.checked === true,
         promptSettings: {

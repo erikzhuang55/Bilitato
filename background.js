@@ -550,6 +550,7 @@ const DEFAULT_SETTINGS = {
     supabaseVersionTable: SUPABASE_DEFAULT_VERSION_TABLE,
     themeMode: "system",
     prefMode: "quality",
+    pluginDisplayMode: "collapsed",
     segmentPromptVariant: "test",
     debugMode: false,
     sentryEnabled: true,
@@ -1273,8 +1274,8 @@ async function handleMessage(msg, sender) {
         if (!tasks.length) throw new Error("任务为空");
         const requestedBvid = normalizeBvid(msg.bvid);
         logBackground.info("task_enqueue", { tab_id: tabId, bvid: requestedBvid, tasks, force: msg.force !== false });
-        await runTasksForTab(tabId, tasks, msg.force !== false, normalizeTaskContext(msg.taskContext), requestedBvid);
-        return {};
+        const taskResults = await runTasksForTab(tabId, tasks, msg.force !== false, normalizeTaskContext(msg.taskContext), requestedBvid);
+        return { taskResults };
     }
     if (msg.action === "RUN_SEGMENTS_RETRY_TEST") {
         if (!tabId) throw new Error("tabId 缺失");
@@ -3306,19 +3307,26 @@ async function runTasksForTab(tabId, tasks, force, taskContext = {}, requestedBv
     await hydrateCloudCacheIfNeeded(bvid, hydrateTasks, resolvedSettings, taskContext);
     const hasSummarySegments = tasks.includes("summary") && tasks.includes("segments");
     const otherTasks = tasks.filter((task) => !(hasSummarySegments && (task === "summary" || task === "segments")));
+    const taskResults = {};
 
     if (hasSummarySegments) {
         await setTaskStatus(tabId, ["summary", "segments"], "processing", "", taskContext);
-        await runSummarySegmentsTasks(tabId, bvid, force, resolvedSettings, taskContext);
+        const pairedResults = await runSummarySegmentsTasks(tabId, bvid, force, resolvedSettings, taskContext);
+        taskResults.summary = !!pairedResults?.summary?.ok;
+        taskResults.segments = !!pairedResults?.segments?.ok;
     }
 
     if (otherTasks.length) {
         await setTaskStatus(tabId, otherTasks, "processing", "", taskContext);
         await Promise.all(otherTasks.map((task) => runSingleTask(tabId, bvid, task, force, resolvedSettings, taskContext)));
         await setTaskStatus(tabId, otherTasks, "done", "", taskContext);
+        otherTasks.forEach((task) => {
+            taskResults[task] = true;
+        });
     }
 
     logBackground.info("task_finish", { tab_id: tabId, bvid, tasks });
+    return taskResults;
 }
 
 async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {}) {
@@ -7224,6 +7232,10 @@ function normalizeSettings(settings) {
     const prefMode = prefModeRaw === "efficiency" ? "efficiency" : "quality";
     const themeModeRaw = String(base.themeMode || DEFAULT_SETTINGS.themeMode || "system").toLowerCase();
     const themeMode = ["system", "light", "dark"].includes(themeModeRaw) ? themeModeRaw : "system";
+    const pluginDisplayFallback = Object.keys(base).length > 0 ? "expanded" : DEFAULT_SETTINGS.pluginDisplayMode;
+    const pluginDisplayMode = String(base.pluginDisplayMode || pluginDisplayFallback || "collapsed").toLowerCase() === "collapsed"
+        ? "collapsed"
+        : "expanded";
     const segmentPromptVariantRaw = String(base.segmentPromptVariant || DEFAULT_SETTINGS.segmentPromptVariant || "test").toLowerCase();
     const segmentPromptVariant = segmentPromptVariantRaw === "original" ? "original" : "test";
     const sentryDsn = String(base.sentryDsn || DEFAULT_SETTINGS.sentryDsn || "").trim();
@@ -7259,6 +7271,7 @@ function normalizeSettings(settings) {
         supabaseVersionTable,
         themeMode,
         prefMode,
+        pluginDisplayMode,
         segmentPromptVariant,
         disableCloudCacheRead
     };

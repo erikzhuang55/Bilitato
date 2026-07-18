@@ -444,6 +444,7 @@ const appState = {
     panelMaxHeight: 0,
     expandedSummaryHeight: 0,
     isCollapsed: false,
+    collapseHintShown: false,
     segmentsCollapsed: false,
     localPending: {
         tasks: {},
@@ -1786,9 +1787,11 @@ function onStorageChanged(changes, areaName) {
         }
     });
     const beforeBvid = normalizeBvidCase(appState.tabState?.activeBvid);
+    const beforeCid = Number(appState.tabState?.activeCid || 0);
     const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href));
     const tabStateBefore = appState.tabState;
     if (changes.settings?.newValue) {
+        const previousDisplayMode = resolvePluginDisplayMode(changes.settings.oldValue || appState.settings || {});
         appState.settings = changes.settings.newValue;
         appState.cloudCachePrefs = {
             ...normalizeCloudCachePrefs(appState.cloudCachePrefs),
@@ -1796,6 +1799,9 @@ function onStorageChanged(changes, areaName) {
         };
         globalThis.AIPluginLogger?.setDebugEnabled?.(isDebugLoggingEnabled());
         syncInjectDebugMode();
+        if (previousDisplayMode !== resolvePluginDisplayMode(appState.settings)) {
+            resetPanelCollapseForCurrentPart();
+        }
     }
     if (changes.cloudReadDisabledBvids) {
         const target = normalizeBvidCase(resolveCurrentBvid() || appState.cache?.bvid || "");
@@ -1823,6 +1829,9 @@ function onStorageChanged(changes, areaName) {
     }
     const afterBvid = normalizeBvidCase(appState.tabState?.activeBvid);
     const activeCid = Number(appState.tabState?.activeCid || 0);
+    if (beforeCid > 0 && activeCid > 0 && beforeCid !== activeCid) {
+        resetPanelCollapseForCurrentPart();
+    }
     const routeMismatch = !!(routeBvid && afterBvid && String(afterBvid) !== routeBvid);
     const runningBvid = normalizeBvidCase(appState.asrSession?.bvid || getTranscriptionBvid() || "");
     const switched = !!(beforeBvid && afterBvid && beforeBvid !== afterBvid);
@@ -1994,6 +2003,7 @@ async function waitPanelMount() {
                         <img src="${usageIconSrc}" class="logo-info-icon" />
                         <div class="logo-remaining-tooltip" id="logo-remaining">Checking...</div>
                     </div>
+                    <button type="button" class="collapsed-summary-btn" data-action="run-summary"><span class="collapsed-summary-label">生成总结</span></button>
                     <button type="button" class="native-side-panel-btn" id="native-side-panel-btn" data-button-tooltip="打开浏览器侧边栏" aria-label="打开浏览器侧边栏">
                         <img class="sidebar-icon-default" src="${sidebarDefaultIconSrc}" alt="">
                         <img class="sidebar-icon-active" src="${sidebarActiveIconSrc}" alt="">
@@ -2030,10 +2040,8 @@ async function waitPanelMount() {
             // Click on other parts of the top area to collapse/expand
             logoEl.onclick = (e) => {
                 if (e.target === logoImg || e.target.closest(".plugin-top-actions")) return;
-                appState.isCollapsed = !appState.isCollapsed;
-                const box = panelShadowRoot.querySelector('.ai-summary-plugin-box');
-                box.classList.toggle('is-collapsed', appState.isCollapsed);
-                if (!appState.isCollapsed) syncPluginHeight();
+                const shouldCollapse = !appState.isCollapsed;
+                setPanelCollapsed(shouldCollapse, { showHint: shouldCollapse });
             };
         }
         panel.querySelector("#native-side-panel-btn")?.addEventListener("click", async (event) => {
@@ -2140,6 +2148,91 @@ function syncPluginHeight() {
             }
         }
     }
+}
+
+function resolvePluginDisplayMode(settings = appState.settings || {}) {
+    return String(settings.pluginDisplayMode || "expanded").toLowerCase() === "collapsed" ? "collapsed" : "expanded";
+}
+
+function syncCollapsedHeaderControls() {
+    const box = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
+    const summaryButton = box?.querySelector(".collapsed-summary-btn");
+    const summaryLabel = summaryButton?.querySelector(".collapsed-summary-label");
+    if (!summaryButton || !summaryLabel) return;
+    const taskStatus = isTabStateForCurrentVideo() ? (appState.tabState?.taskStatus || {}) : {};
+    const running = taskStatus.summary === "processing"
+        || taskStatus.segments === "processing"
+        || !!appState.localPending?.tasks?.summary;
+    summaryButton.disabled = running;
+    summaryLabel.textContent = running ? "总结中..." : "生成总结";
+}
+
+let collapseLandingTimer = null;
+let collapseLandingCleanupTimer = null;
+let collapseHintTimer = null;
+
+function clearCollapseFeedback(box) {
+    if (collapseLandingTimer) window.clearTimeout(collapseLandingTimer);
+    if (collapseLandingCleanupTimer) window.clearTimeout(collapseLandingCleanupTimer);
+    if (collapseHintTimer) window.clearTimeout(collapseHintTimer);
+    collapseLandingTimer = null;
+    collapseLandingCleanupTimer = null;
+    collapseHintTimer = null;
+    box?.classList.remove("collapse-landed");
+    box?.querySelector(".plugin-top-logo")?.classList.remove("has-collapse-hint");
+    box?.querySelector(".collapse-location-hint")?.remove();
+}
+
+function showCollapseLocationHint(box) {
+    if (!box || appState.collapseHintShown) return;
+    appState.collapseHintShown = true;
+    const header = box.querySelector(".plugin-top-logo");
+    if (!header) return;
+    const hint = document.createElement("span");
+    hint.className = "collapse-location-hint";
+    hint.textContent = "已收起，点击标题栏展开";
+    header.appendChild(hint);
+    header.classList.add("has-collapse-hint");
+    collapseHintTimer = window.setTimeout(() => {
+        header.classList.remove("has-collapse-hint");
+        hint.remove();
+        collapseHintTimer = null;
+    }, 1800);
+}
+
+function setPanelCollapsed(collapsed, options = {}) {
+    const nextCollapsed = !!collapsed;
+    const wasCollapsed = appState.isCollapsed;
+    appState.isCollapsed = nextCollapsed;
+    const box = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
+    clearCollapseFeedback(box);
+    if (box) box.classList.toggle("is-collapsed", nextCollapsed);
+    if (box && nextCollapsed && !wasCollapsed) {
+        collapseLandingTimer = window.setTimeout(() => {
+            collapseLandingTimer = null;
+            if (!appState.isCollapsed) return;
+            box.classList.add("collapse-landed");
+            if (options?.showHint) showCollapseLocationHint(box);
+            collapseLandingCleanupTimer = window.setTimeout(() => {
+                box.classList.remove("collapse-landed");
+                collapseLandingCleanupTimer = null;
+            }, 520);
+        }, 240);
+    }
+    syncCollapsedHeaderControls();
+    if (!nextCollapsed) syncPluginHeight();
+}
+
+function resetPanelCollapseForCurrentPart() {
+    setPanelCollapsed(resolvePluginDisplayMode() === "collapsed");
+}
+
+function expandPanelAfterSummaryCompletion() {
+    if (resolvePluginDisplayMode() !== "collapsed" || !appState.isCollapsed) return;
+    appState.activePage = "summary";
+    setPanelCollapsed(false);
+    renderNav();
+    renderContent();
 }
 
 function setEmbeddedPanelVisible(visible = true) {
@@ -2447,6 +2540,7 @@ async function loadBootstrapData() {
         ? bootstrapCache
         : null;
     appState.settings = res?.settings || null;
+    resetPanelCollapseForCurrentPart();
     appState.providers = res?.providers || null;
     appState.cloudCachePrefs = normalizeCloudCachePrefs(res?.cloudCachePrefs);
     if (res?.feedback) {
@@ -2979,6 +3073,11 @@ function bindPanelDelegatedEvents() {
             showDebugVersionUpdateBadge();
             return;
         }
+        if (action === "debug-simulate-first-install") {
+            logUI.info("debug_simulate_first_install", { task: "debug" });
+            showSetupGuide({ simulateFirstInstall: true });
+            return;
+        }
         if (action === "follow-now") {
             appState.followEnabled = true;
             appState.followPausedAt = 0;
@@ -3188,6 +3287,7 @@ function renderContent() {
         appState.feedbackVisibleUnreadIds.clear();
     }
     renderTopRemaining();
+    syncCollapsedHeaderControls();
     ensureCloudReadForActivePage();
 
     const pages = ["CC", "summary", "chat", "real", "debug", "settings"];
@@ -4652,15 +4752,22 @@ function renderReal(panel) {
 }
 
 let _guideStep = 1;
+let _guideRestoreCollapsed = false;
+let _guidePreviousPage = "";
+let _guideSimulatesFirstInstall = false;
 
-function showSetupGuide() {
+function showSetupGuide(options = {}) {
     if (!panelShadowRoot) return;
+    if (panelShadowRoot.getElementById("setup-guide-overlay")) return;
+    _guideSimulatesFirstInstall = options?.simulateFirstInstall === true;
+    _guideRestoreCollapsed = _guideSimulatesFirstInstall || appState.isCollapsed;
+    _guidePreviousPage = appState.activePage;
+    if (_guideRestoreCollapsed) setPanelCollapsed(false);
     appState.activePage = "settings";
     renderNav();
     renderContent();
     const settingsScrollBody = panelShadowRoot.querySelector("#page-settings .settings-scroll-body");
     if (settingsScrollBody) settingsScrollBody.scrollTop = 0;
-    if (panelShadowRoot.getElementById("setup-guide-overlay")) return;
     _guideStep = 1;
     const overlay = document.createElement("div");
     overlay.id = "setup-guide-overlay";
@@ -4694,7 +4801,8 @@ function renderGuideStep(step) {
         overlay.appendChild(ring);
     };
 
-    const totalSteps = 3;
+    const totalSteps = 4;
+    const pluginDisplayGuideImageSrc = chrome.runtime.getURL("assets/ui/plugin-display-collapsed.png");
     const dots = (current, total) => Array.from({ length: total }, (_, i) => `<span class="guide-dot ${i + 1 === current ? "active" : ""}"></span>`).join("");
 
     const actions = (hasPrev) => `
@@ -4768,6 +4876,20 @@ function renderGuideStep(step) {
         `);
     }
 
+    if (step === 4) {
+        overlay.insertAdjacentHTML("beforeend", `
+            <div class="guide-card">
+                <div class="guide-steps-dots">${dots(4, totalSteps)}</div>
+                <div class="guide-card-title">Tips：你可以自定义插件显示效果</div>
+                <img class="guide-display-tip-image" src="${pluginDisplayGuideImageSrc}" alt="插件显示设置为默认缩起">
+                <div class="guide-display-tip-desc">
+                    Bilitato 现在默认是收起状态，只在你需要的时候出现。如需默认展开，请前往设置—<strong>调用与显示模式 → 插件显示</strong>里更改哟。你也可以<strong>点击 Bilitato 的标题栏来展开/收起</strong>。
+                </div>
+                ${actions(true)}
+            </div>
+        `);
+    }
+
     const card = overlay.querySelector(".guide-card");
     card?.querySelector("[data-guide='skip']")?.addEventListener("click", () => {
         closeSetupGuide();
@@ -4800,6 +4922,17 @@ function renderGuideStep(step) {
 function closeSetupGuide() {
     const overlay = panelShadowRoot?.getElementById("setup-guide-overlay");
     if (overlay) overlay.remove();
+    const shouldRestoreCollapsed = _guideRestoreCollapsed
+        && (_guideSimulatesFirstInstall || resolvePluginDisplayMode() === "collapsed");
+    const previousPage = _guidePreviousPage;
+    _guideRestoreCollapsed = false;
+    _guidePreviousPage = "";
+    _guideSimulatesFirstInstall = false;
+    if (["CC", "summary", "chat", "real", "debug", "settings"].includes(previousPage)) {
+        appState.activePage = previousPage;
+    }
+    if (shouldRestoreCollapsed) setPanelCollapsed(true, { showHint: true });
+    renderNav();
     renderContent();
 }
 
@@ -5064,6 +5197,11 @@ function renderSettings(panel) {
                 </div>
                 <button type="button" class="panel-btn ghost" data-action="settings-reset-prompts">恢复默认</button>
                 <div class="settings-group-title">调用与显示模式</div>
+                <label>插件显示</label>
+                ${renderCustomSelect("settings-plugin-display-mode", [
+                    { value: "expanded", label: "默认展开" },
+                    { value: "collapsed", label: "默认缩起" }
+                ], _guideSimulatesFirstInstall ? "collapsed" : resolvePluginDisplayMode(settings))}
                 <label>深/浅模式</label>
                 ${renderCustomSelect("settings-theme-mode", [
                     { value: "system", label: "跟随系统" },
@@ -5449,6 +5587,8 @@ function renderErrorDemoControls() {
             <div class="error-demo-label">更新导览</div>
             <button type="button" class="panel-btn ghost" data-action="debug-show-release-notice">显示 v${escapeHtml(currentVersion)} 更新导览</button>
             <button type="button" class="panel-btn ghost" data-action="debug-show-version-update">显示可用版本更新入口</button>
+            <div class="error-demo-label">首次安装体验</div>
+            <button type="button" class="panel-btn ghost" data-action="debug-simulate-first-install">模拟首次安装用户</button>
             <button type="button" class="panel-btn ghost error-demo-clear" data-action="debug-clear-errors">清空测试状态</button>
         </div>
     `;
@@ -5864,6 +6004,9 @@ async function runTasks(tasks, options = {}) {
         if (!appState.visibleProgressCompletedTaskIds.has(taskId)) {
             finishAsymptoticPseudoProgress(taskId, false);
         }
+        if (tasks.includes("summary") && res?.taskResults?.summary === true) {
+            expandPanelAfterSummaryCompletion();
+        }
     } catch (error) {
         if (!appState.visibleProgressCompletedTaskIds.has(taskId)) {
             finishAsymptoticPseudoProgress(taskId, true);
@@ -6201,6 +6344,7 @@ function pruneChatPendingByHistory(history) {
 
 function resetPageStateByBvidSwitch() {
     logSubtitleDiagnostic("clear_requested", { source: "resetPageStateByBvidSwitch" });
+    resetPanelCollapseForCurrentPart();
     beginSubtitleUiCycle();
     appState.cache = null;
     appState.chatPending = [];
@@ -7050,6 +7194,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         prefMode: panel.querySelector("#settings-pref-mode")?.value || "quality",
         themeMode: panel.querySelector("#settings-theme-mode")?.value || "system",
         defaultOpenPage,
+        pluginDisplayMode: panel.querySelector("#settings-plugin-display-mode")?.value === "collapsed" ? "collapsed" : "expanded",
         sentryEnabled: panel.querySelector("#settings-sentry-enabled")?.value === "true",
         disableCloudCacheRead: panel.querySelector("#settings-disable-cloud-all")?.checked === true,
         sentryDsn: String(appState.settings?.sentryDsn || "").trim(),

@@ -450,6 +450,42 @@ describe("native side panel", () => {
     expect(sidepanel).toContain("if (!isMeaningfulFeedbackText(content))");
   });
 
+  it("supports a default-collapsed embedded panel that expands after summary success", () => {
+    expect(background).toContain('pluginDisplayMode: "collapsed"');
+    expect(background).toContain('Object.keys(base).length > 0 ? "expanded"');
+    expect(content).toContain('renderCustomSelect("settings-plugin-display-mode"');
+    expect(sidepanel).toContain('id="setting-plugin-display-mode"');
+    expect(content).toContain("<label>插件显示</label>");
+    expect(sidepanel).toContain("<label>插件显示</label>");
+    expect(content).not.toContain("插件显示区域");
+    expect(sidepanel).not.toContain("插件显示区域");
+    expect(content.indexOf("<label>插件显示</label>")).toBeLessThan(content.indexOf("<label>深/浅模式</label>"));
+    expect(sidepanel.indexOf("<label>插件显示</label>")).toBeLessThan(sidepanel.indexOf("<label>深/浅模式</label>"));
+    expect(content).toContain('class="collapsed-summary-btn"');
+    expect(content).not.toContain('data-action="collapsed-open-settings"');
+    expect(content).toContain("function resetPanelCollapseForCurrentPart()");
+    expect(content).toContain('res?.taskResults?.summary === true');
+    expect(content).toContain("beforeCid > 0 && activeCid > 0 && beforeCid !== activeCid");
+    expect(content).toContain("_guideRestoreCollapsed = _guideSimulatesFirstInstall || appState.isCollapsed");
+    expect(content).toContain("shouldRestoreCollapsed");
+    expect(content).toContain("appState.activePage = previousPage");
+    expect(content).toContain('data-action="debug-simulate-first-install"');
+    expect(content).toContain("showSetupGuide({ simulateFirstInstall: true })");
+    expect(content).toContain('_guideSimulatesFirstInstall ? "collapsed"');
+    expect(content).toContain("Tips：你可以自定义插件显示效果");
+    expect(content).toContain("点击 Bilitato 的标题栏来展开/收起");
+    expect(content).toContain("const totalSteps = 4");
+    expect(content).toContain('assets/ui/plugin-display-collapsed.png');
+    expect(contentCss).toContain(".guide-display-tip-image");
+    expect(content).toContain('setPanelCollapsed(shouldCollapse, { showHint: shouldCollapse })');
+    expect(content).toContain('setPanelCollapsed(true, { showHint: true })');
+    expect(content).toContain("已收起，点击标题栏展开");
+    expect(contentCss).toContain("@keyframes collapse-header-landed");
+    expect(contentCss).toContain("prefers-reduced-motion: reduce");
+    expect(contentCss).toContain(".ai-summary-plugin-box.is-collapsed .collapsed-summary-btn");
+    expect(contentCss).toContain(".ai-summary-plugin-box.is-collapsed .native-side-panel-btn");
+  });
+
   it("isolates AI results and chat streams by video part", () => {
     expect(background).toContain("function createVideoCachePartKey(bvid, cid)");
     expect(background).toContain("function getPartCacheForContext");

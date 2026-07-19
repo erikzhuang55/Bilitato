@@ -441,6 +441,7 @@ const appState = {
     sessionGeneratedTasks: new Set(),
     summaryExpanded: false,
     summaryRatio: 0.6,
+    summaryRatioManuallyAdjusted: false,
     panelMaxHeight: 0,
     expandedSummaryHeight: 0,
     isCollapsed: false,
@@ -2163,8 +2164,21 @@ function syncCollapsedHeaderControls() {
     const running = taskStatus.summary === "processing"
         || taskStatus.segments === "processing"
         || !!appState.localPending?.tasks?.summary;
+    const currentBvid = normalizeBvidCase(resolveCurrentBvid() || "");
+    const hasSummary = !!currentBvid
+        && isCacheForCurrentRouteVideo(appState.cache, currentBvid)
+        && !!String(appState.cache?.summary || "").trim();
+    const failed = taskStatus.summary === "error" || taskStatus.summary === "timeout";
     summaryButton.disabled = running;
-    summaryLabel.textContent = running ? "总结中..." : "生成总结";
+    summaryButton.dataset.action = hasSummary && !running ? "view-summary" : "run-summary";
+    summaryLabel.textContent = running
+        ? "总结中..."
+        : hasSummary
+            ? "查看总结"
+            : failed
+                ? "重试总结"
+                : "生成总结";
+    summaryButton.setAttribute("aria-label", summaryLabel.textContent);
 }
 
 let collapseLandingTimer = null;
@@ -2804,6 +2818,13 @@ function bindPanelDelegatedEvents() {
         const action = actionNode.dataset.action;
         if (action === "subtitle-load-retry") {
             retrySubtitleLoad();
+            return;
+        }
+        if (action === "view-summary") {
+            appState.activePage = "summary";
+            setPanelCollapsed(false);
+            renderNav();
+            renderContent();
             return;
         }
         if (action === "run-summary") {
@@ -3949,7 +3970,18 @@ function applySummaryRatio(panel) {
         if (bodyHeight < 100) return false;
         const dividerH = 8;
         const availableH = Math.max(0, bodyHeight - dividerH);
-        summaryCard.style.height = `${Math.round(availableH * ratio)}px`;
+        let summaryHeight = availableH * ratio;
+        if (!appState.summaryRatioManuallyAdjusted) {
+            const segmentsHeader = panel.querySelector(".segments-section-header");
+            const segmentList = panel.querySelector(".segments-body .segment-list");
+            if (segmentsHeader && segmentList) {
+                const naturalSegmentsHeight = segmentsHeader.getBoundingClientRect().height + segmentList.scrollHeight;
+                const maxSummaryHeight = availableH * 0.85;
+                const adaptiveSummaryHeight = Math.min(maxSummaryHeight, availableH - naturalSegmentsHeight);
+                summaryHeight = Math.max(summaryHeight, adaptiveSummaryHeight);
+            }
+        }
+        summaryCard.style.height = `${Math.round(summaryHeight)}px`;
         return true;
     };
 
@@ -3986,6 +4018,7 @@ function bindSummaryResizeDivider(panel) {
         const newSummaryH = Math.max(60, Math.min(availableH - 60, startHeight + delta));
         const newRatio = newSummaryH / availableH;
         appState.summaryRatio = Math.max(0.15, Math.min(0.85, newRatio));
+        appState.summaryRatioManuallyAdjusted = true;
         summaryCard.style.height = `${newSummaryH}px`;
         if (appState.segmentsCollapsed) {
             appState.expandedSummaryHeight = newSummaryH;

@@ -10,7 +10,7 @@ const releaseNotice = readFileSync(new URL("../content/contentReleaseNotice.js",
 const sidepanel = readFileSync(new URL("../sidepanel.js", import.meta.url), "utf8");
 const sidepanelHtml = readFileSync(new URL("../sidepanel.html", import.meta.url), "utf8");
 const sidepanelCss = readFileSync(new URL("../sidepanel.css", import.meta.url), "utf8");
-const inject = readFileSync(new URL("../inject.js", import.meta.url), "utf8");
+const inject = readFileSync(new URL("../inject.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const videoCacheCidMigration = readFileSync(new URL("../supabase/migrations/20260710095455_add_cid_isolation_to_video_cache.sql", import.meta.url), "utf8");
 
 describe("native side panel", () => {
@@ -482,6 +482,13 @@ describe("native side panel", () => {
     expect(content).toContain("已收起，点击标题栏展开");
     expect(contentCss).toContain("@keyframes collapse-header-landed");
     expect(contentCss).toContain("prefers-reduced-motion: reduce");
+    expect(contentCss).toContain("margin-bottom: 6px !important");
+    expect(content).toContain("summaryRatioManuallyAdjusted");
+    expect(content).toContain("naturalSegmentsHeight");
+    expect(content).toContain('summaryButton.dataset.action = hasSummary && !running ? "view-summary" : "run-summary"');
+    expect(content).toContain('? "查看总结"');
+    expect(content).toContain('? "重试总结"');
+    expect(content).toContain('if (action === "view-summary")');
     expect(contentCss).toContain(".ai-summary-plugin-box.is-collapsed .collapsed-summary-btn");
     expect(contentCss).toContain(".ai-summary-plugin-box.is-collapsed .native-side-panel-btn");
   });

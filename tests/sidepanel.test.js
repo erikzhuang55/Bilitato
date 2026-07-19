@@ -482,7 +482,10 @@ describe("native side panel", () => {
     expect(content).toContain("已收起，点击标题栏展开");
     expect(contentCss).toContain("@keyframes collapse-header-landed");
     expect(contentCss).toContain("prefers-reduced-motion: reduce");
-    expect(contentCss).toContain("margin-bottom: 6px !important");
+    expect(contentCss).toContain("margin-bottom: 10px !important");
+    expect(content).toContain("summaryRatio: 0.7");
+    expect(content).toContain("const expandedSummaryRatio = 0.6");
+    expect(content).toContain("Math.min(Math.ceil(neededBoxHeight), Math.ceil(panelHeightLimit))");
     expect(content).toContain("summaryRatioManuallyAdjusted");
     expect(content).toContain("naturalSegmentsHeight");
     expect(content).toContain('summaryButton.dataset.action = hasSummary && !running ? "view-summary" : "run-summary"');

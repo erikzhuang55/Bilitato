@@ -440,7 +440,7 @@ const appState = {
     segmentsMarkerTickAt: 0,
     sessionGeneratedTasks: new Set(),
     summaryExpanded: false,
-    summaryRatio: 0.6,
+    summaryRatio: 0.7,
     summaryRatioManuallyAdjusted: false,
     panelMaxHeight: 0,
     expandedSummaryHeight: 0,
@@ -3934,11 +3934,7 @@ function applyExpandedSegmentsLayout(panel) {
     const boxRect = box.getBoundingClientRect();
     const pageBodyRect = pageBody.getBoundingClientRect();
     const fixedOutsideBody = Math.max(0, pageBodyRect.top - boxRect.top);
-    const summaryHeight = Math.max(0, Number(appState.expandedSummaryHeight || parseFloat(summaryCard.style.height || "0") || 0));
-    if (summaryHeight > 0) {
-        appState.expandedSummaryHeight = summaryHeight;
-        summaryCard.style.height = `${Math.round(summaryHeight)}px`;
-    }
+    const capturedSummaryHeight = Math.max(0, Number(appState.expandedSummaryHeight || parseFloat(summaryCard.style.height || "0") || 0));
     const dividerHeight = divider ? (divider.getBoundingClientRect().height || 8) : 8;
     const segmentsHeaderHeight = segmentsHeader.getBoundingClientRect().height || 0;
     const segmentContentHeight = segmentList ? segmentList.scrollHeight : segmentsBody.scrollHeight;
@@ -3946,12 +3942,20 @@ function applyExpandedSegmentsLayout(panel) {
     const gap = Math.max(0, parseFloat(bodyStyle.rowGap || bodyStyle.gap || "0") || 0);
     const gapCount = 2; // summary -> divider -> segments
 
-    const neededBodyHeight = summaryHeight + dividerHeight + segmentsHeaderHeight + segmentContentHeight + (gap * gapCount);
+    const neededBodyHeight = capturedSummaryHeight + dividerHeight + segmentsHeaderHeight + segmentContentHeight + (gap * gapCount);
     const neededBoxHeight = fixedOutsideBody + neededBodyHeight;
-    // 展开时不限制最大高度，让容器自然撑开到刚好显示完分段
-    const targetBoxHeight = Math.max(320, Math.ceil(neededBoxHeight));
+    const panelHeightLimit = Math.max(320, Number(appState.panelMaxHeight || boxRect.height || 0));
+    const targetBoxHeight = Math.max(320, Math.min(Math.ceil(neededBoxHeight), Math.ceil(panelHeightLimit)));
     box.style.height = `${targetBoxHeight}px`;
     box.style.maxHeight = `${targetBoxHeight}px`;
+
+    const availableBodyHeight = Math.max(0, targetBoxHeight - fixedOutsideBody);
+    const expandedSummaryRatio = 0.6;
+    const minimumSummaryHeight = availableBodyHeight * expandedSummaryRatio;
+    const maximumSummaryHeight = Math.max(80, availableBodyHeight - dividerHeight - segmentsHeaderHeight - (gap * gapCount) - 80);
+    const summaryHeight = Math.min(maximumSummaryHeight, Math.max(capturedSummaryHeight, minimumSummaryHeight));
+    appState.expandedSummaryHeight = summaryHeight;
+    summaryCard.style.height = `${Math.round(summaryHeight)}px`;
 
     const maxSegmentsBodyHeight = targetBoxHeight - fixedOutsideBody - summaryHeight - dividerHeight - segmentsHeaderHeight - (gap * gapCount);
     segmentsBody.style.maxHeight = `${Math.max(80, Math.floor(maxSegmentsBodyHeight))}px`;
@@ -3963,7 +3967,7 @@ function applySummaryRatio(panel) {
     const pageBody = panel.querySelector(".page-body");
     const summaryCard = panel.querySelector(".summary-card-fixed");
     if (!pageBody || !summaryCard) return;
-    const ratio = Math.max(0.15, Math.min(0.85, Number(appState.summaryRatio) || 0.6));
+    const ratio = Math.max(0.15, Math.min(0.85, Number(appState.summaryRatio) || 0.7));
 
     const tryApply = () => {
         const bodyHeight = pageBody.getBoundingClientRect().height;

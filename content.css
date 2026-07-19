@@ -1198,7 +1198,7 @@ body::-webkit-scrollbar {
 .ai-summary-plugin-box.is-collapsed {
     max-height: 48px !important;
     height: 48px !important;
-    margin-bottom: 6px !important;
+    margin-bottom: 10px !important;
     padding-bottom: 0 !important;
 }
 

@@ -12,9 +12,13 @@ import {
   buildGroqTranscriptionPrompt,
   parseGroqQuotaHeaders
 } from "./utils/asrTranscription.js";
+import {
+  DEFAULT_GROQ_BASE_URL,
+  buildAsrEndpoint,
+  normalizeAsrBaseUrl
+} from "./utils/asrEndpoints.js";
 
 const FFMPEG_CORE_URL = chrome.runtime.getURL("node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js");
-const GROQ_AUDIO_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
 const SILICONFLOW_AUDIO_TRANSCRIBE_URL = "https://api.siliconflow.cn/v1/audio/transcriptions";
 let ffmpegPromise = null;
 const chunkSessions = new Map();
@@ -142,6 +146,7 @@ async function transcribePreparedChunks(payload = {}) {
   const apiKey = String(payload?.apiKey || payload?.groqApiKey || "").trim();
   const model = String(payload?.model || payload?.groqModel || "").trim() || (provider === "siliconflow" ? "FunAudioLLM/SenseVoiceSmall" : "whisper-large-v3-turbo");
   const videoTitle = String(payload?.videoTitle || "").trim();
+  const baseUrl = normalizeAsrBaseUrl(payload?.baseUrl, DEFAULT_GROQ_BASE_URL);
   const tabId = Number(payload?.tabId || 0);
   const bvid = String(payload?.bvid || "").trim();
   const session = chunkSessions.get(sessionId);
@@ -178,7 +183,7 @@ async function transcribePreparedChunks(payload = {}) {
     const file = new File([chunk.audioBytes], chunk.fileName, { type: chunk.mimeType || "audio/mp4" });
     const result = provider === "siliconflow"
       ? await requestSiliconFlowChunkTranscription(file, apiKey, model)
-      : await requestGroqChunkTranscription(file, apiKey, model, videoTitle);
+      : await requestGroqChunkTranscription(file, apiKey, model, videoTitle, baseUrl);
     quota = result.quota || quota;
     const chunkRows = mapTranscriptionToRows(result.data, { noTimestamp });
     const beforeTail = mergedRows.length ? mergedRows.slice(-2).map((row) => serializeBoundaryRow(row, noTimestamp)) : [];
@@ -362,14 +367,14 @@ async function cleanupFFmpegFiles(ffmpeg, fileNames) {
   }
 }
 
-async function requestGroqChunkTranscription(audioFile, groqApiKey, groqModel, videoTitle) {
+async function requestGroqChunkTranscription(audioFile, groqApiKey, groqModel, videoTitle, baseUrl) {
   const formData = new FormData();
   formData.append("file", audioFile);
   formData.append("model", groqModel);
   formData.append("response_format", "verbose_json");
   formData.append("prompt", buildGroqTranscriptionPrompt(videoTitle));
   formData.append("timestamp_granularities[]", "segment");
-  const response = await fetch(GROQ_AUDIO_TRANSCRIBE_URL, {
+  const response = await fetch(buildAsrEndpoint(baseUrl, "audio/transcriptions", DEFAULT_GROQ_BASE_URL), {
     method: "POST",
     headers: { Authorization: `Bearer ${groqApiKey}` },
     body: formData

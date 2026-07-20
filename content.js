@@ -309,6 +309,8 @@ const {
 } = globalThis.BilitatoContentErrorMessages || {};
 
 const DEBUG_LOG_DISPLAY_LIMIT = 2000;
+const DEFAULT_GROQ_ASR_BASE_URL = "https://api.groq.com/openai/v1";
+const DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1";
 
 const SETUP_PREVIEW_VIDEO_URL = "https://www.bilibili.com/video/BV1ojfDBSEPv/?spm_id_from=333.337.search-card.all.click&vd_source=3f5a30216e0108cea18aa63a3bff11b8";
 const SETUP_PREVIEW_BVID = normalizeBvidCase(getBvidFromUrl?.(SETUP_PREVIEW_VIDEO_URL) || "BV1ojfDBSEPv");
@@ -1029,7 +1031,7 @@ function normalizeCloudCachePrefs(value = {}) {
 function renderVersionUpdateBadge() {
     const state = appState.versionState || {};
     if (!state.hasUpdate) return "";
-    return `<button type="button" class="version-update-badge" data-action="open-extension-management" title="打开扩展管理页更新">有可用版本更新</button>`;
+    return `<button type="button" class="version-update-badge" data-action="open-extension-management" data-button-tooltip="跳转插件页后请在左上角找到“更新”按钮以更新插件">有可用版本更新</button>`;
 }
 
 function showDebugVersionUpdateBadge() {
@@ -2155,6 +2157,21 @@ function resolvePluginDisplayMode(settings = appState.settings || {}) {
     return String(settings.pluginDisplayMode || "expanded").toLowerCase() === "collapsed" ? "collapsed" : "expanded";
 }
 
+function shouldShowPluginDisplayFeatureDot() {
+    return appState.settings?.pluginDisplayFeatureSeen === false;
+}
+
+function markPluginDisplayFeatureSeen() {
+    if (!shouldShowPluginDisplayFeatureDot()) return;
+    const nextSettings = { ...(appState.settings || {}), pluginDisplayFeatureSeen: true };
+    appState.settings = nextSettings;
+    panelShadowRoot?.querySelectorAll(".settings-feature-dot").forEach((node) => node.remove());
+    renderNav();
+    chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: nextSettings }).then((res) => {
+        if (res?.settings) appState.settings = res.settings;
+    }).catch(() => {});
+}
+
 function syncCollapsedHeaderControls() {
     const box = panelShadowRoot ? panelShadowRoot.querySelector(".ai-summary-plugin-box") : null;
     const summaryButton = box?.querySelector(".collapsed-summary-btn");
@@ -3027,6 +3044,42 @@ function bindPanelDelegatedEvents() {
             authorizeCustomOriginFromPanel();
             return;
         }
+        if (action === "settings-edit-groq-base-url") {
+            const input = panelShadowRoot?.getElementById("settings-groq-base-url");
+            if (!input) return;
+            if (input.readOnly) {
+                input.readOnly = false;
+                actionNode.textContent = "保存";
+                input.focus();
+                input.select();
+                return;
+            }
+            try {
+                input.value = normalizeAsrBaseUrlInput(input.value, DEFAULT_GROQ_ASR_BASE_URL);
+            } catch (error) {
+                showToast(error?.message || "Base URL 格式不正确");
+                input.focus();
+                return;
+            }
+            input.readOnly = true;
+            actionNode.textContent = "修改";
+            saveSettingsFromPanel(false, { requestGroqPermission: true }).then((saved) => {
+                if (saved) return;
+                input.readOnly = false;
+                actionNode.textContent = "保存";
+                input.focus();
+            });
+            return;
+        }
+        if (action === "settings-reset-groq-base-url") {
+            const input = panelShadowRoot?.getElementById("settings-groq-base-url");
+            if (!input) return;
+            input.value = DEFAULT_GROQ_ASR_BASE_URL;
+            input.readOnly = true;
+            panelShadowRoot?.querySelector('[data-action="settings-edit-groq-base-url"]')?.replaceChildren("修改");
+            saveSettingsFromPanel(true);
+            return;
+        }
         if (action === "settings-open-reg") {
             const url = String(actionNode.dataset.url || "").trim();
             if (url) window.open(url, "_blank", "noopener,noreferrer");
@@ -3270,7 +3323,7 @@ function renderNav() {
         node.dataset.buttonTooltip = item.label || item.id;
         node.setAttribute("aria-label", item.label || item.id);
         const existingDot = node.querySelector(".nav-red-dot");
-        if (item.id === "settings" && hasFeedbackUnread()) {
+        if (item.id === "settings" && (hasFeedbackUnread() || shouldShowPluginDisplayFeatureDot())) {
             if (!existingDot) {
                 const dot = document.createElement("span");
                 dot.className = "nav-red-dot";
@@ -5103,6 +5156,7 @@ function renderSettings(panel) {
         return `<div class="custom-option ${isSelected ? "selected" : ""}" data-value="${escapeHtmlAttr(key)}" data-label="${escapeHtmlAttr(item.name)}"><span class="custom-option-main"><span>${escapeHtml(item.name)}</span>${tooltip ? `<span class="settings-info-icon custom-option-info" data-no-select="true" data-tooltip="${escapeHtmlAttr(tooltip)}">i</span>` : ""}</span><span class="custom-option-note">${escapeHtml(item.note)}</span></div>`;
     }).join("");
     const groqModel = String(settings.groqModel || "whisper-large-v3-turbo");
+    const groqBaseUrl = String(settings.groqBaseUrl || DEFAULT_GROQ_ASR_BASE_URL);
     const siliconFlowAsrModel = String(settings.siliconFlowAsrModel || "FunAudioLLM/SenseVoiceSmall");
     const customVisible = providerKey === "custom" ? "" : "settings-hidden";
     const groqVisible = asrProviderKey === "groq" ? "" : "settings-hidden";
@@ -5175,12 +5229,19 @@ function renderSettings(panel) {
                     <button class="panel-btn ghost" data-action="settings-open-reg" data-register-kind="asr" data-url="${escapeHtml(asrProvider.regUrl || "")}">注册</button>
                 </div>
                 <div id="settings-asr-groq-wrap" class="settings-asr-provider-fields ${groqVisible}">
+                    <label>Base URL</label>
+                    <div class="settings-asr-base-url-row">
+                        <input id="settings-groq-base-url" data-manual-save="true" type="text" value="${escapeHtml(groqBaseUrl)}" readonly>
+                        <button type="button" class="panel-btn ghost" data-action="settings-edit-groq-base-url">修改</button>
+                        <button type="button" class="panel-btn ghost" data-action="settings-reset-groq-base-url">重置</button>
+                    </div>
                     <label>Groq API Key</label>
                     ${renderSecretInput("settings-groq-api-key", settings.groqApiKey || "", "示例：gsk_xxxxx")}
                     <label>ASR 模型</label>
                     <input id="settings-groq-model" type="text" value="${escapeHtml(groqModel)}" placeholder="示例：whisper-large-v3-turbo">
                 </div>
                 <div id="settings-asr-siliconflow-wrap" class="settings-asr-provider-fields ${siliconFlowVisible}">
+                    <div class="settings-provider-url">${DEFAULT_SILICONFLOW_ASR_BASE_URL}</div>
                     <label>硅基流动 API Key</label>
                     ${renderSecretInput("settings-siliconflow-api-key", settings.siliconFlowApiKey || "", "示例：sk-xxxxx")}
                     <label>ASR 模型</label>
@@ -5234,7 +5295,7 @@ function renderSettings(panel) {
                 </div>
                 <button type="button" class="panel-btn ghost" data-action="settings-reset-prompts">恢复默认</button>
                 <div class="settings-group-title">调用与显示模式</div>
-                <label>插件显示</label>
+                <label class="settings-feature-label">插件显示${shouldShowPluginDisplayFeatureDot() ? '<span class="settings-feature-dot" aria-label="新增功能"></span>' : ""}</label>
                 ${renderCustomSelect("settings-plugin-display-mode", [
                     { value: "expanded", label: "默认展开" },
                     { value: "collapsed", label: "默认缩起" }
@@ -5499,6 +5560,7 @@ function renderSettings(panel) {
     inputs.forEach(input => {
         if (input.type === "range") return;
         if (input.dataset.feedbackField === "true") return;
+        if (input.dataset.manualSave === "true") return;
         if (input.dataset.secretInput === "true") {
             input.addEventListener("input", () => {
                 validateSecretInput(input, false);
@@ -7048,6 +7110,7 @@ function bindSettingsCustomSelects(panel) {
 
         selectTrigger.addEventListener("click", (event) => {
             event.stopPropagation();
+            if (targetId === "settings-plugin-display-mode") markPluginDisplayFeatureSeen();
             const wasOpen = selectContainer.classList.contains("open");
             panel.querySelectorAll(".custom-select-container.open").forEach((item) => {
                 if (item !== selectContainer) item.classList.remove("open");
@@ -7211,6 +7274,17 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         ...(appState.settings?.providerModels || {}),
         [providerValue]: resolvedModelValue
     };
+    const groqBaseUrlInput = panel.querySelector("#settings-groq-base-url");
+    let groqBaseUrl;
+    try {
+        groqBaseUrl = normalizeAsrBaseUrlInput(
+            groqBaseUrlInput?.readOnly === false ? appState.settings?.groqBaseUrl : groqBaseUrlInput?.value,
+            DEFAULT_GROQ_ASR_BASE_URL
+        );
+    } catch (error) {
+        showToast(error?.message || "Groq Base URL 格式不正确");
+        return false;
+    }
 
     const payload = {
         provider: providerValue,
@@ -7226,6 +7300,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         asrProvider: String(panel.querySelector("#settings-asr-provider")?.value || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq",
         groqApiKey: String(panel.querySelector("#settings-groq-api-key")?.value || "").trim(),
         groqModel: String(panel.querySelector("#settings-groq-model")?.value || "").trim(),
+        groqBaseUrl,
         siliconFlowApiKey: String(panel.querySelector("#settings-siliconflow-api-key")?.value || "").trim(),
         siliconFlowAsrModel: String(panel.querySelector("#settings-siliconflow-asr-model")?.value || "").trim(),
         prefMode: panel.querySelector("#settings-pref-mode")?.value || "quality",
@@ -7284,6 +7359,17 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
                 }
             }
         }
+        if (payload.groqBaseUrl !== DEFAULT_GROQ_ASR_BASE_URL) {
+            const permissionRes = await chrome.runtime.sendMessage({
+                action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION",
+                baseUrl: payload.groqBaseUrl,
+                request: !!opts.requestGroqPermission
+            });
+            if (!permissionRes?.granted) {
+                const grantedAfterPrompt = await requestCustomOriginPermissionFromSettings(payload.groqBaseUrl, statusEl);
+                if (!grantedAfterPrompt) throw new Error("请先授权访问该 Groq Base URL 域名");
+            }
+        }
         const res = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: payload });
         if (!res?.ok) throw new Error(res?.error || "保存失败");
         appState.settings = res.settings || payload;
@@ -7329,10 +7415,31 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         showToast("设置已保存");
         renderSettings(panel);
     }
+    return true;
     } catch (error) {
         reportContentError?.(error, { task: "settings_save", source: "settings" });
         showToast(error.message || "保存失败");
+        return false;
     }
+}
+
+function normalizeAsrBaseUrlInput(value, fallback) {
+    const raw = String(value || "").trim() || String(fallback || "").trim();
+    let url;
+    try {
+        url = new URL(raw);
+    } catch (_) {
+        throw new Error("Base URL 格式不正确");
+    }
+    if (url.protocol !== "https:") throw new Error("Base URL 必须使用 https://");
+    if (url.username || url.password || url.search || url.hash) {
+        throw new Error("Base URL 不能包含账号、参数或锚点");
+    }
+    const pathname = url.pathname.replace(/\/+$/, "");
+    if (/\/(?:models|audio\/transcriptions)$/i.test(pathname)) {
+        throw new Error("Base URL 只填写基础地址，不要包含具体接口路径");
+    }
+    return `${url.origin}${pathname}`;
 }
 
 function startFocusTicker() {
@@ -7687,21 +7794,44 @@ function renderSegmentsProgressMarkers() {
     const video = document.querySelector("video");
     const duration = Number(video?.duration || 0);
     if (!video || !Number.isFinite(duration) || duration <= 0) return;
-    const host = document.querySelector(".bpx-player-progress-schedule") || document.querySelector(".bpx-player-progress-wrap");
+    const host = document.querySelector(".bpx-player-progress-wrap") || document.querySelector(".bpx-player-progress-schedule");
     if (!host) return;
-    if (!host.querySelector(".segment-marker-layer")) {
-        const layer = document.createElement("div");
-        layer.className = "segment-marker-layer";
-        host.appendChild(layer);
-        layer.addEventListener("click", (event) => {
+    let layer = Array.from(host.children).find((node) => node.classList?.contains("segment-marker-layer")) || null;
+    document.querySelectorAll(".segment-marker-layer").forEach((node) => {
+        if (node !== layer) node.remove();
+    });
+    if (!layer) {
+        const nextLayer = document.createElement("div");
+        nextLayer.className = "segment-marker-layer";
+        host.appendChild(nextLayer);
+        nextLayer.addEventListener("click", (event) => {
             const marker = event.target.closest(".segment-marker");
             if (!marker) return;
             jumpTo(Number(marker.dataset.start || 0));
         });
+        layer = nextLayer;
     }
     if (getComputedStyle(host).position === "static") host.style.position = "relative";
     host.style.overflow = "visible";
-    const layer = host.querySelector(".segment-marker-layer");
+    if (!layer) return;
+    const hostRect = host.getBoundingClientRect();
+    const scheduleNodes = host.matches(".bpx-player-progress-schedule")
+        ? [host]
+        : Array.from(host.querySelectorAll(".bpx-player-progress-schedule"));
+    const scheduleRects = scheduleNodes
+        .map((node) => node.getBoundingClientRect())
+        .filter((rect) => rect.width > 0);
+    if (scheduleRects.length && hostRect.width > 0) {
+        const trackLeft = Math.min(...scheduleRects.map((rect) => rect.left));
+        const trackRight = Math.max(...scheduleRects.map((rect) => rect.right));
+        layer.style.left = `${Math.max(0, trackLeft - hostRect.left)}px`;
+        layer.style.right = "auto";
+        layer.style.width = `${Math.max(0, trackRight - trackLeft)}px`;
+    } else {
+        layer.style.left = "0";
+        layer.style.right = "0";
+        layer.style.width = "auto";
+    }
     layer.style.pointerEvents = "auto";
     layer.style.zIndex = "30";
     layer.style.top = "-3px";

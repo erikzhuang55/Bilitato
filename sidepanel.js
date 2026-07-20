@@ -1,4 +1,6 @@
 const UI_BASE = "assets/ui";
+const DEFAULT_GROQ_ASR_BASE_URL = "https://api.groq.com/openai/v1";
+const DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1";
 const state = {
     tabId: 0,
     activePage: "CC",
@@ -159,7 +161,26 @@ function normalizeCloudCachePrefs(value = {}) {
 
 function renderVersionUpdateBadge() {
     if (!state.versionState?.hasUpdate) return "";
-    return `<button type="button" class="version-update-badge" data-action="open-extension-management" title="打开扩展管理页更新">有可用版本更新</button>`;
+    return `<button type="button" class="version-update-badge" data-action="open-extension-management" data-tooltip="跳转插件页后请在左上角找到“更新”按钮以更新插件" data-tooltip-placement="bottom">有可用版本更新</button>`;
+}
+
+function normalizeAsrBaseUrlInput(value, fallback) {
+    const raw = String(value || "").trim() || String(fallback || "").trim();
+    let url;
+    try {
+        url = new URL(raw);
+    } catch (_) {
+        throw new Error("Base URL 格式不正确");
+    }
+    if (url.protocol !== "https:") throw new Error("Base URL 必须使用 https://");
+    if (url.username || url.password || url.search || url.hash) {
+        throw new Error("Base URL 不能包含账号、参数或锚点");
+    }
+    const pathname = url.pathname.replace(/\/+$/, "");
+    if (/\/(?:models|audio\/transcriptions)$/i.test(pathname)) {
+        throw new Error("Base URL 只填写基础地址，不要包含具体接口路径");
+    }
+    return `${url.origin}${pathname}`;
 }
 
 async function checkLatestVersionAvailability({ force = false } = {}) {
@@ -363,7 +384,8 @@ function showToast(text) {
 function navButton(id, file, label) {
     const active = state.activePage === id;
     const src = `${UI_BASE}/${active ? "active" : "default"}/${file}`;
-    const dot = id === "settings" && Number(state.feedback?.unreadCount || 0) > 0 ? `<span class="nav-red-dot"></span>` : "";
+    const showSettingsDot = Number(state.feedback?.unreadCount || 0) > 0 || state.settings?.pluginDisplayFeatureSeen === false;
+    const dot = id === "settings" && showSettingsDot ? `<span class="nav-red-dot"></span>` : "";
     return `<button class="side-nav-item ${active ? "active" : ""}" data-nav="${id}" data-id="${id}" data-tooltip="${escapeHtml(label)}" data-tooltip-placement="right" aria-label="${escapeHtml(label)}"><img class="loaded" src="${src}" alt="">${dot}</button>`;
 }
 
@@ -455,6 +477,7 @@ function enhanceSettingsSelects() {
                 return;
             }
             if (event.target.closest(".custom-select-trigger")) {
+                if (select.id === "setting-plugin-display-mode") markPluginDisplayFeatureSeen();
                 document.querySelectorAll(".custom-select-container.open").forEach((node) => {
                     if (node !== container) node.classList.remove("open");
                 });
@@ -463,6 +486,16 @@ function enhanceSettingsSelects() {
         });
         select.after(container);
     });
+}
+
+function markPluginDisplayFeatureSeen() {
+    if (state.settings?.pluginDisplayFeatureSeen !== false) return;
+    state.settings = { ...state.settings, pluginDisplayFeatureSeen: true };
+    document.querySelector(".settings-feature-dot")?.remove();
+    if (Number(state.feedback?.unreadCount || 0) <= 0) {
+        document.querySelector('.side-nav-item[data-id="settings"] .nav-red-dot')?.remove();
+    }
+    scheduleSettingsSave();
 }
 
 function closeActionMenu() {
@@ -982,17 +1015,19 @@ function renderSettings() {
                 <div class="settings-group-title">ASR 音频识别</div>
                 <div class="field"><label>Provider</label><div class="settings-provider-row"><select id="setting-asr-provider"><option value="groq" ${settings.asrProvider !== "siliconflow" ? "selected" : ""}>Groq</option><option value="siliconflow" ${settings.asrProvider === "siliconflow" ? "selected" : ""}>硅基流动</option></select><button id="setting-asr-register" type="button" class="panel-btn ghost" data-action="open-register" data-url="${asrRegisterUrl}">注册</button></div></div>
                 <div id="setting-asr-groq-fields" class="${asrProvider === "groq" ? "" : "settings-hidden"}">
+                    <div class="field"><label>Base URL</label><div class="settings-asr-base-url-row"><input id="setting-groq-base-url" data-manual-save="true" value="${escapeHtml(settings.groqBaseUrl || DEFAULT_GROQ_ASR_BASE_URL)}" readonly><button type="button" class="panel-btn ghost" data-action="edit-groq-base-url">修改</button><button type="button" class="panel-btn ghost" data-action="reset-groq-base-url">重置</button></div></div>
                     <div class="field"><label>Groq API Key</label>${secretField("setting-groq-key", settings.groqApiKey, "示例：gsk_xxxxx")}</div>
                     <div class="field"><label>Groq 模型</label><input id="setting-groq-model" value="${escapeHtml(settings.groqModel || "whisper-large-v3-turbo")}"></div>
                 </div>
                 <div id="setting-asr-siliconflow-fields" class="${asrProvider === "siliconflow" ? "" : "settings-hidden"}">
+                    <div class="settings-provider-url">${DEFAULT_SILICONFLOW_ASR_BASE_URL}</div>
                     <div class="field"><label>硅基流动 API Key</label>${secretField("setting-siliconflow-key", settings.siliconFlowApiKey, "示例：sk-xxxxx")}</div>
                     <div class="field"><label>硅基流动模型</label><input id="setting-siliconflow-model" value="${escapeHtml(settings.siliconFlowAsrModel || "FunAudioLLM/SenseVoiceSmall")}"></div>
                 </div>
             </div>
             <div class="settings-group">
                 <div class="settings-group-title">调用与显示</div>
-                <div class="field"><label>插件显示</label><select id="setting-plugin-display-mode"><option value="expanded" ${settings.pluginDisplayMode !== "collapsed" ? "selected" : ""}>默认展开</option><option value="collapsed" ${settings.pluginDisplayMode === "collapsed" ? "selected" : ""}>默认缩起</option></select></div>
+                <div class="field"><label class="settings-feature-label">插件显示${settings.pluginDisplayFeatureSeen === false ? '<span class="settings-feature-dot" aria-label="新增功能"></span>' : ""}</label><select id="setting-plugin-display-mode"><option value="expanded" ${settings.pluginDisplayMode !== "collapsed" ? "selected" : ""}>默认展开</option><option value="collapsed" ${settings.pluginDisplayMode === "collapsed" ? "selected" : ""}>默认缩起</option></select></div>
                 <div class="field"><label>深/浅模式</label><select id="setting-theme-mode"><option value="system" ${settings.themeMode !== "light" && settings.themeMode !== "dark" ? "selected" : ""}>跟随系统</option><option value="light" ${settings.themeMode === "light" ? "selected" : ""}>浅色模式</option><option value="dark" ${settings.themeMode === "dark" ? "selected" : ""}>深色模式</option></select></div>
                 <div class="field"><label>默认页面</label><select id="setting-default-page">${["CC", "summary", "chat", "real"].map((key) => `<option value="${key}" ${settings.defaultOpenPage === key ? "selected" : ""}>${{CC:"字幕",summary:"总结",chat:"聊天",real:"验真"}[key]}</option>`).join("")}</select></div>
                 <div class="field"><label>调用模式</label><select id="setting-pref-mode"><option value="quality" ${settings.prefMode !== "efficiency" ? "selected" : ""}>高速模式</option><option value="efficiency" ${settings.prefMode === "efficiency" ? "selected" : ""}>省流模式</option></select></div>
@@ -1381,7 +1416,7 @@ function startChatStream(text) {
     });
 }
 
-async function saveSettings({ silent = false } = {}) {
+async function saveSettings({ silent = false, requestGroqPermission = false } = {}) {
     const current = state.settings || {};
     const provider = document.getElementById("setting-provider")?.value || current.provider || "modelscope";
     const apiKey = document.getElementById("setting-api-key")?.value.trim() || "";
@@ -1394,6 +1429,11 @@ async function saveSettings({ silent = false } = {}) {
     if (invalidKey) throw new Error("API Key 不能包含中文或空格");
     const toneValue = Number(document.getElementById("setting-prompt-tone")?.value ?? 1);
     const detailValue = Number(document.getElementById("setting-prompt-detail")?.value ?? 1);
+    const groqBaseUrlInput = document.getElementById("setting-groq-base-url");
+    const groqBaseUrl = normalizeAsrBaseUrlInput(
+        groqBaseUrlInput?.readOnly === false ? current.groqBaseUrl : groqBaseUrlInput?.value,
+        DEFAULT_GROQ_ASR_BASE_URL
+    );
     const payload = {
         ...current,
         provider,
@@ -1406,6 +1446,7 @@ async function saveSettings({ silent = false } = {}) {
         asrProvider: document.getElementById("setting-asr-provider")?.value || "groq",
         groqApiKey: document.getElementById("setting-groq-key")?.value.trim() || "",
         groqModel: document.getElementById("setting-groq-model")?.value.trim() || "whisper-large-v3-turbo",
+        groqBaseUrl,
         siliconFlowApiKey: document.getElementById("setting-siliconflow-key")?.value.trim() || "",
         siliconFlowAsrModel: document.getElementById("setting-siliconflow-model")?.value.trim() || "FunAudioLLM/SenseVoiceSmall",
         themeMode: document.getElementById("setting-theme-mode")?.value || "system",
@@ -1430,6 +1471,14 @@ async function saveSettings({ silent = false } = {}) {
             }
         }
     };
+    if (groqBaseUrl !== DEFAULT_GROQ_ASR_BASE_URL) {
+        const permission = await runtimeMessage({
+            action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION",
+            baseUrl: groqBaseUrl,
+            request: requestGroqPermission
+        });
+        if (!permission?.granted) throw new Error("请点击 Base URL 旁的保存按钮并授权域名");
+    }
     const result = await runtimeMessage({ action: "SAVE_SETTINGS", settings: payload });
     state.settings = result.settings || payload;
     state.renderSignature = "";
@@ -1651,6 +1700,38 @@ async function handleAction(actionNode) {
         showToast("域名授权成功");
         return;
     }
+    if (action === "edit-groq-base-url") {
+        const input = document.getElementById("setting-groq-base-url");
+        if (!input) return;
+        if (input.readOnly) {
+            input.readOnly = false;
+            actionNode.textContent = "保存";
+            input.focus();
+            input.select();
+            return;
+        }
+        input.value = normalizeAsrBaseUrlInput(input.value, DEFAULT_GROQ_ASR_BASE_URL);
+        input.readOnly = true;
+        actionNode.textContent = "修改";
+        try {
+            await saveSettings({ requestGroqPermission: true });
+        } catch (error) {
+            input.readOnly = false;
+            actionNode.textContent = "保存";
+            throw error;
+        }
+        return;
+    }
+    if (action === "reset-groq-base-url") {
+        const input = document.getElementById("setting-groq-base-url");
+        if (!input) return;
+        input.value = DEFAULT_GROQ_ASR_BASE_URL;
+        input.readOnly = true;
+        document.querySelector('[data-action="edit-groq-base-url"]')?.replaceChildren("修改");
+        await saveSettings({ silent: true });
+        showToast("已恢复 Groq 官方地址");
+        return;
+    }
     if (action === "open-help") return chrome.tabs.create({ url: "https://github.com/erikzhuang55/Bilitato" });
     if (action === "open-review") {
         const url = globalThis.BILITATO_STORE_CONFIG?.reviewUrl || "https://chromewebstore.google.com/";
@@ -1779,7 +1860,7 @@ app.addEventListener("input", (event) => {
         input?.setSelectionRange(state.search.length, state.search.length);
         return;
     }
-    if (event.target.id?.startsWith("setting-")) {
+    if (event.target.id?.startsWith("setting-") && event.target.dataset.manualSave !== "true") {
         if (event.target.tagName === "TEXTAREA") {
             const count = event.target.parentElement?.querySelector(".prompt-char-count");
             if (count) count.textContent = `${event.target.value.length}/1000`;
@@ -1858,7 +1939,8 @@ app.addEventListener("change", (event) => {
         });
         return;
     }
-    if (event.target.id?.startsWith("setting-")) scheduleSettingsSave();
+    if (event.target.id === "setting-plugin-display-mode") markPluginDisplayFeatureSeen();
+    if (event.target.id?.startsWith("setting-") && event.target.dataset.manualSave !== "true") scheduleSettingsSave();
     if (event.target.id === "feedback-type") state.feedbackDraft.type = event.target.value;
     if (event.target.id === "feedback-include-logs") state.feedbackDraft.includeLogs = event.target.checked;
 });

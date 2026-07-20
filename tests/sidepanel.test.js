@@ -10,6 +10,7 @@ const releaseNotice = readFileSync(new URL("../content/contentReleaseNotice.js",
 const sidepanel = readFileSync(new URL("../sidepanel.js", import.meta.url), "utf8");
 const sidepanelHtml = readFileSync(new URL("../sidepanel.html", import.meta.url), "utf8");
 const sidepanelCss = readFileSync(new URL("../sidepanel.css", import.meta.url), "utf8");
+const offscreen = readFileSync(new URL("../offscreen.js", import.meta.url), "utf8");
 const inject = readFileSync(new URL("../inject.js", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const videoCacheCidMigration = readFileSync(new URL("../supabase/migrations/20260710095455_add_cid_isolation_to_video_cache.sql", import.meta.url), "utf8");
 
@@ -66,10 +67,12 @@ describe("native side panel", () => {
     expect(content).toContain("showDebugVersionUpdateBadge");
     expect(content).toContain('data-action="debug-show-version-update"');
     expect(content).toContain(">有可用版本更新</button>");
+    expect(content).toContain('data-button-tooltip="跳转插件页后请在左上角找到“更新”按钮以更新插件"');
     expect(content).not.toContain("有可用版本更新 v${latest}");
     expect(sidepanel).toContain("version-update-badge");
     expect(sidepanel).toContain("checkLatestVersionAvailability");
     expect(sidepanel).toContain(">有可用版本更新</button>");
+    expect(sidepanel).toContain('data-tooltip="跳转插件页后请在左上角找到“更新”按钮以更新插件"');
     expect(sidepanel).not.toContain("有可用版本更新 v${latest}");
   });
 
@@ -438,6 +441,13 @@ describe("native side panel", () => {
     expect(sidepanelCss).not.toContain("border-bottom: 1px solid #f1f2f3");
   });
 
+  it("positions generated segment markers across the full native chapter track", () => {
+    expect(content).toContain('document.querySelector(".bpx-player-progress-wrap") || document.querySelector(".bpx-player-progress-schedule")');
+    expect(content).toContain('host.querySelectorAll(".bpx-player-progress-schedule")');
+    expect(content).toContain("const trackLeft = Math.min(...scheduleRects.map((rect) => rect.left))");
+    expect(content).toContain("const trackRight = Math.max(...scheduleRects.map((rect) => rect.right))");
+  });
+
   it("rejects empty or placeholder-only feedback before submission", () => {
     expect(background).toContain("function isMeaningfulFeedbackText(value)");
     expect(background).toContain("标题不能为空哦");
@@ -452,15 +462,17 @@ describe("native side panel", () => {
 
   it("supports a default-collapsed embedded panel that expands after summary success", () => {
     expect(background).toContain('pluginDisplayMode: "collapsed"');
+    expect(background).toContain("pluginDisplayFeatureSeen: true");
+    expect(background).toContain('Object.prototype.hasOwnProperty.call(base, "pluginDisplayFeatureSeen")');
     expect(background).toContain('Object.keys(base).length > 0 ? "expanded"');
     expect(content).toContain('renderCustomSelect("settings-plugin-display-mode"');
     expect(sidepanel).toContain('id="setting-plugin-display-mode"');
-    expect(content).toContain("<label>插件显示</label>");
-    expect(sidepanel).toContain("<label>插件显示</label>");
+    expect(content).toContain('class="settings-feature-label">插件显示');
+    expect(sidepanel).toContain('class="settings-feature-label">插件显示');
     expect(content).not.toContain("插件显示区域");
     expect(sidepanel).not.toContain("插件显示区域");
-    expect(content.indexOf("<label>插件显示</label>")).toBeLessThan(content.indexOf("<label>深/浅模式</label>"));
-    expect(sidepanel.indexOf("<label>插件显示</label>")).toBeLessThan(sidepanel.indexOf("<label>深/浅模式</label>"));
+    expect(content.indexOf('class="settings-feature-label">插件显示')).toBeLessThan(content.indexOf("<label>深/浅模式</label>"));
+    expect(sidepanel.indexOf('class="settings-feature-label">插件显示')).toBeLessThan(sidepanel.indexOf("<label>深/浅模式</label>"));
     expect(content).toContain('class="collapsed-summary-btn"');
     expect(content).not.toContain('data-action="collapsed-open-settings"');
     expect(content).toContain("function resetPanelCollapseForCurrentPart()");
@@ -494,6 +506,27 @@ describe("native side panel", () => {
     expect(content).toContain('if (action === "view-summary")');
     expect(contentCss).toContain(".ai-summary-plugin-box.is-collapsed .collapsed-summary-btn");
     expect(contentCss).toContain(".ai-summary-plugin-box.is-collapsed .native-side-panel-btn");
+    expect(content).toContain("shouldShowPluginDisplayFeatureDot()");
+    expect(content).toContain("markPluginDisplayFeatureSeen()");
+    expect(content).toContain('class="settings-feature-dot"');
+    expect(sidepanel).toContain("state.settings?.pluginDisplayFeatureSeen === false");
+    expect(sidepanel).toContain('select.id === "setting-plugin-display-mode"');
+    expect(sidepanel).toContain("function markPluginDisplayFeatureSeen()");
+    expect(sidepanelCss).toContain(".settings-feature-dot");
+  });
+
+  it("supports a configurable Groq Base URL for regular and chunked transcription", () => {
+    expect(background).toContain("groqBaseUrl: DEFAULT_GROQ_BASE_URL");
+    expect(background).toContain('buildAsrEndpoint(baseUrl, "models", DEFAULT_GROQ_BASE_URL)');
+    expect(background).toContain('buildAsrEndpoint(baseUrl, "audio/transcriptions", DEFAULT_GROQ_BASE_URL)');
+    expect(background).toContain("baseUrl: String(options.baseUrl || DEFAULT_GROQ_BASE_URL)");
+    expect(offscreen).toContain('buildAsrEndpoint(baseUrl, "audio/transcriptions", DEFAULT_GROQ_BASE_URL)');
+    expect(content).toContain('data-action="settings-edit-groq-base-url"');
+    expect(content).toContain('data-action="settings-reset-groq-base-url"');
+    expect(sidepanel).toContain('data-action="edit-groq-base-url"');
+    expect(sidepanel).toContain('data-action="reset-groq-base-url"');
+    expect(content).toContain('DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1"');
+    expect(sidepanel).toContain('DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1"');
   });
 
   it("isolates AI results and chat streams by video part", () => {

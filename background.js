@@ -8,6 +8,11 @@ import {
     parseRetryAfterSeconds
 } from "./utils/asrTranscription.js";
 import {
+    DEFAULT_GROQ_BASE_URL,
+    buildAsrEndpoint,
+    normalizeAsrBaseUrl
+} from "./utils/asrEndpoints.js";
+import {
     DEFAULT_ASR_CHUNK_OVERLAP_SECONDS,
     mergeTimestampedChunkRows
 } from "./utils/asrChunking.js";
@@ -507,8 +512,6 @@ const ASR_TASK_TIMEOUT_MS = 120000;
 const EFFICIENCY_TASK_TIMEOUT_MS = 120000;
 const MAX_SUBTITLE_CHARS = 36000;
 const MAX_SEGMENTS_SUBTITLE_CHARS = 120000;
-const GROQ_AUDIO_TRANSCRIBE_URL = "https://api.groq.com/openai/v1/audio/transcriptions";
-const GROQ_CONNECTIVITY_CHECK_URL = "https://api.groq.com/openai/v1/models";
 const SILICONFLOW_AUDIO_TRANSCRIBE_URL = "https://api.siliconflow.cn/v1/audio/transcriptions";
 const GROQ_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
 const SILICONFLOW_MAX_AUDIO_BYTES = 50 * 1024 * 1024;
@@ -540,6 +543,7 @@ const DEFAULT_SETTINGS = {
     asrProvider: "groq",
     groqApiKey: "",
     groqModel: "whisper-large-v3-turbo",
+    groqBaseUrl: DEFAULT_GROQ_BASE_URL,
     siliconFlowApiKey: "",
     siliconFlowAsrModel: "FunAudioLLM/SenseVoiceSmall",
     supabaseUrl: "https://qdksdauixnbgrgkilgac.supabase.co",
@@ -551,6 +555,7 @@ const DEFAULT_SETTINGS = {
     themeMode: "system",
     prefMode: "quality",
     pluginDisplayMode: "collapsed",
+    pluginDisplayFeatureSeen: true,
     segmentPromptVariant: "test",
     debugMode: false,
     sentryEnabled: true,
@@ -2008,6 +2013,7 @@ class ContentProvider {
         const asrModel = asrProvider === "siliconflow"
             ? (String(normalizedSettings.siliconFlowAsrModel || "").trim() || "FunAudioLLM/SenseVoiceSmall")
             : (String(normalizedSettings.groqModel || "").trim() || "whisper-large-v3-turbo");
+        const groqBaseUrl = normalizeAsrBaseUrl(normalizedSettings.groqBaseUrl, DEFAULT_GROQ_BASE_URL);
         const asrMaxAudioBytes = asrProvider === "siliconflow" ? SILICONFLOW_MAX_AUDIO_BYTES : GROQ_MAX_AUDIO_BYTES;
         const asrDisplayName = asrProvider === "siliconflow" ? "硅基流动" : "Groq";
         const subtitleSource = asrProvider === "siliconflow" ? "siliconflow" : "groq";
@@ -2067,7 +2073,7 @@ class ContentProvider {
             if (asrProvider === "groq") {
                 await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 12, updatedAt: Date.now() });
                 await notifyTranscribeStatus(tabId, { stage: "connectivity_check", level: "info", text: "正在检查 Groq 服务器连接...", progress: 12, bvid });
-                await this.ensureGroqConnectivity(asrApiKey, tabId, bvid, operationController.signal);
+                await this.ensureGroqConnectivity(asrApiKey, tabId, bvid, operationController.signal, groqBaseUrl);
             }
             const media = await this.extractAudioSourceFromTab(tabId, { ...payload, asrProvider });
             if (!media?.url) throw new Error("未提取到音轨地址，可能是付费视频、CDN 限制或页面未完成加载");
@@ -2175,6 +2181,7 @@ class ContentProvider {
                         videoTitle: title || media.title || "",
                         groqApiKey: asrApiKey,
                         groqModel: asrModel,
+                        baseUrl: groqBaseUrl,
                         maxAudioBytes: asrMaxAudioBytes,
                         audioUrl: media.url,
                         signal: operationController.signal
@@ -2204,7 +2211,7 @@ class ContentProvider {
                 try {
                     transcription = asrProvider === "siliconflow"
                         ? await this.requestSiliconFlowTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, operationController.signal)
-                        : await this.requestGroqTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, title || media.title || "", operationController.signal);
+                        : await this.requestGroqTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, title || media.title || "", operationController.signal, groqBaseUrl);
                 } finally {
                     uploadStageActive = false;
                     clearInterval(progressTimer);
@@ -2506,7 +2513,7 @@ class ContentProvider {
         return blob;
     }
 
-    static async ensureGroqConnectivity(groqApiKey, tabId, bvid = "", externalSignal = null) {
+    static async ensureGroqConnectivity(groqApiKey, tabId, bvid = "", externalSignal = null, baseUrl = DEFAULT_GROQ_BASE_URL) {
         const controller = new AbortController();
         const forwardAbort = () => controller.abort(externalSignal?.reason || "aborted");
         if (externalSignal) {
@@ -2516,7 +2523,7 @@ class ContentProvider {
         const timeoutId = setTimeout(() => controller.abort("timeout"), GROQ_CONNECTIVITY_TIMEOUT_MS);
         const startedAt = Date.now();
         try {
-            const response = await fetch(GROQ_CONNECTIVITY_CHECK_URL, {
+            const response = await fetch(buildAsrEndpoint(baseUrl, "models", DEFAULT_GROQ_BASE_URL), {
                 method: "GET",
                 headers: { Authorization: `Bearer ${groqApiKey}` },
                 signal: controller.signal
@@ -2583,7 +2590,7 @@ class ContentProvider {
         }
     }
 
-    static async requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid = "", videoTitle = "", externalSignal = null) {
+    static async requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid = "", videoTitle = "", externalSignal = null, baseUrl = DEFAULT_GROQ_BASE_URL) {
         const formData = new FormData();
         formData.append("file", audioFile);
         formData.append("model", groqModel);
@@ -2599,7 +2606,7 @@ class ContentProvider {
         const timeoutId = setTimeout(() => controller.abort("timeout"), ASR_TASK_TIMEOUT_MS);
         let response;
         try {
-            response = await fetch(GROQ_AUDIO_TRANSCRIBE_URL, {
+            response = await fetch(buildAsrEndpoint(baseUrl, "audio/transcriptions", DEFAULT_GROQ_BASE_URL), {
                 method: "POST",
                 headers: { Authorization: `Bearer ${groqApiKey}` },
                 body: formData,
@@ -2722,6 +2729,7 @@ class ContentProvider {
                 bvid,
                 apiKey: groqApiKey,
                 model: groqModel,
+                baseUrl: String(options.baseUrl || DEFAULT_GROQ_BASE_URL),
                 videoTitle
             });
             const mergedRows = Array.isArray(chunkResult?.rows) ? chunkResult.rows : [];
@@ -7220,6 +7228,10 @@ function normalizeSettings(settings) {
     if (apiKey) providerApiKeys[provider] = apiKey;
     const groqApiKey = String(base.groqApiKey || "").trim();
     const groqModel = String(base.groqModel || DEFAULT_SETTINGS.groqModel || "whisper-large-v3-turbo").trim() || "whisper-large-v3-turbo";
+    let groqBaseUrl = DEFAULT_GROQ_BASE_URL;
+    try {
+        groqBaseUrl = normalizeAsrBaseUrl(base.groqBaseUrl, DEFAULT_GROQ_BASE_URL);
+    } catch (_) {}
     const siliconFlowApiKey = String(base.siliconFlowApiKey || "").trim();
     const siliconFlowAsrModel = String(base.siliconFlowAsrModel || DEFAULT_SETTINGS.siliconFlowAsrModel || "FunAudioLLM/SenseVoiceSmall").trim() || "FunAudioLLM/SenseVoiceSmall";
     const supabaseUrl = String(base.supabaseUrl || DEFAULT_SETTINGS.supabaseUrl || "").trim().replace(/\/+$/, "");
@@ -7236,6 +7248,9 @@ function normalizeSettings(settings) {
     const pluginDisplayMode = String(base.pluginDisplayMode || pluginDisplayFallback || "collapsed").toLowerCase() === "collapsed"
         ? "collapsed"
         : "expanded";
+    const pluginDisplayFeatureSeen = Object.prototype.hasOwnProperty.call(base, "pluginDisplayFeatureSeen")
+        ? !!base.pluginDisplayFeatureSeen
+        : Object.keys(base).length === 0;
     const segmentPromptVariantRaw = String(base.segmentPromptVariant || DEFAULT_SETTINGS.segmentPromptVariant || "test").toLowerCase();
     const segmentPromptVariant = segmentPromptVariantRaw === "original" ? "original" : "test";
     const sentryDsn = String(base.sentryDsn || DEFAULT_SETTINGS.sentryDsn || "").trim();
@@ -7261,6 +7276,7 @@ function normalizeSettings(settings) {
         asrProvider,
         groqApiKey,
         groqModel,
+        groqBaseUrl,
         siliconFlowApiKey,
         siliconFlowAsrModel,
         supabaseUrl,
@@ -7272,6 +7288,7 @@ function normalizeSettings(settings) {
         themeMode,
         prefMode,
         pluginDisplayMode,
+        pluginDisplayFeatureSeen,
         segmentPromptVariant,
         disableCloudCacheRead
     };

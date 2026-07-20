@@ -109,6 +109,15 @@ describe("native side panel", () => {
     expect(releaseLayer).toBeGreaterThan(metricsLayer);
   });
 
+  it("temporarily expands a collapsed embedded panel for the release notice", () => {
+    expect(content).toContain("...createEmbeddedReleaseNoticeHooks()");
+    expect(content).toContain("restoreCollapsed = appState.isCollapsed");
+    expect(content).toContain("if (restoreCollapsed) setPanelCollapsed(false)");
+    expect(content).toContain("if (restoreCollapsed) setPanelCollapsed(true)");
+    expect(releaseNotice).toContain("onOpen?.()");
+    expect(releaseNotice).toContain("onClose?.()");
+  });
+
   it("keeps the ModelScope preset list aligned with currently supported models", () => {
     const modelScopeList = content.match(/modelscope:\s*\[([\s\S]*?)\]/)?.[1] || "";
     expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Flash"');

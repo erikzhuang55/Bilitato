@@ -817,7 +817,7 @@
     });
   }
 
-  function renderReleaseNotice({ root, version = getCurrentVersion() }) {
+  function renderReleaseNotice({ root, version = getCurrentVersion(), onOpen, onClose }) {
     if (!root) return false;
 
     const note = RELEASE_NOTES[version];
@@ -827,7 +827,9 @@
     const box = root.querySelector(".ai-summary-plugin-box");
     if (!box) return false;
 
-    box.querySelector(".release-notice-overlay")?.remove();
+    if (box.querySelector(".release-notice-overlay")) return true;
+
+    onOpen?.();
 
     const overlay = document.createElement("div");
     overlay.className = "release-notice-overlay";
@@ -951,13 +953,21 @@
     };
     renderPage();
 
+    let closed = false;
+    const closeOverlay = () => {
+      if (closed) return;
+      closed = true;
+      overlay.remove();
+      onClose?.();
+    };
+
     const closeAndMarkSeen = async () => {
       await markReleaseNoticeSeen(version);
-      overlay.remove();
+      closeOverlay();
     };
 
     const closeOnly = () => {
-      overlay.remove();
+      closeOverlay();
     };
 
     overlay
@@ -1011,11 +1021,11 @@
     return majorHistory.filter((item, index, arr) => item && RELEASE_NOTES[item] && arr.indexOf(item) === index);
   }
 
-  async function maybeShowReleaseNotice({ root, version = getCurrentVersion() }) {
+  async function maybeShowReleaseNotice({ root, version = getCurrentVersion(), onOpen, onClose }) {
     const shouldShow = await shouldShowReleaseNotice(version);
     if (!shouldShow) return false;
 
-    return renderReleaseNotice({ root, version });
+    return renderReleaseNotice({ root, version, onOpen, onClose });
   }
 
   globalThis.BilitatoReleaseNotice = {

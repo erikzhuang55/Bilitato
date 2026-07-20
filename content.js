@@ -2635,7 +2635,21 @@ function renderApp() {
     maybeAutoShowSetupGuideOnFirstRun();
     globalThis.BilitatoReleaseNotice?.maybeShowReleaseNotice({
         root: panelShadowRoot,
+        ...createEmbeddedReleaseNoticeHooks(),
     });
+}
+
+function createEmbeddedReleaseNoticeHooks() {
+    let restoreCollapsed = false;
+    return {
+        onOpen: () => {
+            restoreCollapsed = appState.isCollapsed;
+            if (restoreCollapsed) setPanelCollapsed(false);
+        },
+        onClose: () => {
+            if (restoreCollapsed) setPanelCollapsed(true);
+        },
+    };
 }
 
 // Backdoor mechanism
@@ -3139,7 +3153,8 @@ function bindPanelDelegatedEvents() {
         if (action === "debug-show-release-notice") {
             globalThis.BilitatoReleaseNotice?.renderReleaseNotice?.({
                 root: panelShadowRoot,
-                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.3"
+                version: globalThis.chrome?.runtime?.getManifest?.()?.version || "1.4.3",
+                ...createEmbeddedReleaseNoticeHooks(),
             });
             return;
         }

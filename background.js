@@ -522,7 +522,10 @@ const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
 const SUPABASE_DEFAULT_FEEDBACK_TABLE = "feedback";
 const SUPABASE_DEFAULT_USAGE_DAILY_RPC = "increment_feature_usage_daily";
 const SUPABASE_DEFAULT_VERSION_TABLE = "extension_versions";
-const DEFAULT_SENTRY_DSN = "https://04879b2bd5fc72eba741a402e26c4790@o4511384082055168.ingest.de.sentry.io/4511384299634768";
+const DEFAULT_SENTRY_DSN = "https://440bce86f646672341586eb09c859631@o4511769099501568.ingest.de.sentry.io/4511769123029072";
+const LEGACY_SENTRY_DSNS = new Set([
+    "https://04879b2bd5fc72eba741a402e26c4790@o4511384082055168.ingest.de.sentry.io/4511384299634768"
+]);
 const TASK_KEYS = ["summary", "segments", "rumors"];
 const CLOUD_CACHE_KEYS = ["subtitle", ...TASK_KEYS];
 const CLOUD_READ_DISABLED_BVIDS_KEY = "cloudReadDisabledBvids";
@@ -7253,7 +7256,10 @@ function normalizeSettings(settings) {
         : Object.keys(base).length === 0;
     const segmentPromptVariantRaw = String(base.segmentPromptVariant || DEFAULT_SETTINGS.segmentPromptVariant || "test").toLowerCase();
     const segmentPromptVariant = segmentPromptVariantRaw === "original" ? "original" : "test";
-    const sentryDsn = String(base.sentryDsn || DEFAULT_SETTINGS.sentryDsn || "").trim();
+    const storedSentryDsn = String(base.sentryDsn || "").trim();
+    const sentryDsn = !storedSentryDsn || LEGACY_SENTRY_DSNS.has(storedSentryDsn)
+        ? DEFAULT_SENTRY_DSN
+        : storedSentryDsn;
     const sentryEnabled = Object.prototype.hasOwnProperty.call(base, "sentryEnabled")
         ? !!base.sentryEnabled
         : !!DEFAULT_SETTINGS.sentryEnabled;

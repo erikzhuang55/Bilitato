@@ -4,6 +4,67 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.5.1": {
+      title: "Bilitato 已更新至 v1.5.1",
+      displayVersion: "v1.5.1",
+      subtitle: "这次新增了更安静的插件显示方式和 Groq 自定义地址，并重点修复分 P 视频的字幕、缓存与进度状态问题。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "插件显示模式",
+              desc: "可在“设置 → 调用与显示模式 → 插件显示”中选择默认缩起或默认展开。缩起后仅保留标题栏和总结按钮，也可以点击标题栏随时展开。",
+              highlight: true,
+            },
+            {
+              title: "Groq 自定义 Base URL",
+              desc: "Groq 现在支持使用 Cloudflare 等兼容中转地址，连接检测、普通转录和大文件分段转录都会使用修改后的地址。",
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "修复分 P 视频内容串线",
+              desc: "字幕、总结、分段、聊天和任务进度现在会按当前分 P 的真实 CID 隔离，切换选集后不会再显示上一集内容。",
+              highlight: true,
+            },
+            {
+              title: "修复字幕切换后的加载异常",
+              desc: "优化站内切换视频、分 P 和字幕语言时的状态同步，减少字幕一直加载、显示旧字幕或短暂变空的问题。",
+            },
+            {
+              title: "修复单 P 视频无法读取云端缓存",
+              desc: "普通单集视频现在可以正常读取旧版云端缓存，不会再因为缺少分 P 信息而跳过。",
+            },
+            {
+              title: "修复原生章节视频的分段标记错位",
+              desc: "当视频自带 B 站章节时，Bilitato 生成的分段标记会正确分布在整条进度条上。",
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "优化缩起与总结阅读体验",
+              desc: "总结生成完成后会自动展开，再次缩起时显示“查看总结”；同时增加总结区域，避免视频分段占用过多空间。",
+            },
+            {
+              title: "新增功能提示更清楚",
+              desc: "老用户更新后会在设置入口和“插件显示”旁看到红点，查看新功能后自动消失。",
+            },
+            {
+              title: "优化反馈提交提示",
+              desc: "反馈标题或内容为空时，会分别提示“标题不能为空哦”和“内容不能为空哦”。",
+            },
+          ],
+        },
+      ],
+      privacy: "本插件不会上传任何 API Key、Prompt 或您和 AI 的聊天内容。自定义 Groq Base URL 仅在您主动设置后用于转录请求。",
+    },
     "1.5.0": {
       title: "Bilitato 已更新至 v1.5",
       displayVersion: "v1.5",
@@ -930,7 +991,9 @@
 
   function buildReleasePageVersions(version) {
     const majorHistory = [];
-    if (version === "1.5.0") {
+    if (version === "1.5.1") {
+      majorHistory.push("1.5.1", "1.5.0", "1.4.x", "1.3.x", "1.2.x");
+    } else if (version === "1.5.0") {
       majorHistory.push("1.5.0", "1.4.x", "1.3.x", "1.2.x");
     } else if (version === "1.4.3") {
       majorHistory.push("1.4.x", "1.3.x", "1.2.x");

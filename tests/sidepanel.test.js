@@ -55,7 +55,7 @@ describe("native side panel", () => {
   });
 
   it("checks database driven update availability without frequent polling", () => {
-    expect(manifest.version).toBe("1.5.0");
+    expect(manifest.version).toBe("1.5.1");
     expect(background).toContain('msg.action === "CHECK_LATEST_VERSION"');
     expect(background).toContain('msg.action === "OPEN_EXTENSION_MANAGEMENT"');
     expect(background).toContain("VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000");
@@ -76,7 +76,12 @@ describe("native side panel", () => {
     expect(sidepanel).not.toContain("有可用版本更新 v${latest}");
   });
 
-  it("ships the 1.5 release notice page", () => {
+  it("ships the 1.5 release notice pages", () => {
+    expect(releaseNotice).toContain('"1.5.1"');
+    expect(releaseNotice).toContain("Bilitato 已更新至 v1.5.1");
+    expect(releaseNotice).toContain("插件显示模式");
+    expect(releaseNotice).toContain("修复分 P 视频内容串线");
+    expect(releaseNotice).toContain('majorHistory.push("1.5.1", "1.5.0"');
     expect(releaseNotice).toContain('"1.5.0"');
     expect(releaseNotice).toContain("Bilitato 已更新至 v1.5");
     expect(releaseNotice).toContain("修复同一视频不同分 P 字幕串线");
@@ -439,6 +444,13 @@ describe("native side panel", () => {
     expect(sidepanelCss).toContain(".chat-footer");
     expect(sidepanelCss).toContain(".claim-card.fake");
     expect(sidepanelCss).not.toContain("border-bottom: 1px solid #f1f2f3");
+  });
+
+  it("migrates the bundled Sentry DSN without overwriting custom DSNs", () => {
+    expect(background).toContain('const DEFAULT_SENTRY_DSN = "https://440bce86f646672341586eb09c859631@o4511769099501568.ingest.de.sentry.io/4511769123029072"');
+    expect(background).toContain("const LEGACY_SENTRY_DSNS = new Set([");
+    expect(background).toContain("LEGACY_SENTRY_DSNS.has(storedSentryDsn)");
+    expect(background).toContain(": storedSentryDsn;");
   });
 
   it("positions generated segment markers across the full native chapter track", () => {

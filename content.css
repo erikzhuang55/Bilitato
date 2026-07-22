@@ -3018,6 +3018,74 @@ input[type="range"]:active::-webkit-slider-thumb {
     color: #fff;
 }
 
+.download-mode-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 250px;
+    padding: 6px;
+}
+
+.download-mode-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    width: 100%;
+    padding: 10px 11px;
+    border: 1px solid #e3e8ec;
+    border-radius: 8px;
+    background: #fff;
+    color: #18191c;
+    cursor: pointer;
+    text-align: left;
+}
+
+.download-mode-option:hover {
+    border-color: #fb7299;
+    background: #fff5f8;
+}
+
+.download-mode-copy {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.download-mode-copy strong {
+    font-size: 13px;
+}
+
+.download-mode-copy small {
+    color: #9499a0;
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.download-mode-arrow {
+    color: #9499a0;
+    font-size: 20px;
+}
+
+.download-codec-options {
+    margin-top: 7px;
+}
+
+.download-codec-options summary {
+    width: max-content;
+    color: #9499a0;
+    font-size: 11px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.download-codec-options .codec-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 6px;
+}
+
 @keyframes copy-menu-pop {
     from {
         opacity: 0;
@@ -4377,6 +4445,24 @@ input[type="range"]:active::-webkit-slider-thumb {
 .ai-summary-plugin-box[data-theme="dark"] .quality-list-body {
     border-color: rgba(255, 255, 255, 0.12) !important;
     color: #d8dee9 !important;
+}
+
+.copy-menu-overlay[data-theme="dark"] .download-mode-option,
+.ai-summary-plugin-box[data-theme="dark"] .download-mode-option {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: rgba(255, 255, 255, 0.04);
+    color: #f2f4f8;
+}
+
+.copy-menu-overlay[data-theme="dark"] .download-mode-option:hover,
+.ai-summary-plugin-box[data-theme="dark"] .download-mode-option:hover {
+    border-color: rgba(251, 114, 153, 0.72);
+    background: rgba(251, 114, 153, 0.12);
+}
+
+.copy-menu-overlay[data-theme="dark"] .download-codec-options summary,
+.ai-summary-plugin-box[data-theme="dark"] .download-codec-options summary {
+    color: #aeb6c2;
 }
 
 .ai-summary-plugin-box[data-theme="dark"] .custom-option {

@@ -673,9 +673,6 @@
             }
             cancelSilentSession({ restore: !languageItem, releaseMask: true });
         };
-        document.addEventListener("mouseover", (event) => {
-            release("mouseover", event);
-        }, true);
         document.addEventListener("mousedown", (event) => {
             release("mousedown", event);
         }, true);

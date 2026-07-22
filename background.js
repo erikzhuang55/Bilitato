@@ -981,7 +981,9 @@ async function handleMessage(msg, sender) {
         });
 
         try {
-            const status = await probeUrlStatus(url);
+            const status = tabId
+                ? await probeUrlStatusForTab(tabId, url)
+                : await probeUrlStatus(url);
             if (status !== "ok") {
                 const error = createAppError(
                     "DOWNLOAD_URL_UNVERIFIED",

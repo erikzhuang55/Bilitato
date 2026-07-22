@@ -10410,13 +10410,68 @@ function renderExportMainMenu(menuContainer) {
     
     menuContainer.querySelector('[data-action="download-video"]').addEventListener("click", async (e) => {
         e.stopPropagation();
-        await renderCompatQualityList(menuContainer, "video");
+        renderVideoDownloadModeMenu(menuContainer);
     });
 
     menuContainer.querySelector('[data-action="download-audio"]').addEventListener("click", async (e) => {
         e.stopPropagation();
         await renderCompatQualityList(menuContainer, "audio");
     });
+}
+
+function renderVideoDownloadModeMenu(menuContainer) {
+    if (!menuContainer) return;
+    menuContainer.dataset.streamLoading = "";
+    menuContainer.innerHTML = `
+        <div class="quality-list-header" style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid #eee;margin-bottom:4px;">
+            <button class="back-btn" style="border:none;background:none;cursor:pointer;font-size:16px;padding:0 4px;">←</button>
+            <span style="font-size:13px;font-weight:600;">选择下载方式</span>
+        </div>
+        <div class="download-mode-list">
+            <button type="button" class="download-mode-option" data-download-mode="quality">
+                <span class="download-mode-copy">
+                    <strong>高清下载</strong>
+                    <small>高清 DASH 视频，可选编码，音频需单独下载</small>
+                </span>
+                <span class="download-mode-arrow">›</span>
+            </button>
+            <button type="button" class="download-mode-option" data-download-mode="compat">
+                <span class="download-mode-copy">
+                    <strong>兼容下载</strong>
+                    <small>单文件 MP4，兼容性更好，通常最高 720P</small>
+                </span>
+                <span class="download-mode-arrow">›</span>
+            </button>
+        </div>
+    `;
+    menuContainer.querySelector(".back-btn")?.addEventListener("click", (event) => {
+        event.stopPropagation();
+        renderExportMainMenu(menuContainer);
+    });
+    menuContainer.querySelector('[data-download-mode="quality"]')?.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        renderExportLoadingState(menuContainer, "video");
+        const info = await refreshPlayInfoNow(7000).catch(() => null);
+        const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
+        if (!hasUsablePlayInfoForBvid(info, pageBvid)) {
+            showToast("暂未拿到可用高清视频流，请稍后重试");
+            renderVideoDownloadModeMenu(menuContainer);
+            return;
+        }
+        renderQualityList(menuContainer, "video");
+    });
+    menuContainer.querySelector('[data-download-mode="compat"]')?.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        await renderCompatQualityList(menuContainer, "video");
+    });
+}
+
+function renderDownloadPreviousMenu(menuContainer, type) {
+    if (type === "video") {
+        renderVideoDownloadModeMenu(menuContainer);
+        return;
+    }
+    renderExportMainMenu(menuContainer);
 }
 
 async function probeUrlInPage(url) {
@@ -10484,7 +10539,7 @@ async function renderCompatQualityList(menuContainer, type) {
             detail: { type, reason: error?.message || "获取兼容下载链接失败" }
         });
         notifyMappedError(error, "获取兼容下载链接失败: " + (error.message || ""));
-        renderExportMainMenu(menuContainer);
+        renderDownloadPreviousMenu(menuContainer, type);
         return;
     }
     const title = type === "video" ? "选择清晰度" : "选择音频";
@@ -10510,7 +10565,7 @@ async function renderCompatQualityList(menuContainer, type) {
 
     if (!bodyHtml) {
         showToast(type === "video" ? "未找到兼容视频流" : "未找到可用音频流");
-        renderExportMainMenu(menuContainer);
+        renderDownloadPreviousMenu(menuContainer, type);
         return;
     }
 
@@ -10526,7 +10581,7 @@ async function renderCompatQualityList(menuContainer, type) {
     `;
     menuContainer.querySelector(".back-btn")?.addEventListener("click", (e) => {
         e.stopPropagation();
-        renderExportMainMenu(menuContainer);
+        renderDownloadPreviousMenu(menuContainer, type);
     });
 
     menuContainer.querySelectorAll(".compat-video-download-btn").forEach((btn) => {
@@ -10625,14 +10680,14 @@ function renderQualityList(menuContainer, type) {
             .then((info) => {
                 if (!hasUsablePlayInfoForBvid(info, pageBvid)) {
                     showToast("暂未拿到可用视频流，请稍后重试");
-                    renderExportMainMenu(menuContainer);
+                    renderDownloadPreviousMenu(menuContainer, type);
                     return;
                 }
                 renderQualityList(menuContainer, type);
             })
             .catch(() => {
                 showToast("暂未拿到可用视频流，请稍后重试");
-                renderExportMainMenu(menuContainer);
+                renderDownloadPreviousMenu(menuContainer, type);
             });
         return;
     }
@@ -10668,23 +10723,26 @@ function renderQualityList(menuContainer, type) {
             const subOptions = streamList.map((s, sIndex) => `
                 <button class="codec-btn" data-group="${gIndex}" data-stream="${sIndex}" 
                    title="${escapeHtml(s.codecs || s.codecName)}"
-                   style="font-size:11px;padding:2px 6px;border:1px solid #e3e8ec;background:#f6f7f8;color:#61666d;border-radius:4px;cursor:pointer;margin-left:4px;">
+                   style="font-size:11px;padding:3px 7px;border:1px solid #e3e8ec;background:#f6f7f8;color:#61666d;border-radius:4px;cursor:pointer;">
                    ${escapeHtml(s.codecName)}
                 </button>
             `).join("");
             
             return `
                 <div class="quality-group" style="padding:8px 12px;border-bottom:1px solid #f1f2f3;">
-                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
                         <span class="quality-desc" style="font-size:13px;font-weight:500;color:#18191c;">${escapeHtml(group.desc)}</span>
                         <button class="download-default-btn" data-group="${gIndex}" data-stream="${initialStreamIndex}"
                            style="font-size:12px;padding:4px 10px;border:1px solid #fb7299;color:#fff;background:#fb7299;border-radius:4px;cursor:pointer;">
                            下载
                         </button>
                     </div>
-                    <div class="codec-list" style="display:flex;flex-wrap:wrap;gap:4px;">
-                        ${subOptions}
-                    </div>
+                    ${streamList.length > 1 ? `
+                        <details class="download-codec-options">
+                            <summary>更多编码（可选）</summary>
+                            <div class="codec-list">${subOptions}</div>
+                        </details>
+                    ` : `<div class="codec-list" hidden>${subOptions}</div>`}
                 </div>
             `;
         }).join("");
@@ -10719,7 +10777,7 @@ function renderQualityList(menuContainer, type) {
     
     menuContainer.querySelector(".back-btn").addEventListener("click", (e) => {
         e.stopPropagation();
-        renderExportMainMenu(menuContainer);
+        renderDownloadPreviousMenu(menuContainer, type);
     });
     const qualityInfo = menuContainer.querySelector(".download-quality-info");
     const qualityTooltip = qualityInfo?.querySelector(".download-quality-tooltip");
@@ -10739,7 +10797,7 @@ function renderQualityList(menuContainer, type) {
         const pageBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
         if (!hasUsablePlayInfoForBvid(info, pageBvid)) {
             showToast("暂未拿到可用视频流，请稍后重试");
-            renderExportMainMenu(menuContainer);
+            renderDownloadPreviousMenu(menuContainer, type);
             return;
         }
         renderQualityList(menuContainer, type);

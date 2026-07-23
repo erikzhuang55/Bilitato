@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 const manifest = JSON.parse(readFileSync(new URL("../manifest.json", import.meta.url), "utf8"));
 const buildScript = readFileSync(new URL("../scripts/build-release.js", import.meta.url), "utf8");
+const sourceBuildScript = readFileSync(new URL("../scripts/build-firefox-source.js", import.meta.url), "utf8");
+const amoBuildInstructions = readFileSync(new URL("../AMO_BUILD.md", import.meta.url), "utf8");
 const background = readFileSync(new URL("../background.js", import.meta.url), "utf8");
 const content = readFileSync(new URL("../content.js", import.meta.url), "utf8");
 const contentCss = readFileSync(new URL("../content.css", import.meta.url), "utf8");
@@ -107,6 +109,29 @@ describe("native side panel", () => {
     const releaseLayer = Number(contentCss.match(/\.release-notice-overlay\s*\{[\s\S]*?z-index:\s*(\d+)/)?.[1]);
 
     expect(releaseLayer).toBeGreaterThan(metricsLayer);
+  });
+
+  it("builds a Firefox package with sidebar and background-page compatibility", () => {
+    expect(buildScript).toContain("firefox:");
+    expect(buildScript).toContain('permission !== "offscreen" && permission !== "sidePanel"');
+    expect(buildScript).toContain("delete targetManifest.side_panel");
+    expect(buildScript).toContain("targetManifest.sidebar_action");
+    expect(buildScript).toContain('scripts: ["background.js"]');
+    expect(buildScript).toContain('optional: ["technicalAndInteraction"]');
+    expect(background).toContain("chrome.sidebarAction.open()");
+    expect(background).toContain("FIREFOX_OFFSCREEN_IFRAME_ID");
+    expect(content).toContain("result.requiresToolbarAction");
+  });
+
+  it("ships a reproducible cross-platform Firefox source package", () => {
+    expect(buildScript).not.toContain("powershell.exe");
+    expect(buildScript).not.toContain("Compress-Archive");
+    expect(buildScript).toContain("writeZipFromDirectory");
+    expect(sourceBuildScript).toContain("AMO_BUILD.md");
+    expect(sourceBuildScript).toContain("package-lock.json");
+    expect(sourceBuildScript).not.toContain("node_modules");
+    expect(amoBuildInstructions).toContain("npm ci");
+    expect(amoBuildInstructions).toContain("npm run build:firefox");
   });
 
   it("temporarily expands a collapsed embedded panel for the release notice", () => {
@@ -562,6 +587,30 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1"');
   });
 
+  it("supports Xiaomi MiMo transcription and removes the generic custom ASR provider", () => {
+    expect(background).toContain('mimoApiKey: ""');
+    expect(background).toContain("mimoAsrModel: MIMO_ASR_MODEL");
+    expect(background).toContain('["groq", "siliconflow", "mimo"].includes(requestedAsrProvider)');
+    expect(background).toContain("subtitleSource = asrProvider");
+    expect(background).toContain('provider: asrProvider');
+    expect(background).toContain('asrProvider === "mimo" || audioBlob.size >= asrMaxAudioBytes');
+    expect(background).toContain('provider: String(payload?.provider || "groq")');
+    expect(content).toContain('renderSecretInput("settings-mimo-api-key"');
+    expect(content).toContain('id="settings-mimo-asr-model"');
+    expect(sidepanel).toContain('secretField("setting-mimo-key"');
+    expect(sidepanel).toContain('id="setting-mimo-model"');
+    expect(offscreen).toContain('["groq", "siliconflow", "mimo"].includes(requestedProvider)');
+    expect(offscreen).toContain('mimeType: isMimo ? "audio/mpeg" : "audio/mp4"');
+    expect(offscreen).toContain('"libmp3lame"');
+    expect(offscreen).toContain('provider === "mimo" ? MIMO_ASR_CHUNK_SECONDS : DEFAULT_ASR_CHUNK_SECONDS');
+    expect(offscreen).toContain("ASR_CHUNK_TRANSCRIBE_EMPTY");
+    expect(content).not.toContain('settings-authorize-custom-asr-origin');
+    expect(sidepanel).not.toContain('authorize-custom-asr-origin');
+    expect(content).not.toContain('id="settings-custom-asr-base-url"');
+    expect(sidepanel).not.toContain('id="setting-custom-asr-base-url"');
+    expect(manifest.host_permissions).toContain("https://api.xiaomimimo.com/*");
+  });
+
   it("isolates AI results and chat streams by video part", () => {
     expect(background).toContain("function createVideoCachePartKey(bvid, cid)");
     expect(background).toContain("function getPartCacheForContext");
@@ -634,5 +683,6 @@ describe("native side panel", () => {
     expect(openBranch).toContain("chrome.sidePanel.open({ tabId })");
     expect(openBranch).not.toContain("await chrome.sidePanel");
     expect(openBranch).not.toContain("setOptions");
+    expect(openBranch).toContain("requiresToolbarAction: true");
   });
 });

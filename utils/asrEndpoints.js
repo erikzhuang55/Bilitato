@@ -1,8 +1,14 @@
 export const DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 export const DEFAULT_SILICONFLOW_BASE_URL = "https://api.siliconflow.cn/v1";
 
+export function ensureHttpsUrlPrefix(value) {
+    const raw = String(value || "").trim();
+    if (!raw || /^[a-z][a-z\d+.-]*:\/\//i.test(raw)) return raw;
+    return `https://${raw.replace(/^\/+/, "")}`;
+}
+
 export function normalizeAsrBaseUrl(value, fallback) {
-    const raw = String(value || "").trim() || String(fallback || "").trim();
+    const raw = ensureHttpsUrlPrefix(String(value || "").trim() || String(fallback || "").trim());
     let url;
     try {
         url = new URL(raw);

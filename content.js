@@ -36,7 +36,7 @@ const {
 
 function isNoTimestampSubtitleCache(cache = {}) {
     const source = String(cache?.subtitleSource || "").toLowerCase();
-    if (source === "siliconflow" || source === "funasr") return true;
+    if (source === "siliconflow" || source === "funasr" || source === "mimo") return true;
     const raw = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle : [];
     if (!raw.length) return false;
     return raw.some((item) => item?.noTimestamp === true);
@@ -272,6 +272,7 @@ const {
     renderChatHistoryItem: renderChatHistoryItemHtml
 } = globalThis.BilitatoContentChat || {};
 const {
+    buildPlaybackSubtitleCues,
     buildSrtContent,
     buildTimestampedSubtitleText,
     getActiveSubtitleIndex,
@@ -311,6 +312,8 @@ const {
 const DEBUG_LOG_DISPLAY_LIMIT = 2000;
 const DEFAULT_GROQ_ASR_BASE_URL = "https://api.groq.com/openai/v1";
 const DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1";
+const DEFAULT_MIMO_ASR_BASE_URL = "https://api.xiaomimimo.com/v1";
+const DEFAULT_MIMO_ASR_MODEL = "mimo-v2.5-asr";
 
 const SETUP_PREVIEW_VIDEO_URL = "https://www.bilibili.com/video/BV1ojfDBSEPv/?spm_id_from=333.337.search-card.all.click&vd_source=3f5a30216e0108cea18aa63a3bff11b8";
 const SETUP_PREVIEW_BVID = normalizeBvidCase(getBvidFromUrl?.(SETUP_PREVIEW_VIDEO_URL) || "BV1ojfDBSEPv");
@@ -355,6 +358,10 @@ const appState = {
     followPausedAt: 0,
     followCurrentIndex: -1,
     renderedSubtitleIndex: -1,
+    videoSubtitleEnabled: false,
+    videoSubtitleTrack: null,
+    videoSubtitleVideo: null,
+    videoSubtitleSignature: "",
     subtitleCapturedBvid: "",
     injectBvid: "",
     injectCid: 0,
@@ -761,6 +768,7 @@ function beginSubtitleUiCycle(bvid = "", p = "") {
     const generation = subtitleUiCoordinator.generation;
     appState.followCurrentIndex = -1;
     appState.renderedSubtitleIndex = -1;
+    disableVideoSubtitleTrack();
     const list = panelShadowRoot?.getElementById?.("cc-list");
     if (list) list.scrollTop = 0;
     armSubtitleScrollAlignment(routeKey, generation);
@@ -1096,6 +1104,41 @@ function reportUsageEvent(payload = {}) {
         });
         if (result && typeof result.catch === "function") result.catch(() => {});
     } catch (_) {}
+}
+
+function reportActiveFeatureViewed(entryPoint = "navigation") {
+    const featureName = String(appState.activePage || "").trim();
+    if (!["CC", "summary", "chat", "real", "settings"].includes(featureName)) return;
+    const cache = appState.cache && typeof appState.cache === "object" ? appState.cache : {};
+    const metadata = {
+        entry_point: entryPoint,
+        has_content: false,
+        result_source: ""
+    };
+    if (featureName === "summary") {
+        metadata.has_content = !!String(cache.summary || "").trim()
+            || (Array.isArray(cache.segments) && cache.segments.length > 0);
+        metadata.result_source = getTaskCacheSource(cache, "summary")
+            || getTaskCacheSource(cache, "segments")
+            || "";
+    } else if (featureName === "CC") {
+        metadata.has_content = (Array.isArray(cache.rawSubtitle) && cache.rawSubtitle.length > 0)
+            || (Array.isArray(cache.processedSubtitle) && cache.processedSubtitle.length > 0);
+        metadata.result_source = String(cache.subtitleSource || appState.tabState?.subtitleSource || "");
+    } else if (featureName === "chat") {
+        metadata.has_content = Array.isArray(cache.history) && cache.history.length > 0;
+    } else if (featureName === "real") {
+        metadata.has_content = !!cache.rumors;
+        metadata.result_source = getTaskCacheSource(cache, "rumors") || "";
+    } else if (featureName === "settings") {
+        metadata.has_content = true;
+    }
+    reportUsageEvent({
+        eventName: "feature_viewed",
+        featureName,
+        status: metadata.has_content ? "content" : "empty",
+        metadata
+    });
 }
 
 async function setFeedbackSubmissionState(submitted) {
@@ -1508,6 +1551,7 @@ async function bootstrap() {
     evaluateSubtitleFallback();
     setInterval(evaluateSubtitleFallback, 3500);
     renderApp();
+    reportActiveFeatureViewed("bootstrap");
     startFocusTicker();
     Object.defineProperty(window, '__biliDebug', { get: () => appState });
 }
@@ -2051,6 +2095,7 @@ async function waitPanelMount() {
             event.stopPropagation();
             const result = await chrome.runtime.sendMessage({ action: "OPEN_SIDE_PANEL" });
             if (!result?.ok) showToast(result?.error || "无法打开浏览器侧边栏");
+            else if (result.requiresToolbarAction) showToast("请点击 Firefox 工具栏中的 Bilitato 图标打开侧边栏");
         });
 
         // Ensure progress bar is hidden initially
@@ -2856,6 +2901,7 @@ function bindPanelDelegatedEvents() {
             setPanelCollapsed(false);
             renderNav();
             renderContent();
+            reportActiveFeatureViewed("navigation");
             return;
         }
         if (action === "run-summary") {
@@ -3212,6 +3258,10 @@ function bindPanelDelegatedEvents() {
         }
         if (action === "cc-regenerate-transcribe") {
             handleRegenerateGroqSubtitle();
+            return;
+        }
+        if (action === "cc-toggle-video-subtitle") {
+            toggleVideoSubtitleTrack();
             return;
         }
         if (action === "transcription-start") {
@@ -4161,7 +4211,7 @@ function renderCC(panel) {
             }
         });
     }
-    const subtitleSource = String(appState.tabState?.subtitleSource || "");
+    const subtitleSource = String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "").toLowerCase();
 
     const currentBvidForProgress = normalizeBvidCase(currentBvid || getStableCurrentBvid() || "");
     const tabStateBvidForProgress = normalizeBvidCase(appState.tabState?.activeBvid || "");
@@ -4195,9 +4245,13 @@ function renderCC(panel) {
         : 0;
     const progress = running ? Math.max(stateProgress, localProgress, sessionProgress) : 0;
 
-    const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
-    const isNoTimestampSubtitle = subtitleSource === "siliconflow" || subtitleSource === "funasr";
+    const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr" || subtitleSource === "mimo" || subtitleSource === "custom_asr";
+    const isNoTimestampSubtitle = subtitleSource === "siliconflow" || subtitleSource === "funasr" || subtitleSource === "mimo";
     const shouldShowRegenerate = rows.length > 0 && isAsrSubtitle && !running;
+    const playbackCues = (subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "custom_asr")
+        ? buildPlaybackSubtitleCues(rows)
+        : [];
+    const canShowVideoSubtitle = playbackCues.length > 0 && !running;
 
     const subtitleCacheSource = String(appState.cache?.subtitleCacheSource || "").toLowerCase();
     const subtitlePhase = subtitleUiCoordinator.phase;
@@ -4223,10 +4277,15 @@ function renderCC(panel) {
         ? `<button class="panel-icon-btn cc-language-btn" data-action="cc-language-menu" data-button-tooltip="切换字幕语言" aria-label="切换字幕语言"><img class="icon-default" src="${languageIconSrc}" alt=""><img class="icon-active" src="${languageActiveIconSrc}" alt=""></button>`
         : "";
     const regenBtnHtml = shouldShowRegenerate ? `<button class="panel-icon-btn" data-action="cc-regenerate-transcribe" data-button-tooltip="重新转录" aria-label="重新转录"><img src="${refreshIconSrc}" style="width:16px;height:16px;object-fit:contain;transform:scale(0.9);"></button>` : "";
+    const videoSubtitleBtnHtml = canShowVideoSubtitle
+        ? `<button type="button" class="cc-video-subtitle-btn${appState.videoSubtitleEnabled ? " is-active" : ""}" data-action="cc-toggle-video-subtitle" aria-pressed="${appState.videoSubtitleEnabled ? "true" : "false"}" data-button-tooltip="${appState.videoSubtitleEnabled ? "关闭视频内字幕" : "在视频画面中显示字幕"}">视频字幕</button>`
+        : "";
     const searchBoxHtml = `<div class="cc-search-container"><input type="text" id="cc-search-input" class="cc-search-input" placeholder="搜索字幕..." /><button type="button" class="cc-search-clear" data-button-tooltip="清空搜索" aria-label="清空搜索">×</button></div>`;
     const progressBarHtml = '';
 
-    const controlCenterHtml = `<div class="transcription-control-center"><div class="cc-transcribe-head">${searchBoxHtml}<div class="cc-header-right"><div class="cc-transcribe-status">${escapeHtml(sourceText)}</div><div class="cc-transcribe-actions">${languageBtnHtml}${regenBtnHtml}</div></div></div>${(rows.length > 0 || running) ? progressBarHtml : ''}</div>`;
+    const controlCenterHtml = `<div class="transcription-control-center"><div class="cc-transcribe-head">${searchBoxHtml}<div class="cc-header-right"><div class="cc-transcribe-status">${escapeHtml(sourceText)}</div><div class="cc-transcribe-actions">${videoSubtitleBtnHtml}${languageBtnHtml}${regenBtnHtml}</div></div></div>${(rows.length > 0 || running) ? progressBarHtml : ''}</div>`;
+
+    if (appState.videoSubtitleEnabled) syncVideoSubtitleTrack(playbackCues);
 
     if (rows.length > 0) {
         logAsrUiTrace("cc_render", {
@@ -4270,7 +4329,7 @@ function renderCC(panel) {
             const statusNode = existingCcPanel.querySelector(".cc-transcribe-status");
             const actionsNode = existingCcPanel.querySelector(".cc-transcribe-actions");
             if (statusNode) statusNode.textContent = sourceText;
-            if (actionsNode) actionsNode.innerHTML = `${languageBtnHtml}${regenBtnHtml}`;
+            if (actionsNode) actionsNode.innerHTML = `${videoSubtitleBtnHtml}${languageBtnHtml}${regenBtnHtml}`;
             bindCCSearch(panel);
             logSubtitleDiagnostic("rows_updated_in_place", {
                 source: "subtitle_state",
@@ -5151,7 +5210,8 @@ function renderSettings(panel) {
     const allCloudDisabled = (cloudCachePrefs.all || settings.disableCloudCacheRead) ? "checked" : "";
     const currentCloudDisabledAttr = currentBvid && !allCloudDisabledOn ? "" : "disabled";
     const currentCloudLabel = allCloudDisabledOn ? "本视频不拉取云端缓存（已由所有视频设置覆盖）" : "本视频不拉取云端缓存";
-    const asrProviderKey = String(settings.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
+    const requestedAsrProvider = String(settings.asrProvider || "groq").toLowerCase();
+    const asrProviderKey = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
     const asrProviders = {
         groq: {
             name: "Groq",
@@ -5162,6 +5222,11 @@ function renderSettings(panel) {
             name: "硅基流动",
             note: "无字幕时间戳",
             regUrl: "https://cloud.siliconflow.cn/account/ak"
+        },
+        mimo: {
+            name: "小米 MiMo",
+            note: "无字幕时间戳",
+            regUrl: "https://platform.xiaomimimo.com/"
         }
     };
     const asrProvider = asrProviders[asrProviderKey] || asrProviders.groq;
@@ -5176,6 +5241,7 @@ function renderSettings(panel) {
     const customVisible = providerKey === "custom" ? "" : "settings-hidden";
     const groqVisible = asrProviderKey === "groq" ? "" : "settings-hidden";
     const siliconFlowVisible = asrProviderKey === "siliconflow" ? "" : "settings-hidden";
+    const mimoVisible = asrProviderKey === "mimo" ? "" : "settings-hidden";
     const guidedVisible = promptMode === "guided" ? "" : "settings-hidden";
     const customPromptVisible = promptMode === "custom" ? "" : "settings-hidden";
     panel.innerHTML = `
@@ -5231,6 +5297,7 @@ function renderSettings(panel) {
                     <select id="settings-asr-provider" class="settings-native-select-hidden">
                         <option value="groq" ${asrProviderKey === "groq" ? "selected" : ""}>Groq</option>
                         <option value="siliconflow" ${asrProviderKey === "siliconflow" ? "selected" : ""}>硅基流动</option>
+                        <option value="mimo" ${asrProviderKey === "mimo" ? "selected" : ""}>小米 MiMo</option>
                     </select>
                     <div class="custom-select-container settings-custom-select" id="settings-asr-provider-select" data-target-select="settings-asr-provider">
                         <div class="custom-select-trigger">
@@ -5261,6 +5328,13 @@ function renderSettings(panel) {
                     ${renderSecretInput("settings-siliconflow-api-key", settings.siliconFlowApiKey || "", "示例：sk-xxxxx")}
                     <label>ASR 模型</label>
                     <input id="settings-siliconflow-asr-model" type="text" value="${escapeHtml(siliconFlowAsrModel)}" placeholder="示例：FunAudioLLM/SenseVoiceSmall">
+                </div>
+                <div id="settings-asr-mimo-wrap" class="settings-asr-provider-fields ${mimoVisible}">
+                    <div class="settings-provider-url">${DEFAULT_MIMO_ASR_BASE_URL}</div>
+                    <label>小米 MiMo API Key</label>
+                    ${renderSecretInput("settings-mimo-api-key", settings.mimoApiKey || "", "示例：sk-xxxxx")}
+                    <label>ASR 模型</label>
+                    <input id="settings-mimo-asr-model" type="text" value="${DEFAULT_MIMO_ASR_MODEL}" readonly>
                 </div>
                 <div class="settings-group-title">个性化</div>
                 <label>修改模式</label>
@@ -5464,6 +5538,12 @@ function renderSettings(panel) {
     bindSettingsCustomSelects(panel);
 
     panel.querySelector("#settings-base-url")?.addEventListener("input", () => updateSettingsProviderHint(panel));
+    ["#settings-base-url"].forEach((selector) => {
+        panel.querySelector(selector)?.addEventListener("blur", (event) => {
+            const prefixed = ensureHttpsUrlPrefixInput(event.currentTarget.value);
+            if (prefixed) event.currentTarget.value = prefixed;
+        });
+    });
     updateSettingsProviderHint(panel);
     const asrProviderSelect = panel.querySelector("#settings-asr-provider");
     if (asrProviderSelect) {
@@ -6768,7 +6848,7 @@ function shouldAttemptCloudReadForPage(page) {
 
 function isAsrSubtitleSourceValue(source) {
     const value = String(source || "").toLowerCase();
-    return value === "groq" || value === "whisper" || value === "siliconflow" || value === "funasr";
+    return value === "groq" || value === "whisper" || value === "siliconflow" || value === "funasr" || value === "mimo" || value === "custom_asr";
 }
 
 function applyCacheSubtitleState(cache, targetBvid = "") {
@@ -6999,19 +7079,26 @@ function updateSettingsAsrProviderHint(panel) {
         siliconflow: {
             note: "无字幕时间戳",
             regUrl: "https://cloud.siliconflow.cn/account/ak"
+        },
+        mimo: {
+            note: "无字幕时间戳",
+            regUrl: "https://platform.xiaomimimo.com/"
         }
     };
-    const key = String(panel?.querySelector("#settings-asr-provider")?.value || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
+    const requestedKey = String(panel?.querySelector("#settings-asr-provider")?.value || "groq").toLowerCase();
+    const key = ["groq", "siliconflow", "mimo"].includes(requestedKey) ? requestedKey : "groq";
     const provider = asrProviders[key] || asrProviders.groq;
     const regBtn = panel?.querySelector('[data-register-kind="asr"]');
     const groqWrap = panel?.querySelector("#settings-asr-groq-wrap");
     const siliconFlowWrap = panel?.querySelector("#settings-asr-siliconflow-wrap");
+    const mimoWrap = panel?.querySelector("#settings-asr-mimo-wrap");
     if (regBtn) {
         regBtn.dataset.url = provider.regUrl;
-        regBtn.disabled = false;
+        regBtn.disabled = !provider.regUrl;
     }
     if (groqWrap) groqWrap.classList.toggle("settings-hidden", key !== "groq");
     if (siliconFlowWrap) siliconFlowWrap.classList.toggle("settings-hidden", key !== "siliconflow");
+    if (mimoWrap) mimoWrap.classList.toggle("settings-hidden", key !== "mimo");
 }
 
 async function authorizeCustomOriginFromPanel() {
@@ -7024,11 +7111,19 @@ async function authorizeCustomOriginFromPanel() {
         showToast("请先切换到自定义 Provider");
         return false;
     }
-    const customUrl = String(panel.querySelector("#settings-base-url")?.value || "").trim();
+    const input = panel.querySelector("#settings-base-url");
+    let customUrl = "";
+    try {
+        customUrl = normalizeHttpsBaseUrlInput(input?.value);
+    } catch (error) {
+        showToast(error?.message || "Base URL 格式不正确");
+        return false;
+    }
     if (!customUrl) {
         showToast("请先填写 Base URL");
         return false;
     }
+    if (input) input.value = customUrl;
     if (statusEl) {
         statusEl.textContent = "请在新窗口中完成授权...";
         statusEl.className = "show syncing pulse";
@@ -7079,34 +7174,26 @@ async function authorizeCustomOriginFromPanel() {
 async function requestCustomOriginPermissionFromSettings(customUrl, statusEl) {
     const normalizedUrl = String(customUrl || "").trim();
     if (!normalizedUrl) return false;
-    if (appState.customPermissionPromptingUrl === normalizedUrl) return false;
-    appState.customPermissionPromptingUrl = normalizedUrl;
-    try {
-        if (statusEl) {
-            statusEl.textContent = "请在新窗口中授权自定义 API 域名...";
-            statusEl.className = "show syncing pulse";
-        }
-        const openRes = await chrome.runtime.sendMessage({
-            action: "OPEN_PERMISSION_REQUEST_PAGE",
-            baseUrl: normalizedUrl
-        });
-        if (!openRes?.ok) throw new Error("打开授权窗口失败");
-        const startedAt = Date.now();
-        while (Date.now() - startedAt < 60000) {
-            const permissionRes = await chrome.runtime.sendMessage({
-                action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION",
-                baseUrl: normalizedUrl,
-                request: false
-            });
-            if (permissionRes?.granted) return true;
-            await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-        return false;
-    } finally {
-        if (appState.customPermissionPromptingUrl === normalizedUrl) {
-            appState.customPermissionPromptingUrl = "";
-        }
+    if (statusEl) {
+        statusEl.textContent = "请在新窗口中授权自定义 API 域名...";
+        statusEl.className = "show syncing pulse";
     }
+    const openRes = await chrome.runtime.sendMessage({
+        action: "OPEN_PERMISSION_REQUEST_PAGE",
+        baseUrl: normalizedUrl
+    });
+    if (!openRes?.ok) throw new Error("打开授权窗口失败");
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 60000) {
+        const permissionRes = await chrome.runtime.sendMessage({
+            action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION",
+            baseUrl: normalizedUrl,
+            request: false
+        });
+        if (permissionRes?.granted) return true;
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    return false;
 }
 
 function bindSettingsCustomSelects(panel) {
@@ -7190,12 +7277,14 @@ function buildSettingsUsageSnapshot(settings = {}) {
         asrProvider: String(settings.asrProvider || "groq").trim(),
         groqModel: String(settings.groqModel || "").trim(),
         siliconFlowAsrModel: String(settings.siliconFlowAsrModel || "").trim(),
+        mimoAsrModel: String(settings.mimoAsrModel || DEFAULT_MIMO_ASR_MODEL).trim(),
         prefMode: String(settings.prefMode || "").trim(),
         promptMode: String(settings.promptSettings?.mode || "").trim(),
         customProtocol: String(settings.customProtocol || "").trim(),
         hasProviderApiKey: !!String(settings.apiKey || "").trim(),
         hasGroqApiKey: !!String(settings.groqApiKey || "").trim(),
         hasSiliconFlowApiKey: !!String(settings.siliconFlowApiKey || "").trim(),
+        hasMimoApiKey: !!String(settings.mimoApiKey || "").trim(),
         hasCustomBaseUrl: !!String(settings.customBaseUrl || "").trim()
     };
 }
@@ -7216,12 +7305,14 @@ function reportSettingsSavedUsageEvent(settings = {}, saveSource = "manual") {
             asr_provider: snapshot.asrProvider,
             groq_model: snapshot.groqModel,
             siliconflow_asr_model: snapshot.siliconFlowAsrModel,
+            mimo_asr_model: snapshot.mimoAsrModel,
             pref_mode: snapshot.prefMode,
             prompt_mode: snapshot.promptMode,
             custom_protocol: snapshot.customProtocol,
             has_provider_api_key: snapshot.hasProviderApiKey,
             has_groq_api_key: snapshot.hasGroqApiKey,
             has_siliconflow_api_key: snapshot.hasSiliconFlowApiKey,
+            has_mimo_api_key: snapshot.hasMimoApiKey,
             has_custom_base_url: snapshot.hasCustomBaseUrl
         }
     });
@@ -7300,6 +7391,19 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         showToast(error?.message || "Groq Base URL 格式不正确");
         return false;
     }
+    const requestedAsrProvider = String(panel.querySelector("#settings-asr-provider")?.value || "groq").toLowerCase();
+    const asrProvider = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
+    const customBaseUrlInput = panel.querySelector("#settings-base-url");
+    let customBaseUrl = ensureHttpsUrlPrefixInput(appState.settings?.customBaseUrl);
+    try {
+        if (providerValue === "custom") {
+            customBaseUrl = normalizeHttpsBaseUrlInput(customBaseUrlInput?.value);
+            if (customBaseUrlInput && customBaseUrl) customBaseUrlInput.value = customBaseUrl;
+        }
+    } catch (error) {
+        showToast(error?.message || "自定义 Base URL 格式不正确");
+        return false;
+    }
 
     const payload = {
         provider: providerValue,
@@ -7307,17 +7411,19 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         providerApiKeys,
         providerModels,
         model: resolvedModelValue,
-        customBaseUrl: String(panel.querySelector("#settings-base-url")?.value || "").trim(),
+        customBaseUrl,
         customModel: providerValue === "custom"
             ? resolvedModelValue
             : String(appState.settings?.customModel || "").trim(),
         customProtocol: customProtocolValue === "claude" ? "claude" : "openai",
-        asrProvider: String(panel.querySelector("#settings-asr-provider")?.value || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq",
+        asrProvider,
         groqApiKey: String(panel.querySelector("#settings-groq-api-key")?.value || "").trim(),
         groqModel: String(panel.querySelector("#settings-groq-model")?.value || "").trim(),
         groqBaseUrl,
         siliconFlowApiKey: String(panel.querySelector("#settings-siliconflow-api-key")?.value || "").trim(),
         siliconFlowAsrModel: String(panel.querySelector("#settings-siliconflow-asr-model")?.value || "").trim(),
+        mimoApiKey: String(panel.querySelector("#settings-mimo-api-key")?.value || "").trim(),
+        mimoAsrModel: DEFAULT_MIMO_ASR_MODEL,
         prefMode: panel.querySelector("#settings-pref-mode")?.value || "quality",
         themeMode: panel.querySelector("#settings-theme-mode")?.value || "system",
         defaultOpenPage,
@@ -7340,7 +7446,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         }
     };
     if (providerValue !== "custom") {
-        payload.customBaseUrl = appState.settings?.customBaseUrl || payload.customBaseUrl;
+        payload.customBaseUrl = customBaseUrl;
     }
     try {
         if (providerValue === "custom") {
@@ -7439,7 +7545,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
 }
 
 function normalizeAsrBaseUrlInput(value, fallback) {
-    const raw = String(value || "").trim() || String(fallback || "").trim();
+    const raw = ensureHttpsUrlPrefixInput(String(value || "").trim() || String(fallback || "").trim());
     let url;
     try {
         url = new URL(raw);
@@ -7455,6 +7561,25 @@ function normalizeAsrBaseUrlInput(value, fallback) {
         throw new Error("Base URL 只填写基础地址，不要包含具体接口路径");
     }
     return `${url.origin}${pathname}`;
+}
+
+function ensureHttpsUrlPrefixInput(value) {
+    const raw = String(value || "").trim();
+    if (!raw || /^[a-z][a-z\d+.-]*:\/\//i.test(raw)) return raw;
+    return `https://${raw.replace(/^\/+/, "")}`;
+}
+
+function normalizeHttpsBaseUrlInput(value) {
+    const raw = ensureHttpsUrlPrefixInput(value);
+    if (!raw) return "";
+    let url;
+    try {
+        url = new URL(raw);
+    } catch (_) {
+        throw new Error("Base URL 格式不正确");
+    }
+    if (url.protocol !== "https:") throw new Error("Base URL 必须使用 https://");
+    return raw;
 }
 
 function startFocusTicker() {
@@ -7617,6 +7742,79 @@ function getCurrentVideoElement() {
     const fallback = document.querySelector(".bwp-video");
     if (fallback && typeof fallback.duration !== "undefined") return fallback;
     return null;
+}
+
+function clearVideoSubtitleCues(forgetTrack = false) {
+    const track = appState.videoSubtitleTrack;
+    if (track) {
+        try {
+            while (track.cues?.length) track.removeCue(track.cues[0]);
+            track.mode = "disabled";
+        } catch (_) {}
+    }
+    if (forgetTrack) {
+        appState.videoSubtitleTrack = null;
+        appState.videoSubtitleVideo = null;
+    }
+    appState.videoSubtitleSignature = "";
+}
+
+function disableVideoSubtitleTrack() {
+    appState.videoSubtitleEnabled = false;
+    clearVideoSubtitleCues();
+}
+
+function syncVideoSubtitleTrack(cues) {
+    if (!appState.videoSubtitleEnabled) {
+        clearVideoSubtitleCues();
+        return false;
+    }
+    const rows = Array.isArray(cues) ? cues : [];
+    const video = getCurrentVideoElement();
+    const Cue = window.VTTCue || window.TextTrackCue;
+    if (!video || typeof video.addTextTrack !== "function" || typeof Cue !== "function" || !rows.length) {
+        clearVideoSubtitleCues();
+        return false;
+    }
+    const signature = rows.map((cue) => `${cue.start}:${cue.end}:${cue.text}`).join("|");
+    if (appState.videoSubtitleVideo === video
+        && appState.videoSubtitleTrack
+        && appState.videoSubtitleSignature === signature) {
+        appState.videoSubtitleTrack.mode = "showing";
+        return true;
+    }
+    if (appState.videoSubtitleVideo && appState.videoSubtitleVideo !== video) {
+        clearVideoSubtitleCues(true);
+    } else {
+        clearVideoSubtitleCues();
+    }
+    const track = appState.videoSubtitleTrack || video.addTextTrack("subtitles", "Bilitato Groq", "zh-CN");
+    rows.forEach((item) => track.addCue(new Cue(item.start, item.end, item.text)));
+    track.mode = "showing";
+    appState.videoSubtitleTrack = track;
+    appState.videoSubtitleVideo = video;
+    appState.videoSubtitleSignature = signature;
+    return true;
+}
+
+function toggleVideoSubtitleTrack() {
+    const source = String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "").toLowerCase();
+    const rows = getCurrentSubtitleStateRows();
+    const cues = (source === "groq" || source === "whisper" || source === "custom_asr") ? buildPlaybackSubtitleCues(rows) : [];
+    if (!cues.length) {
+        disableVideoSubtitleTrack();
+        showToast("当前转录缺少可用时间戳，暂不能显示到视频中");
+    } else if (!appState.videoSubtitleEnabled) {
+        appState.videoSubtitleEnabled = true;
+        if (!syncVideoSubtitleTrack(cues)) {
+            appState.videoSubtitleEnabled = false;
+            showToast("未找到可用的视频播放器");
+        }
+    } else {
+        disableVideoSubtitleTrack();
+    }
+    subtitleUiCoordinator.renderedStateSignature = "";
+    renderSubtitleIfNeeded(panelShadowRoot?.getElementById?.("page-CC"), "video_subtitle_toggle");
 }
 
 function resolveDurationFromSubtitles() {
@@ -8189,7 +8387,7 @@ async function handleRegenerateGroqSubtitle() {
         return;
     }
     const subtitleSource = String(appState.tabState?.subtitleSource || "");
-    if (!(subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr")) return;
+    if (!(subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr" || subtitleSource === "mimo" || subtitleSource === "custom_asr")) return;
     const confirmedCid = await waitForConfirmedRouteCid(injectBvid);
     if (!(confirmedCid > 0)) {
         showToast("正在确认当前分 P，请稍后再试");
@@ -9754,7 +9952,7 @@ async function syncActiveCacheByBvid(expectedBvid) {
                 appState.transcriptionCapsuleMeta = null;
             }
             const source = String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "").toLowerCase();
-            if (!["groq", "whisper", "siliconflow", "funasr"].includes(source)) {
+            if (!["groq", "whisper", "siliconflow", "funasr", "mimo", "custom_asr"].includes(source)) {
                 refreshSubtitleOptionsForCurrentVideo()
                     .then((options) => {
                         if (Array.isArray(options) && options.length > 1 && appState.activePage === "CC") renderContent();
@@ -9808,7 +10006,7 @@ function reconcileTranscriptionState(targetBvid) {
     const progress = localState.phase === "running" ? Math.max(stateProgress, localProgress) : Math.max(stateProgress, localProgress);
     const sameTask = !!(target && requestBvid && target === requestBvid);
 
-    const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr";
+    const isAsrSubtitle = subtitleSource === "groq" || subtitleSource === "whisper" || subtitleSource === "siliconflow" || subtitleSource === "funasr" || subtitleSource === "mimo" || subtitleSource === "custom_asr";
     const shouldKeepRunning = localState.phase === "running" || (sameTask && isAsrSubtitle && progress > 0 && progress < 100);
     patchTranscriptionState({
         phase: shouldKeepRunning ? "running" : localState.phase,

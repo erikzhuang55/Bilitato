@@ -88,4 +88,23 @@ describe("contentSubtitle", () => {
 
     expect(subtitle.getActiveSubtitleIndex(rows, 1)).toBe(-1);
   });
+
+  it("splits long Groq segments into short timed playback cues", () => {
+    const cues = subtitle.buildPlaybackSubtitleCues([
+      { start: 10, end: 16, text: "这是第一句话，内容稍微有一点长，需要切开。然后继续展示第二句话。" }
+    ], { maxChars: 12 });
+
+    expect(cues.length).toBeGreaterThan(1);
+    expect(cues.every((cue) => cue.text.length <= 13)).toBe(true);
+    expect(cues[0].start).toBe(10);
+    expect(cues.at(-1).end).toBe(16);
+  });
+
+  it("rejects a long single-row fallback without a reliable timeline", () => {
+    const cues = subtitle.buildPlaybackSubtitleCues([
+      { start: 0, end: 10, text: "这是一整段没有分段时间戳的转录文本。".repeat(8) }
+    ]);
+
+    expect(cues).toEqual([]);
+  });
 });

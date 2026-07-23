@@ -1,7 +1,7 @@
 import { copyFileSync, existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { copyDirectory, writeZipFromDirectory } from "./archive.js";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(scriptDir, "..");
@@ -22,6 +22,9 @@ const releaseTargets = {
   },
   edge: {
     reviewUrl: process.env.BILITATO_EDGE_REVIEW_URL || "https://microsoftedge.microsoft.com/addons/search/bilitato"
+  },
+  firefox: {
+    reviewUrl: process.env.BILITATO_FIREFOX_REVIEW_URL || "https://addons.mozilla.org/firefox/search/?q=Bilitato"
   }
 };
 
@@ -30,12 +33,11 @@ const targets = targetArg === "all" ? Object.keys(releaseTargets) : [targetArg];
 
 for (const target of targets) {
   if (!releaseTargets[target]) {
-    throw new Error(`未知打包目标：${target}。可选值：chrome、edge、all。`);
+    throw new Error(`未知打包目标：${target}。可选值：chrome、edge、firefox、all。`);
   }
 }
 
 const files = [
-  "manifest.json",
   "background.js",
   "content.js",
   "content.css",
@@ -79,20 +81,7 @@ function copyRequiredDirectory(relativePath, releaseDir) {
     throw new Error(`缺少上架必需目录：${relativePath}`);
   }
   mkdirSync(dirname(destination), { recursive: true });
-  execFileSync("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    "$ErrorActionPreference='Stop'; Copy-Item -LiteralPath $env:COPY_SOURCE -Destination $env:COPY_DESTINATION -Recurse -Force"
-  ], {
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      COPY_SOURCE: source,
-      COPY_DESTINATION: destination
-    }
-  });
+  copyDirectory(source, destination);
 }
 
 function writeStoreConfig(target, releaseDir) {
@@ -102,6 +91,47 @@ function writeStoreConfig(target, releaseDir) {
     reviewUrl: config.reviewUrl
   }, null, 2)};\n`;
   writeFileSync(join(releaseDir, "storeConfig.js"), content, "utf8");
+}
+
+function createTargetManifest(target) {
+  const targetManifest = JSON.parse(JSON.stringify(manifest));
+  if (target !== "firefox") return targetManifest;
+
+  targetManifest.permissions = (targetManifest.permissions || [])
+    .filter((permission) => permission !== "offscreen" && permission !== "sidePanel");
+  delete targetManifest.side_panel;
+  targetManifest.sidebar_action = {
+    default_title: targetManifest.action?.default_title || targetManifest.name,
+    default_panel: "sidepanel.html",
+    default_icon: targetManifest.action?.default_icon || targetManifest.icons,
+    open_at_install: false
+  };
+  targetManifest.background = {
+    scripts: ["background.js"],
+    type: "module"
+  };
+  targetManifest.browser_specific_settings = {
+    gecko: {
+      id: process.env.BILITATO_FIREFOX_EXTENSION_ID || "bilitato@erikzhuang55",
+      strict_min_version: "140.0",
+      data_collection_permissions: {
+        required: [
+          "authenticationInfo",
+          "browsingActivity",
+          "personalCommunications",
+          "personallyIdentifyingInfo",
+          "websiteContent"
+        ],
+        optional: ["technicalAndInteraction"]
+      }
+    }
+  };
+  return targetManifest;
+}
+
+function writeTargetManifest(target, releaseDir) {
+  const targetManifest = createTargetManifest(target);
+  writeFileSync(join(releaseDir, "manifest.json"), `${JSON.stringify(targetManifest, null, 2)}\n`, "utf8");
 }
 
 function buildRelease(target) {
@@ -115,22 +145,10 @@ function buildRelease(target) {
 
   files.forEach((file) => copyRequiredFile(file, releaseDir));
   directories.forEach((directory) => copyRequiredDirectory(directory, releaseDir));
+  writeTargetManifest(target, releaseDir);
   writeStoreConfig(target, releaseDir);
 
-  execFileSync("powershell.exe", [
-    "-NoProfile",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    "$ErrorActionPreference='Stop'; $source = Join-Path $env:RELEASE_DIR '*'; Compress-Archive -Path $source -DestinationPath $env:RELEASE_ZIP -Force"
-  ], {
-    stdio: "inherit",
-    env: {
-      ...process.env,
-      RELEASE_DIR: releaseDir,
-      RELEASE_ZIP: zipPath
-    }
-  });
+  writeZipFromDirectory(releaseDir, zipPath);
   console.log(`Release package ready: ${zipPath}`);
 }
 

@@ -10,12 +10,17 @@ import {
 import {
     DEFAULT_GROQ_BASE_URL,
     buildAsrEndpoint,
+    ensureHttpsUrlPrefix,
     normalizeAsrBaseUrl
 } from "./utils/asrEndpoints.js";
 import {
     DEFAULT_ASR_CHUNK_OVERLAP_SECONDS,
     mergeTimestampedChunkRows
 } from "./utils/asrChunking.js";
+import { getAsrAudioCandidateUrls } from "./utils/asrAudioCandidates.js";
+import {
+    MIMO_ASR_MODEL
+} from "./utils/mimoAsr.js";
 import {
     DEFAULT_PROMPT_SETTINGS,
     SEGMENTS_AD_TEST_PROMPT,
@@ -45,8 +50,12 @@ const TIMEOUT_ERROR_CODES = new Set([
     "NETWORK_REQUEST_TIMEOUT"
 ]);
 const STREAM_INITIAL_RETRY_DELAY_MS = 700;
+const ASR_PAGE_FETCH_CHUNK_BYTES = 2 * 1024 * 1024;
+const ASR_PAGE_FETCH_MAX_CHUNKS = 512;
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
+const FIREFOX_OFFSCREEN_IFRAME_ID = "bilitato-firefox-offscreen-document";
 let offscreenDocumentPromise = null;
+let firefoxActionClickRegistered = false;
 const MAX_ASR_BOUNDARY_DIAGNOSTICS = 8;
 const USAGE_EVENT_SESSION_ID = createUsageEventSessionId();
 const VERSION_CHECK_STORAGE_KEY = "latestVersionState";
@@ -59,6 +68,9 @@ function syncRuntimeDebugFlag(enabled) {
 
 async function captureBackgroundError(errorInput, context = {}) {
     try {
+        if (!await hasTechnicalDataConsent()) {
+            return { sent: false, reason: "technical_data_permission_denied" };
+        }
         const settings = await getResolvedSettings();
         const runtime = await getSentryRuntimeContext();
         return await reportToSentry(settings, errorInput, context, runtime);
@@ -289,6 +301,12 @@ function createUsageEventSessionId() {
     return `usage_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
 }
 
+function createUsageTaskId(featureName = "task") {
+    const feature = String(featureName || "task").toLowerCase().replace(/[^a-z0-9_]+/g, "_");
+    if (crypto?.randomUUID) return `${feature}_${crypto.randomUUID()}`;
+    return `${feature}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
 async function getUsageUserHash() {
     const userId = await getOrCreateAnonymousUserId();
     return sha256Hex(`usage:${userId}`);
@@ -297,6 +315,8 @@ async function getUsageUserHash() {
 function buildUsageEventMetadata(payload = {}) {
     return {
         ...(payload.metadata && typeof payload.metadata === "object" ? payload.metadata : {}),
+        event_schema_version: 1,
+        task_id: String(payload.taskId || "").trim() || undefined,
         tab_id: payload.tabId || undefined
     };
 }
@@ -315,6 +335,9 @@ function buildUsageErrorPayload(error, fallback = {}) {
 
 async function reportClientUsageEvent(payload = {}, settingsInput = null) {
     try {
+        if (!await hasTechnicalDataConsent()) {
+            return { sent: false, reason: "technical_data_permission_denied" };
+        }
         const settings = settingsInput || await getResolvedSettings();
         const manifest = chrome.runtime.getManifest();
         return await reportUsageEvent(settings, {
@@ -355,6 +378,19 @@ function getFeedbackHeaders(clientId) {
 
 function sanitizeFeedbackText(value, maxLength) {
     return String(value || "").trim().slice(0, maxLength);
+}
+
+async function hasTechnicalDataConsent() {
+    const manifest = chrome.runtime.getManifest();
+    const declaredPermissions = manifest?.browser_specific_settings?.gecko?.data_collection_permissions;
+    if (!declaredPermissions) return true;
+    try {
+        const permissions = await chrome.permissions.getAll();
+        return Array.isArray(permissions?.data_collection)
+            && permissions.data_collection.includes("technicalAndInteraction");
+    } catch (_) {
+        return false;
+    }
 }
 
 function isMeaningfulFeedbackText(value) {
@@ -515,6 +551,7 @@ const MAX_SEGMENTS_SUBTITLE_CHARS = 120000;
 const SILICONFLOW_AUDIO_TRANSCRIBE_URL = "https://api.siliconflow.cn/v1/audio/transcriptions";
 const GROQ_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
 const SILICONFLOW_MAX_AUDIO_BYTES = 50 * 1024 * 1024;
+const MIMO_MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const GROQ_CONNECTIVITY_TIMEOUT_MS = 6000;
 const DOWNLOAD_HEADER_RULE_ID = 910001;
 const BILI_PLAYURL_API = "https://api.bilibili.com/x/player/playurl";
@@ -549,6 +586,8 @@ const DEFAULT_SETTINGS = {
     groqBaseUrl: DEFAULT_GROQ_BASE_URL,
     siliconFlowApiKey: "",
     siliconFlowAsrModel: "FunAudioLLM/SenseVoiceSmall",
+    mimoApiKey: "",
+    mimoAsrModel: MIMO_ASR_MODEL,
     supabaseUrl: "https://qdksdauixnbgrgkilgac.supabase.co",
     supabaseAnonKey: "sb_publishable_55zwbZc_sQ0k4EDJBgpxsQ_1F86l1vT",
     supabaseVideoCacheTable: SUPABASE_DEFAULT_VIDEO_CACHE_TABLE,
@@ -789,15 +828,23 @@ function registerModelScopeRateLimitObserver() {
 registerModelScopeRateLimitObserver();
 
 function enableSidePanelActionClick() {
-    if (!chrome.sidePanel?.setPanelBehavior) return;
-    chrome.sidePanel
-        .setPanelBehavior({ openPanelOnActionClick: true })
-        .catch((error) => logBackground.warn("side_panel_action_behavior_failed", { error: error?.message || String(error) }));
+    if (chrome.sidePanel?.setPanelBehavior) {
+        chrome.sidePanel
+            .setPanelBehavior({ openPanelOnActionClick: true })
+            .catch((error) => logBackground.warn("side_panel_action_behavior_failed", { error: error?.message || String(error) }));
+        return;
+    }
+    if (!chrome.sidebarAction?.open || !chrome.action?.onClicked || firefoxActionClickRegistered) return;
+    firefoxActionClickRegistered = true;
+    chrome.action.onClicked.addListener(() => {
+        chrome.sidebarAction.open()
+            .catch((error) => logBackground.warn("sidebar_action_open_failed", { error: error?.message || String(error) }));
+    });
 }
 
 enableSidePanelActionClick();
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details = {}) => {
     enableSidePanelActionClick();
     const { settings } = await chrome.storage.local.get(["settings"]);
     const normalized = normalizeSettings(settings);
@@ -807,6 +854,14 @@ chrome.runtime.onInstalled.addListener(async () => {
     currentDebugMode = !!normalized.debugMode;
     syncRuntimeDebugFlag(currentDebugMode);
     logBackground.info("storage_update", { source: "on_installed", debug_mode: currentDebugMode });
+    if (details.reason === "install") {
+        await reportClientUsageEvent({
+            eventName: "extension_installed",
+            featureName: "extension",
+            status: "installed",
+            metadata: { install_source: "unknown" }
+        }, normalized);
+    }
 });
 
 chrome.tabs.onRemoved?.addListener((tabId) => {
@@ -940,11 +995,18 @@ chrome.downloads.onChanged.addListener((delta) => {
 async function handleMessage(msg, sender) {
     if (msg.action === "OPEN_SIDE_PANEL") {
         const tabId = Number(msg.tabId || sender?.tab?.id || 0);
-        if (!tabId || !chrome.sidePanel?.open) throw new Error("当前浏览器不支持侧边栏");
-        return chrome.sidePanel.open({ tabId }).then(() => ({ tabId }));
+        if (!tabId) throw new Error("无法确定当前标签页");
+        if (chrome.sidePanel?.open) {
+            return chrome.sidePanel.open({ tabId }).then(() => ({ tabId }));
+        }
+        if (chrome.sidebarAction?.open) {
+            return { tabId, requiresToolbarAction: true };
+        }
+        throw new Error("当前浏览器不支持侧边栏");
     }
     if (msg.action === "OPEN_EXTENSION_MANAGEMENT") {
-        await chrome.tabs.create({ url: "chrome://extensions/", active: true });
+        const url = chrome.sidebarAction ? "about:addons" : "chrome://extensions/";
+        await chrome.tabs.create({ url, active: true });
         return {};
     }
     if (msg.action === "CHECK_LATEST_VERSION") {
@@ -1492,12 +1554,12 @@ function assertAsrAudioNotReused(bvid, audioDigest, context = {}) {
 
 function isAsrSubtitleSource(source) {
     const value = String(source || "").toLowerCase();
-    return value === "groq" || value === "whisper" || value === "siliconflow" || value === "funasr";
+    return value === "groq" || value === "whisper" || value === "siliconflow" || value === "funasr" || value === "mimo" || value === "custom_asr";
 }
 
 function isNoTimestampSubtitleSource(source) {
     const value = String(source || "").toLowerCase();
-    return value === "siliconflow" || value === "funasr";
+    return value === "siliconflow" || value === "funasr" || value === "mimo";
 }
 
 function isNoTimestampSubtitleCache(cache = {}) {
@@ -1856,8 +1918,7 @@ async function ensureDownloadHeaderRule(url) {
                 action: {
                     type: "modifyHeaders",
                     requestHeaders: [
-                        { header: "Referer", operation: "set", value: "https://www.bilibili.com/" },
-                        { header: "Origin", operation: "set", value: "https://www.bilibili.com" }
+                        { header: "Referer", operation: "set", value: "https://www.bilibili.com/" }
                     ]
                 },
                 condition: {
@@ -2011,21 +2072,30 @@ class ContentProvider {
         const title = String(payload?.title || "").trim();
         const { settings } = await chrome.storage.local.get(["settings"]);
         const normalizedSettings = normalizeSettings(settings);
-        const asrProvider = String(normalizedSettings.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
+        const requestedAsrProvider = String(normalizedSettings.asrProvider || "groq").toLowerCase();
+        const asrProvider = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
         const asrApiKey = asrProvider === "siliconflow"
             ? String(normalizedSettings.siliconFlowApiKey || "").trim()
-            : String(normalizedSettings.groqApiKey || "").trim();
+            : asrProvider === "mimo"
+                ? String(normalizedSettings.mimoApiKey || "").trim()
+                : String(normalizedSettings.groqApiKey || "").trim();
         const asrModel = asrProvider === "siliconflow"
             ? (String(normalizedSettings.siliconFlowAsrModel || "").trim() || "FunAudioLLM/SenseVoiceSmall")
-            : (String(normalizedSettings.groqModel || "").trim() || "whisper-large-v3-turbo");
-        const groqBaseUrl = normalizeAsrBaseUrl(normalizedSettings.groqBaseUrl, DEFAULT_GROQ_BASE_URL);
-        const asrMaxAudioBytes = asrProvider === "siliconflow" ? SILICONFLOW_MAX_AUDIO_BYTES : GROQ_MAX_AUDIO_BYTES;
-        const asrDisplayName = asrProvider === "siliconflow" ? "硅基流动" : "Groq";
-        const subtitleSource = asrProvider === "siliconflow" ? "siliconflow" : "groq";
+            : asrProvider === "mimo"
+                ? MIMO_ASR_MODEL
+                : (String(normalizedSettings.groqModel || "").trim() || "whisper-large-v3-turbo");
+        const asrBaseUrl = normalizeAsrBaseUrl(normalizedSettings.groqBaseUrl, DEFAULT_GROQ_BASE_URL);
+        const asrMaxAudioBytes = asrProvider === "siliconflow"
+            ? SILICONFLOW_MAX_AUDIO_BYTES
+            : (asrProvider === "mimo" ? MIMO_MAX_AUDIO_BYTES : GROQ_MAX_AUDIO_BYTES);
+        const asrDisplayName = asrProvider === "siliconflow" ? "硅基流动" : (asrProvider === "mimo" ? "小米 MiMo" : "Groq");
+        const subtitleSource = asrProvider;
         const startedAt = Date.now();
+        const taskId = createUsageTaskId("transcribe");
         await reportClientUsageEvent({
             eventName: "task_started",
             featureName: "transcribe",
+            taskId,
             status: "started",
             provider: asrProvider,
             model: asrModel,
@@ -2034,10 +2104,13 @@ class ContentProvider {
             tabId
         }, normalizedSettings);
         if (!asrApiKey) {
-            const error = createAppError("MISSING_API_KEY", asrProvider === "siliconflow" ? "请先在设置中填写硅基流动 API Key" : "请先在设置中填写 Groq API Key");
+            const error = createAppError("MISSING_API_KEY", asrProvider === "siliconflow"
+                ? "请先在设置中填写硅基流动 API Key"
+                : (asrProvider === "mimo" ? "请先在设置中填写小米 MiMo API Key" : "请先在设置中填写 Groq API Key"));
             await reportClientUsageEvent({
                 eventName: "task_failed",
                 featureName: "transcribe",
+                taskId,
                 provider: asrProvider,
                 model: asrModel,
                 bvid,
@@ -2078,7 +2151,7 @@ class ContentProvider {
             if (asrProvider === "groq") {
                 await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 12, updatedAt: Date.now() });
                 await notifyTranscribeStatus(tabId, { stage: "connectivity_check", level: "info", text: "正在检查 Groq 服务器连接...", progress: 12, bvid });
-                await this.ensureGroqConnectivity(asrApiKey, tabId, bvid, operationController.signal, groqBaseUrl);
+                await this.ensureGroqConnectivity(asrApiKey, tabId, bvid, operationController.signal, asrBaseUrl);
             }
             const media = await this.extractAudioSourceFromTab(tabId, { ...payload, asrProvider });
             if (!media?.url) throw new Error("未提取到音轨地址，可能是付费视频、CDN 限制或页面未完成加载");
@@ -2127,15 +2200,18 @@ class ContentProvider {
             });
             await notifyTranscribeStatus(tabId, { stage: "download", level: "info", text: "正在下载音轨...", progress: 20, bvid });
             const audioFetchStartedAt = Date.now();
-            const shouldAllowOversizeDownload = asrProvider === "groq" || asrProvider === "siliconflow";
-            const audioBlob = await this.fetchResourceToBlob(
-                media.url,
+            const shouldAllowOversizeDownload = true;
+            const audioFetchResult = await this.fetchAudioResourceWithFallback(
+                media,
                 tabId,
                 bvid,
                 shouldAllowOversizeDownload,
                 asrMaxAudioBytes,
-                operationController.signal
+                operationController.signal,
+                { provider: asrProvider, model: asrModel, runId: asrRunId }
             );
+            const audioBlob = audioFetchResult.blob;
+            const selectedAudioUrl = audioFetchResult.url;
             await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 56, updatedAt: Date.now() });
             await notifyTranscribeStatus(tabId, { stage: "prepare_upload", level: "info", text: `下载完成，正在准备上传到 ${asrDisplayName}...`, progress: 56, bvid });
             const audioFetchMs = Date.now() - audioFetchStartedAt;
@@ -2144,7 +2220,7 @@ class ContentProvider {
                 runId: asrRunId,
                 provider: asrProvider,
                 model: asrModel,
-                audioHost: getUrlMeta(media.url).host
+                audioHost: getUrlMeta(selectedAudioUrl).host
             });
             logASR.info("asr_audio_fetch_success", {
                 bvid,
@@ -2156,17 +2232,20 @@ class ContentProvider {
                     run_id: asrRunId,
                     media_source: String(media?.source || ""),
                     ...audioDigest,
-                    audio_host: getUrlMeta(media.url).host
+                    audio_host: getUrlMeta(selectedAudioUrl).host,
+                    audio_host_attempt: audioFetchResult.attempt
                 }
             });
             let transcription;
             const asrRequestStartedAt = Date.now();
-            if (audioBlob.size >= asrMaxAudioBytes) {
+            if (asrProvider === "mimo" || audioBlob.size >= asrMaxAudioBytes) {
                 await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 58, updatedAt: Date.now() });
                 await notifyTranscribeStatus(tabId, {
                     stage: "chunk_prepare",
                     level: "info",
-                    text: "音轨较大，正在切片后分段转录...",
+                    text: asrProvider === "mimo"
+                        ? "正在转换为小米 MiMo 支持的 MP3 音频..."
+                        : "音轨较大，正在切片后分段转录...",
                     progress: 58,
                     bvid
                 });
@@ -2177,7 +2256,7 @@ class ContentProvider {
                         asrApiKey,
                         asrModel,
                         maxAudioBytes: asrMaxAudioBytes,
-                        audioUrl: media.url,
+                        audioUrl: selectedAudioUrl,
                         signal: operationController.signal
                     })
                     : await this.requestGroqChunkedTranscription(audioBlob, {
@@ -2186,9 +2265,10 @@ class ContentProvider {
                         videoTitle: title || media.title || "",
                         groqApiKey: asrApiKey,
                         groqModel: asrModel,
-                        baseUrl: groqBaseUrl,
+                        baseUrl: asrBaseUrl,
+                        provider: asrProvider,
                         maxAudioBytes: asrMaxAudioBytes,
-                        audioUrl: media.url,
+                        audioUrl: selectedAudioUrl,
                         signal: operationController.signal
                     });
             } else {
@@ -2216,7 +2296,7 @@ class ContentProvider {
                 try {
                     transcription = asrProvider === "siliconflow"
                         ? await this.requestSiliconFlowTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, operationController.signal)
-                        : await this.requestGroqTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, title || media.title || "", operationController.signal, groqBaseUrl);
+                        : await this.requestGroqTranscription(audioFile, asrApiKey, asrModel, tabId, bvid, title || media.title || "", operationController.signal, asrBaseUrl);
                 } finally {
                     uploadStageActive = false;
                     clearInterval(progressTimer);
@@ -2240,7 +2320,7 @@ class ContentProvider {
 
             await notifyTranscribeStatus(tabId, { stage: "parse", level: "info", text: `${asrDisplayName} 正在解析中文字幕...`, progress: 90, bvid });
             await updateTabState(tabId, { activeBvid: bvid, transcriptionProgress: 90, updatedAt: Date.now() });
-            const rows = this.mapTranscriptionToRows(transcription.data, { noTimestamp: asrProvider === "siliconflow" });
+            const rows = this.mapTranscriptionToRows(transcription.data, { noTimestamp: asrProvider === "siliconflow" || asrProvider === "mimo" });
             if (!rows.length) throw new Error("转录返回为空，未生成可用字幕");
             await handleSubtitleCaptured(tabId, {
                 bvid,
@@ -2289,6 +2369,7 @@ class ContentProvider {
             await reportClientUsageEvent({
                 eventName: "task_success",
                 featureName: "transcribe",
+                taskId,
                 status: "success",
                 provider: asrProvider,
                 model: asrModel,
@@ -2308,6 +2389,7 @@ class ContentProvider {
                 await reportClientUsageEvent({
                     eventName: error?.code === "ABORTED" ? "task_cancelled" : "task_failed",
                     featureName: "transcribe",
+                    taskId,
                     provider: asrProvider,
                     model: asrModel,
                     bvid,
@@ -2350,7 +2432,8 @@ class ContentProvider {
     }
 
     static async extractAudioSourceFromTab(tabId, payload) {
-        const provider = String(payload?.asrProvider || "").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
+        const requestedProvider = String(payload?.asrProvider || "").toLowerCase();
+        const provider = ["groq", "siliconflow", "mimo"].includes(requestedProvider) ? requestedProvider : "groq";
         let identityMismatchError = null;
         // 优先按当前 tab 的 aid/cid 主动请求 B 站 playurl，避免 SPA 页面缓存音频串线。
         try {
@@ -2518,6 +2601,181 @@ class ContentProvider {
         return blob;
     }
 
+    static async fetchResourceToBlobFromTab(url, tabId, bvid = "", skipSizeCheck = false, maxBytes = GROQ_MAX_AUDIO_BYTES, signal = null) {
+        if (!Number(tabId) || !chrome.scripting?.executeScript) {
+            throw createAppError("ASR_PAGE_FETCH_UNAVAILABLE", "当前页面无法代为读取音轨");
+        }
+        const chunks = [];
+        let loaded = 0;
+        let mime = "application/octet-stream";
+        let completed = false;
+        for (let index = 0; index < ASR_PAGE_FETCH_MAX_CHUNKS; index += 1) {
+            if (signal?.aborted) throw createUserAbortedError();
+            const start = index * ASR_PAGE_FETCH_CHUNK_BYTES;
+            const end = start + ASR_PAGE_FETCH_CHUNK_BYTES - 1;
+            const results = await chrome.scripting.executeScript({
+                target: { tabId: Number(tabId) },
+                world: "MAIN",
+                func: async ({ targetUrl, rangeStart, rangeEnd }) => {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort("timeout"), 20000);
+                    try {
+                        const response = await fetch(targetUrl, {
+                            method: "GET",
+                            headers: { Range: `bytes=${rangeStart}-${rangeEnd}` },
+                            credentials: "omit",
+                            cache: "no-store",
+                            signal: controller.signal
+                        });
+                        const contentType = String(response.headers.get("content-type") || "").toLowerCase();
+                        if (response.status === 416) {
+                            return { ok: true, status: 416, byteLength: 0, contentType, dataBase64: "" };
+                        }
+                        if (!(response.ok || response.status === 206)) {
+                            return { ok: false, status: response.status, byteLength: 0, contentType, reason: `HTTP ${response.status}` };
+                        }
+                        if (contentType.includes("text/html")) {
+                            return { ok: false, status: response.status, byteLength: 0, contentType, reason: "CDN 返回了 HTML" };
+                        }
+                        const bytes = new Uint8Array(await response.arrayBuffer());
+                        let binary = "";
+                        for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+                            binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+                        }
+                        return {
+                            ok: true,
+                            status: response.status,
+                            byteLength: bytes.length,
+                            contentType,
+                            dataBase64: btoa(binary)
+                        };
+                    } catch (error) {
+                        return {
+                            ok: false,
+                            status: 0,
+                            byteLength: 0,
+                            contentType: "",
+                            reason: error?.name === "AbortError" ? "页面分块下载超时" : String(error?.message || error || "页面分块下载失败")
+                        };
+                    } finally {
+                        clearTimeout(timeoutId);
+                    }
+                },
+                args: [{ targetUrl: url, rangeStart: start, rangeEnd: end }]
+            });
+            const result = results?.[0]?.result;
+            if (!result?.ok) {
+                const error = createAppError(
+                    "ASR_PAGE_AUDIO_FETCH_FAILED",
+                    String(result?.reason || "页面分块下载音轨失败"),
+                    { status: Number(result?.status || 0) || undefined }
+                );
+                error.status = Number(result?.status || 0) || undefined;
+                throw error;
+            }
+            if (result.status === 416) {
+                completed = true;
+                break;
+            }
+            const base64 = String(result.dataBase64 || "");
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let offset = 0; offset < binary.length; offset += 1) bytes[offset] = binary.charCodeAt(offset);
+            if (!bytes.length) throw createAppError("ASR_PAGE_AUDIO_EMPTY_CHUNK", "页面返回了空音轨分块");
+            chunks.push(bytes);
+            loaded += bytes.length;
+            mime = String(result.contentType || mime || "application/octet-stream");
+            if (!skipSizeCheck && loaded >= maxBytes) {
+                const limitMb = Math.floor(maxBytes / 1024 / 1024);
+                throw createAppError("ASR_FILE_TOO_LARGE", `该文件大小超出限制（>=${limitMb}MB），目前暂不支持`);
+            }
+            if (result.status === 200 || bytes.length < ASR_PAGE_FETCH_CHUNK_BYTES) {
+                completed = true;
+                break;
+            }
+        }
+        if (!chunks.length) throw createAppError("ASR_PAGE_AUDIO_EMPTY", "页面未返回可用音轨数据");
+        if (!completed) throw createAppError("ASR_PAGE_AUDIO_TOO_MANY_CHUNKS", "音轨分块数量超过安全上限");
+        logASR.info("asr_audio_page_fetch_success", {
+            bvid,
+            task: "asr",
+            detail: { tab_id: Number(tabId), audio_bytes: loaded, chunk_count: chunks.length }
+        });
+        return new Blob(chunks, { type: mime });
+    }
+
+    static async fetchAudioResourceWithFallback(media, tabId, bvid = "", skipSizeCheck = false, maxBytes = GROQ_MAX_AUDIO_BYTES, signal = null, context = {}) {
+        const candidateUrls = getAsrAudioCandidateUrls(media);
+        if (!candidateUrls.length) throw new Error("未找到可用音轨地址");
+        let lastError = null;
+        for (let index = 0; index < candidateUrls.length; index += 1) {
+            const url = candidateUrls[index];
+            const locator = await summarizeMediaLocator(url);
+            const attempt = index + 1;
+            try {
+                // Refresh any legacy session rule before fetching. Rewriting Origin would
+                // make Chrome compare the Bilibili ACAO value with the immutable extension origin.
+                await ensureDownloadHeaderRule(url);
+                logASR.info("asr_audio_fetch_host_attempt", {
+                    bvid,
+                    task: "asr",
+                    provider: String(context?.provider || ""),
+                    model: String(context?.model || ""),
+                    detail: {
+                        run_id: String(context?.runId || ""),
+                        attempt,
+                        candidate_count: candidateUrls.length,
+                        audio_host: locator.audio_host,
+                        audio_path_sha256: locator.audio_path_sha256
+                    }
+                });
+                let blob;
+                try {
+                    blob = await this.fetchResourceToBlob(url, tabId, bvid, skipSizeCheck, maxBytes, signal);
+                } catch (extensionError) {
+                    if (signal?.aborted || extensionError?.code === "ABORTED") throw extensionError;
+                    logASR.warn("asr_audio_extension_fetch_failed", {
+                        bvid,
+                        task: "asr",
+                        provider: String(context?.provider || ""),
+                        model: String(context?.model || ""),
+                        code: String(extensionError?.code || "ASR_EXTENSION_AUDIO_FETCH_FAILED"),
+                        status: Number(extensionError?.status || 0) || undefined,
+                        detail: {
+                            run_id: String(context?.runId || ""),
+                            attempt,
+                            audio_host: locator.audio_host,
+                            reason: String(extensionError?.message || extensionError || "extension audio fetch failed"),
+                            fallback: "page_fetch"
+                        }
+                    });
+                    blob = await this.fetchResourceToBlobFromTab(url, tabId, bvid, skipSizeCheck, maxBytes, signal);
+                }
+                return { blob, url, attempt };
+            } catch (error) {
+                if (signal?.aborted || error?.code === "ABORTED") throw error;
+                lastError = error;
+                logASR.warn("asr_audio_fetch_host_failed", {
+                    bvid,
+                    task: "asr",
+                    provider: String(context?.provider || ""),
+                    model: String(context?.model || ""),
+                    code: String(error?.code || "ASR_AUDIO_FETCH_FAILED"),
+                    status: Number(error?.status || 0) || undefined,
+                    detail: {
+                        run_id: String(context?.runId || ""),
+                        attempt,
+                        candidate_count: candidateUrls.length,
+                        audio_host: locator.audio_host,
+                        audio_path_sha256: locator.audio_path_sha256,
+                        reason: String(error?.message || error || "audio fetch failed")
+                    }
+                });
+            }
+        }
+        throw lastError || new Error("所有音轨 CDN 均下载失败");
+    }
+
     static async ensureGroqConnectivity(groqApiKey, tabId, bvid = "", externalSignal = null, baseUrl = DEFAULT_GROQ_BASE_URL) {
         const controller = new AbortController();
         const forwardAbort = () => controller.abort(externalSignal?.reason || "aborted");
@@ -2596,6 +2854,7 @@ class ContentProvider {
     }
 
     static async requestGroqTranscription(audioFile, groqApiKey, groqModel, tabId, bvid = "", videoTitle = "", externalSignal = null, baseUrl = DEFAULT_GROQ_BASE_URL) {
+        const providerLabel = "Groq";
         const formData = new FormData();
         formData.append("file", audioFile);
         formData.append("model", groqModel);
@@ -2662,15 +2921,15 @@ class ContentProvider {
                 await notifyTranscribeStatus(tabId, {
                     stage: "error",
                     level: "error",
-                    text: retryAfterSec > 0 ? `Groq 限流，请等待 ${retryAfterSec} 秒后重试` : "Groq 限流，请稍后重试",
+                    text: retryAfterSec > 0 ? `${providerLabel} 限流，请等待 ${retryAfterSec} 秒后重试` : `${providerLabel} 限流，请稍后重试`,
                     progress: 0,
                     retryAfterSec,
                     quotaLine: buildGroqQuotaLine(quota),
                     bvid
                 });
-                throw createAppError("ASR_RATE_LIMIT", retryAfterSec > 0 ? `Groq 限流，请等待 ${retryAfterSec} 秒后重试` : "Groq 限流，请稍后重试", { status: response.status, retryAfterSec });
+                throw createAppError("ASR_RATE_LIMIT", retryAfterSec > 0 ? `${providerLabel} 限流，请等待 ${retryAfterSec} 秒后重试` : `${providerLabel} 限流，请稍后重试`, { status: response.status, retryAfterSec });
             }
-            throw createHttpError(response.status, `Groq 转录失败（${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
+            throw createHttpError(response.status, `${providerLabel} 转录失败（${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
         }
         await notifyTranscribeStatus(tabId, {
             stage: "upload",
@@ -2690,22 +2949,27 @@ class ContentProvider {
         const videoTitle = String(options.videoTitle || "").trim();
         const groqApiKey = String(options.groqApiKey || "").trim();
         const groqModel = String(options.groqModel || "").trim() || "whisper-large-v3-turbo";
+        const provider = String(options.provider || "groq").toLowerCase() === "mimo" ? "mimo" : "groq";
         const maxAudioBytes = Number(options.maxAudioBytes || GROQ_MAX_AUDIO_BYTES);
         const signal = options.signal || null;
         if (signal?.aborted) throw createUserAbortedError();
         let chunkSessionId = "";
         try {
             const chunked = await requestOffscreenAudioChunkingPrepare({
-                audioBytes: null,
+                audioBlob,
                 audioUrl: String(options.audioUrl || "").trim(),
                 mimeType: audioBlob.type || "audio/mp4",
-                maxAudioBytes
+                maxAudioBytes,
+                signal,
+                bvid,
+                provider,
+                model: groqModel
             });
             chunkSessionId = String(chunked?.sessionId || "").trim();
             logASR.info("asr_chunk_plan_created", {
                 bvid,
                 task: "asr",
-                provider: "groq",
+                provider,
                 model: groqModel,
                 detail: {
                     total_audio_bytes: audioBlob.size,
@@ -2729,7 +2993,7 @@ class ContentProvider {
             });
             const chunkResult = await requestOffscreenChunkTranscriptionAll({
                 sessionId: chunkSessionId,
-                provider: "groq",
+                provider,
                 tabId,
                 bvid,
                 apiKey: groqApiKey,
@@ -2780,10 +3044,14 @@ class ContentProvider {
         let chunkSessionId = "";
         try {
             const chunked = await requestOffscreenAudioChunkingPrepare({
-                audioBytes: null,
+                audioBlob,
                 audioUrl: String(options.audioUrl || "").trim(),
                 mimeType: audioBlob.type || "audio/mp4",
-                maxAudioBytes
+                maxAudioBytes,
+                signal,
+                bvid,
+                provider: "siliconflow",
+                model: asrModel
             });
             chunkSessionId = String(chunked?.sessionId || "").trim();
             logASR.info("asr_chunk_plan_created", {
@@ -3361,10 +3629,12 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
     if (!force && cache?.[task]) return cache[task];
     const key = `${identity.partKey || bvid}|${task}`;
     const startedAt = Date.now();
+    const taskId = createUsageTaskId(task);
     logBackground.info("task_start", { tab_id: tabId, bvid, task });
     await reportClientUsageEvent({
         eventName: "task_started",
         featureName: task,
+        taskId,
         status: "started",
         provider: settings?.provider || "",
         model: settings?.model || "",
@@ -3388,6 +3658,7 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
         await reportClientUsageEvent({
             eventName: "task_success",
             featureName: task,
+            taskId,
             status: "success",
             provider: settings?.provider || "",
             model: settings?.model || "",
@@ -3418,6 +3689,7 @@ async function runSingleTask(tabId, bvid, task, force, settings, taskContext = {
         await reportClientUsageEvent({
             eventName: "task_failed",
             featureName: task,
+            taskId,
             provider: settings?.provider || "",
             model: settings?.model || "",
             bvid,
@@ -3460,10 +3732,12 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
     }
     const key = `${identity.partKey || bvid}|summary_segments`;
     const startedAt = Date.now();
+    const taskId = createUsageTaskId("summary_segments_merged");
     logBackground.info("task_start", { tab_id: tabId, bvid, task: "summary_segments", mode: settings.prefMode });
     await reportClientUsageEvent({
         eventName: "task_started",
         featureName: "summary_segments_merged",
+        taskId,
         status: "started",
         provider: settings?.provider || "",
         model: settings?.model || "",
@@ -3482,6 +3756,7 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
         await reportClientUsageEvent({
             eventName: "task_failed",
             featureName: "summary_segments_merged",
+            taskId,
             provider: settings?.provider || "",
             model: settings?.model || "",
             bvid,
@@ -3519,6 +3794,7 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
         await reportClientUsageEvent({
             eventName: "task_failed",
             featureName: "summary_segments_merged",
+            taskId,
             provider: settings?.provider || "",
             model: settings?.model || "",
             bvid,
@@ -3531,6 +3807,7 @@ async function runSummarySegmentsTasks(tabId, bvid, force, settings, taskContext
     await reportClientUsageEvent({
         eventName: summaryOk && segmentsOk ? "task_success" : "task_partial",
         featureName: "summary_segments_merged",
+        taskId,
         status: summaryOk && segmentsOk ? "success" : "partial",
         provider: settings?.provider || "",
         model: settings?.model || "",
@@ -3566,11 +3843,13 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "", taskCon
     const history = Array.isArray(cache.history) ? cache.history : [];
     const key = `${identity.partKey}|chat|${messageId}`;
     const startedAt = Date.now();
+    const taskId = createUsageTaskId("chat");
     logBackground.info("task_enqueue", { tab_id: tabId, bvid, tasks: ["chat"] });
     logBackground.info("task_start", { tab_id: tabId, bvid, task: "chat" });
     await reportClientUsageEvent({
         eventName: "task_started",
         featureName: "chat",
+        taskId,
         status: "started",
         provider: resolvedSettings?.provider || "",
         model: resolvedSettings?.model || "",
@@ -3603,6 +3882,7 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "", taskCon
         await reportClientUsageEvent({
             eventName: "task_success",
             featureName: "chat",
+            taskId,
             status: "success",
             provider: resolvedSettings?.provider || "",
             model: resolvedSettings?.model || "",
@@ -3626,6 +3906,7 @@ async function runChatForTab(tabId, text, messageId, requestedBvid = "", taskCon
         await reportClientUsageEvent({
             eventName: "task_failed",
             featureName: "chat",
+            taskId,
             provider: resolvedSettings?.provider || "",
             model: resolvedSettings?.model || "",
             bvid,
@@ -3674,11 +3955,13 @@ async function runChatForPort(port, msg) {
     const abortController = new AbortController();
     chatAbortControllers.set(abortKey, abortController);
     const startedAt = Date.now();
+    const taskId = createUsageTaskId("chat");
     logBackground.info("task_enqueue", { tab_id: tabId, bvid, tasks: ["chat_stream"] });
     logBackground.info("task_start", { tab_id: tabId, bvid, task: "chat_stream" });
     await reportClientUsageEvent({
         eventName: "task_started",
         featureName: "chat",
+        taskId,
         status: "started",
         provider: resolvedSettings?.provider || "",
         model: resolvedSettings?.model || "",
@@ -3718,6 +4001,7 @@ async function runChatForPort(port, msg) {
         await reportClientUsageEvent({
             eventName: "task_success",
             featureName: "chat",
+            taskId,
             status: "success",
             provider: resolvedSettings?.provider || "",
             model: resolvedSettings?.model || "",
@@ -3742,6 +4026,7 @@ async function runChatForPort(port, msg) {
             await reportClientUsageEvent({
                 eventName: "task_cancelled",
                 featureName: "chat",
+                taskId,
                 provider: resolvedSettings?.provider || "",
                 model: resolvedSettings?.model || "",
                 bvid,
@@ -3764,6 +4049,7 @@ async function runChatForPort(port, msg) {
         await reportClientUsageEvent({
             eventName: "task_failed",
             featureName: "chat",
+            taskId,
             provider: resolvedSettings?.provider || "",
             model: resolvedSettings?.model || "",
             bvid,
@@ -4182,17 +4468,34 @@ async function ensureOffscreenDocument() {
     if (offscreenDocumentPromise) return offscreenDocumentPromise;
     offscreenDocumentPromise = (async () => {
         try {
-            if (chrome.runtime.getContexts) {
+            if (chrome.offscreen?.createDocument && chrome.runtime.getContexts) {
                 const contexts = await chrome.runtime.getContexts({
                     contextTypes: ["OFFSCREEN_DOCUMENT"],
                     documentUrls: [targetUrl]
                 });
                 if (Array.isArray(contexts) && contexts.length) return;
             }
-            await chrome.offscreen.createDocument({
-                url: OFFSCREEN_DOCUMENT_PATH,
-                reasons: ["WORKERS"],
-                justification: "Use ffmpeg workers to split oversized audio before Groq transcription"
+            if (chrome.offscreen?.createDocument) {
+                await chrome.offscreen.createDocument({
+                    url: OFFSCREEN_DOCUMENT_PATH,
+                    reasons: ["WORKERS"],
+                    justification: "Use ffmpeg workers to split oversized audio before Groq transcription"
+                });
+                return;
+            }
+            if (typeof document === "undefined") {
+                throw new Error("当前浏览器无法创建音频处理文档");
+            }
+            const existingFrame = document.getElementById(FIREFOX_OFFSCREEN_IFRAME_ID);
+            if (existingFrame) return;
+            await new Promise((resolve, reject) => {
+                const frame = document.createElement("iframe");
+                frame.id = FIREFOX_OFFSCREEN_IFRAME_ID;
+                frame.hidden = true;
+                frame.src = targetUrl;
+                frame.addEventListener("load", resolve, { once: true });
+                frame.addEventListener("error", () => reject(new Error("音频处理文档加载失败")), { once: true });
+                (document.body || document.documentElement).appendChild(frame);
             });
         } catch (error) {
             const message = String(error?.message || error || "");
@@ -4207,17 +4510,91 @@ async function ensureOffscreenDocument() {
 
 async function requestOffscreenAudioChunkingPrepare(payload = {}) {
     await ensureOffscreenDocument();
-    const response = await chrome.runtime.sendMessage({
-        action: "OFFSCREEN_CHUNK_AUDIO_PREPARE",
-        payload
-    });
-    if (!response?.ok) {
+    if (payload?.audioBlob instanceof Blob) {
+        return requestOffscreenAudioChunkingPrepareFromBlob(payload);
+    }
+    const audioUrl = String(payload?.audioUrl || "").trim();
+    if (audioUrl) {
+        const response = await chrome.runtime.sendMessage({
+            action: "OFFSCREEN_CHUNK_AUDIO_PREPARE",
+            payload: {
+                audioUrl,
+                mimeType: String(payload?.mimeType || "audio/mp4"),
+                maxAudioBytes: Number(payload?.maxAudioBytes || 0),
+                provider: String(payload?.provider || "groq")
+            }
+        });
+        if (response?.ok) return response.result || {};
         throw createAppError(
             response?.code || "ASR_CHUNKING_FAILED",
             response?.error || "音轨切片失败，请稍后重试"
         );
     }
-    return response.result || {};
+    return requestOffscreenAudioChunkingPrepareFromBlob(payload);
+}
+
+async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
+    await ensureOffscreenDocument();
+    const audioBlob = payload?.audioBlob instanceof Blob ? payload.audioBlob : null;
+    if (!audioBlob) {
+        throw createAppError("ASR_CHUNKING_FAILED", "缺少已下载音轨，无法切片");
+    }
+    const signal = payload?.signal || null;
+    let uploadId = "";
+    let finished = false;
+    try {
+        const started = await chrome.runtime.sendMessage({
+            action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_START",
+            payload: {
+                expectedBytes: audioBlob.size,
+                mimeType: String(payload?.mimeType || audioBlob.type || "audio/mp4"),
+                maxAudioBytes: Number(payload?.maxAudioBytes || 0),
+                provider: String(payload?.provider || "groq")
+            }
+        });
+        if (!started?.ok) {
+            throw createAppError(started?.code || "ASR_CHUNKING_FAILED", started?.error || "音轨切片准备失败");
+        }
+        uploadId = String(started?.result?.uploadId || "").trim();
+        if (!uploadId) throw createAppError("ASR_CHUNKING_FAILED", "音轨切片会话创建失败");
+
+        for (let offset = 0; offset < audioBlob.size; offset += ASR_PAGE_FETCH_CHUNK_BYTES) {
+            if (signal?.aborted) throw createUserAbortedError();
+            const buffer = await audioBlob.slice(offset, offset + ASR_PAGE_FETCH_CHUNK_BYTES).arrayBuffer();
+            const bytes = new Uint8Array(buffer);
+            let binary = "";
+            for (let index = 0; index < bytes.length; index += 0x8000) {
+                binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+            }
+            const appended = await chrome.runtime.sendMessage({
+                action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_APPEND",
+                payload: { uploadId, dataBase64: btoa(binary) }
+            });
+            if (!appended?.ok) {
+                throw createAppError(appended?.code || "ASR_CHUNKING_FAILED", appended?.error || "音轨分块传输失败");
+            }
+        }
+
+        const response = await chrome.runtime.sendMessage({
+            action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_FINISH",
+            payload: { uploadId }
+        });
+        if (!response?.ok) {
+            throw createAppError(
+                response?.code || "ASR_CHUNKING_FAILED",
+                response?.error || "音轨切片失败，请稍后重试"
+            );
+        }
+        finished = true;
+        return response.result || {};
+    } finally {
+        if (uploadId && !finished) {
+            await chrome.runtime.sendMessage({
+                action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_RELEASE",
+                payload: { uploadId }
+            }).catch(() => {});
+        }
+    }
 }
 
 async function requestOffscreenGroqChunkTranscription(payload = {}) {
@@ -7207,8 +7584,12 @@ function isEqualJSON(a, b) {
 }
 
 function normalizeSettings(settings) {
-    const base = settings && typeof settings === "object" ? settings : {};
+    const base = settings && typeof settings === "object" ? { ...settings } : {};
+    delete base.customAsrBaseUrl;
+    delete base.customAsrApiKey;
+    delete base.customAsrModel;
     const customProtocol = String(base.customProtocol || "openai").toLowerCase() === "claude" ? "claude" : "openai";
+    const customBaseUrl = ensureHttpsUrlPrefix(base.customBaseUrl);
     const customModel = String(base.customModel || "").trim();
     const provider = String(base.provider || DEFAULT_SETTINGS.provider || "modelscope").trim() || "modelscope";
     const providerApiKeysRaw = base.providerApiKeys && typeof base.providerApiKeys === "object" ? base.providerApiKeys : {};
@@ -7228,7 +7609,8 @@ function normalizeSettings(settings) {
     if (LEGACY_MODELSCOPE_MODELS.has(String(providerModels.modelscope || "").trim())) {
         providerModels.modelscope = DEFAULT_SETTINGS.model;
     }
-    const asrProvider = String(base.asrProvider || DEFAULT_SETTINGS.asrProvider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
+    const requestedAsrProvider = String(base.asrProvider || DEFAULT_SETTINGS.asrProvider || "groq").toLowerCase();
+    const asrProvider = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
     const apiKey = String(providerApiKeys[provider] || base.apiKey || "").trim();
     if (apiKey) providerApiKeys[provider] = apiKey;
     const groqApiKey = String(base.groqApiKey || "").trim();
@@ -7239,6 +7621,8 @@ function normalizeSettings(settings) {
     } catch (_) {}
     const siliconFlowApiKey = String(base.siliconFlowApiKey || "").trim();
     const siliconFlowAsrModel = String(base.siliconFlowAsrModel || DEFAULT_SETTINGS.siliconFlowAsrModel || "FunAudioLLM/SenseVoiceSmall").trim() || "FunAudioLLM/SenseVoiceSmall";
+    const mimoApiKey = String(base.mimoApiKey || "").trim();
+    const mimoAsrModel = MIMO_ASR_MODEL;
     const supabaseUrl = String(base.supabaseUrl || DEFAULT_SETTINGS.supabaseUrl || "").trim().replace(/\/+$/, "");
     const supabaseAnonKey = String(base.supabaseAnonKey || DEFAULT_SETTINGS.supabaseAnonKey || "").trim();
     const supabaseVideoCacheTable = String(base.supabaseVideoCacheTable || DEFAULT_SETTINGS.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE).trim() || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE;
@@ -7279,6 +7663,7 @@ function normalizeSettings(settings) {
         model,
         sentryEnabled,
         sentryDsn,
+        customBaseUrl,
         customProtocol,
         customModel,
         asrProvider,
@@ -7287,6 +7672,8 @@ function normalizeSettings(settings) {
         groqBaseUrl,
         siliconFlowApiKey,
         siliconFlowAsrModel,
+        mimoApiKey,
+        mimoAsrModel,
         supabaseUrl,
         supabaseAnonKey,
         supabaseVideoCacheTable,
@@ -7990,6 +8377,7 @@ async function reportFeatureUsage(featureName, bvid, settings, metrics) {
 
 async function reportDailyFeatureUsage(featureName, settings, metrics = {}, status = "success", errorCode = "", usageContext = {}) {
     if (!isSupabaseEnabled(settings)) return false;
+    if (!await hasTechnicalDataConsent()) return false;
     const normalizedFeature = String(featureName || "").trim();
     if (!normalizedFeature) return false;
     try {

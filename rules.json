@@ -5,8 +5,7 @@
     "action": {
       "type": "modifyHeaders",
       "requestHeaders": [
-        { "header": "Referer", "operation": "set", "value": "https://www.bilibili.com/" },
-        { "header": "Origin", "operation": "set", "value": "https://www.bilibili.com" }
+        { "header": "Referer", "operation": "set", "value": "https://www.bilibili.com/" }
       ]
     },
     "condition": {
@@ -20,8 +19,7 @@
     "action": {
       "type": "modifyHeaders",
       "requestHeaders": [
-        { "header": "Referer", "operation": "set", "value": "https://www.bilibili.com/" },
-        { "header": "Origin", "operation": "set", "value": "https://www.bilibili.com" }
+        { "header": "Referer", "operation": "set", "value": "https://www.bilibili.com/" }
       ]
     },
     "condition": {

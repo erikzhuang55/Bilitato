@@ -1,6 +1,8 @@
 const UI_BASE = "assets/ui";
 const DEFAULT_GROQ_ASR_BASE_URL = "https://api.groq.com/openai/v1";
 const DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1";
+const DEFAULT_MIMO_ASR_BASE_URL = "https://api.xiaomimimo.com/v1";
+const DEFAULT_MIMO_ASR_MODEL = "mimo-v2.5-asr";
 const state = {
     tabId: 0,
     activePage: "CC",
@@ -165,7 +167,7 @@ function renderVersionUpdateBadge() {
 }
 
 function normalizeAsrBaseUrlInput(value, fallback) {
-    const raw = String(value || "").trim() || String(fallback || "").trim();
+    const raw = ensureHttpsUrlPrefixInput(String(value || "").trim() || String(fallback || "").trim());
     let url;
     try {
         url = new URL(raw);
@@ -181,6 +183,25 @@ function normalizeAsrBaseUrlInput(value, fallback) {
         throw new Error("Base URL 只填写基础地址，不要包含具体接口路径");
     }
     return `${url.origin}${pathname}`;
+}
+
+function ensureHttpsUrlPrefixInput(value) {
+    const raw = String(value || "").trim();
+    if (!raw || /^[a-z][a-z\d+.-]*:\/\//i.test(raw)) return raw;
+    return `https://${raw.replace(/^\/+/, "")}`;
+}
+
+function normalizeHttpsBaseUrlInput(value) {
+    const raw = ensureHttpsUrlPrefixInput(value);
+    if (!raw) return "";
+    let url;
+    try {
+        url = new URL(raw);
+    } catch (_) {
+        throw new Error("Base URL 格式不正确");
+    }
+    if (url.protocol !== "https:") throw new Error("Base URL 必须使用 https://");
+    return raw;
 }
 
 async function checkLatestVersionAvailability({ force = false } = {}) {
@@ -431,7 +452,7 @@ function settingOptionNote(selectId, value) {
         if (state.settingsUiOptions.freeQuotaProviders?.includes(value)) return "免费额度";
         return String(state.providers?.[value]?.note || "");
     }
-    if (selectId === "setting-asr-provider") return value === "siliconflow" ? "无字幕时间戳" : "需科学上网";
+    if (selectId === "setting-asr-provider") return value === "siliconflow" || value === "mimo" ? "无字幕时间戳" : "需科学上网";
     if (selectId === "setting-pref-mode") return value === "quality" ? "速度更快 · 2次调用" : "更省次数 · 1次调用";
     return "";
 }
@@ -740,7 +761,7 @@ function renderCC() {
         .filter(({ row }) => !term || String(row?.text || row?.content || "").toLowerCase().includes(term));
     const source = String(state.cache?.subtitleSource || state.tabState?.subtitleSource || "");
     const subtitleCacheSource = String(state.cache?.subtitleCacheSource || "").toLowerCase();
-    const isAsrSubtitle = ["groq", "whisper", "siliconflow", "funasr"].includes(source.toLowerCase());
+    const isAsrSubtitle = ["groq", "whisper", "siliconflow", "funasr", "mimo", "custom_asr"].includes(source.toLowerCase());
     const sourceText = subtitleCacheSource === "cloud" ? "云端缓存" : (isAsrSubtitle ? "ASR转录生成" : "官方AI字幕");
     const running = Number(state.tabState?.transcriptionProgress || 0) > 0;
     const canSwitchOfficialSubtitle = rows.length > 0 && !isAsrSubtitle && !running;
@@ -793,7 +814,7 @@ function renderSummary() {
         const end = Number(item?.end ?? item?.end_sec ?? start);
         const title = item?.label || item?.title || item?.topic || "视频片段";
         const isAd = String(item?.type || "").toLowerCase() === "ad";
-        const noTimestamp = !!(item?.no_timestamp || ["siliconflow", "funasr"].includes(String(state.cache?.subtitleSource || "").toLowerCase()));
+        const noTimestamp = !!(item?.no_timestamp || ["siliconflow", "funasr", "mimo"].includes(String(state.cache?.subtitleSource || "").toLowerCase()));
         return `<button class="segment-card ${isAd ? "ad" : ""} ${noTimestamp ? "no-timestamp" : ""}" ${noTimestamp ? "disabled" : `data-action="seek" data-time="${start}"`}>
             <span class="seg-time">${noTimestamp ? "无时间轴" : `${formatTime(start)}-${formatTime(end)}`}</span>
             <span class="seg-label">${escapeHtml(title)}</span>
@@ -922,7 +943,7 @@ function renderReal() {
     const list = claims.map((item) => {
         const [label, cls] = verdictMeta(item?.verdict || item?.status);
         const time = Number(item?.timestamp_sec ?? item?.start ?? 0);
-        const noTimestamp = !!(item?.no_timestamp || ["siliconflow", "funasr"].includes(String(state.cache?.subtitleSource || "").toLowerCase()));
+        const noTimestamp = !!(item?.no_timestamp || ["siliconflow", "funasr", "mimo"].includes(String(state.cache?.subtitleSource || "").toLowerCase()));
         const tooltip = {
             fake: "信息与事实严重不符，或属于明显的误导或谣言。",
             doubt: "证据不足或存在逻辑矛盾，需要用户进一步甄别。",
@@ -983,7 +1004,8 @@ function renderSettings() {
         : `<span id="setting-model-info" class="settings-info-icon settings-hidden" data-tooltip="${escapeHtml(modelScopeModelInfo)}">i</span>`;
     const providerNote = String(provider?.note || "").trim();
     const customProviderVisible = settings.provider === "custom" ? "" : "settings-hidden";
-    const asrProvider = settings.asrProvider === "siliconflow" ? "siliconflow" : "groq";
+    const requestedAsrProvider = String(settings.asrProvider || "groq").toLowerCase();
+    const asrProvider = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
     const guidedVisible = promptSettings.mode === "custom" ? "settings-hidden" : "";
     const customPromptVisible = promptSettings.mode === "custom" ? "" : "settings-hidden";
     const cloudCachePrefs = normalizeCloudCachePrefs(state.cloudCachePrefs);
@@ -993,9 +1015,9 @@ function renderSettings() {
     const currentCloudDisabledAttr = getBvid() && !allCloudDisabledOn ? "" : "disabled";
     const currentCloudLabel = allCloudDisabledOn ? "本视频不拉取云端缓存（已由所有视频设置覆盖）" : "本视频不拉取云端缓存";
     const secretField = (id, value, placeholder = "") => `<div class="settings-secret-field"><input id="${id}" type="password" value="${escapeHtml(value || "")}" placeholder="${escapeHtml(placeholder)}" autocomplete="off"><button type="button" class="settings-secret-toggle" data-action="toggle-secret" data-target="${id}">显示</button></div><div class="field-error" id="${id}-error"></div>`;
-    const asrRegisterUrl = settings.asrProvider === "siliconflow"
+    const asrRegisterUrl = asrProvider === "siliconflow"
         ? "https://cloud.siliconflow.cn/account/ak"
-        : "https://console.groq.com/keys";
+        : (asrProvider === "mimo" ? "https://platform.xiaomimimo.com/" : "https://console.groq.com/keys");
     return `<section class="page settings-page-shell">
         <div class="page-header"><h2>设置（自动保存）</h2><span id="settings-save-status" class="settings-save-status"></span></div>
         ${statusHtml()}
@@ -1013,7 +1035,7 @@ function renderSettings() {
             </div>
             <div class="settings-group">
                 <div class="settings-group-title">ASR 音频识别</div>
-                <div class="field"><label>Provider</label><div class="settings-provider-row"><select id="setting-asr-provider"><option value="groq" ${settings.asrProvider !== "siliconflow" ? "selected" : ""}>Groq</option><option value="siliconflow" ${settings.asrProvider === "siliconflow" ? "selected" : ""}>硅基流动</option></select><button id="setting-asr-register" type="button" class="panel-btn ghost" data-action="open-register" data-url="${asrRegisterUrl}">注册</button></div></div>
+                <div class="field"><label>Provider</label><div class="settings-provider-row"><select id="setting-asr-provider"><option value="groq" ${asrProvider === "groq" ? "selected" : ""}>Groq</option><option value="siliconflow" ${asrProvider === "siliconflow" ? "selected" : ""}>硅基流动</option><option value="mimo" ${asrProvider === "mimo" ? "selected" : ""}>小米 MiMo</option></select><button id="setting-asr-register" type="button" class="panel-btn ghost" data-action="open-register" data-url="${asrRegisterUrl}" ${asrRegisterUrl ? "" : "disabled"}>注册</button></div></div>
                 <div id="setting-asr-groq-fields" class="${asrProvider === "groq" ? "" : "settings-hidden"}">
                     <div class="field"><label>Base URL</label><div class="settings-asr-base-url-row"><input id="setting-groq-base-url" data-manual-save="true" value="${escapeHtml(settings.groqBaseUrl || DEFAULT_GROQ_ASR_BASE_URL)}" readonly><button type="button" class="panel-btn ghost" data-action="edit-groq-base-url">修改</button><button type="button" class="panel-btn ghost" data-action="reset-groq-base-url">重置</button></div></div>
                     <div class="field"><label>Groq API Key</label>${secretField("setting-groq-key", settings.groqApiKey, "示例：gsk_xxxxx")}</div>
@@ -1023,6 +1045,11 @@ function renderSettings() {
                     <div class="settings-provider-url">${DEFAULT_SILICONFLOW_ASR_BASE_URL}</div>
                     <div class="field"><label>硅基流动 API Key</label>${secretField("setting-siliconflow-key", settings.siliconFlowApiKey, "示例：sk-xxxxx")}</div>
                     <div class="field"><label>硅基流动模型</label><input id="setting-siliconflow-model" value="${escapeHtml(settings.siliconFlowAsrModel || "FunAudioLLM/SenseVoiceSmall")}"></div>
+                </div>
+                <div id="setting-asr-mimo-fields" class="${asrProvider === "mimo" ? "" : "settings-hidden"}">
+                    <div class="settings-provider-url">${DEFAULT_MIMO_ASR_BASE_URL}</div>
+                    <div class="field"><label>小米 MiMo API Key</label>${secretField("setting-mimo-key", settings.mimoApiKey, "示例：sk-xxxxx")}</div>
+                    <div class="field"><label>小米 MiMo 模型</label><input id="setting-mimo-model" value="${DEFAULT_MIMO_ASR_MODEL}" readonly></div>
                 </div>
             </div>
             <div class="settings-group">
@@ -1424,7 +1451,7 @@ async function saveSettings({ silent = false, requestGroqPermission = false } = 
     const model = modelSelectValue && modelSelectValue !== "custom"
         ? modelSelectValue
         : document.getElementById("setting-model")?.value.trim() || "";
-    const invalidKey = [apiKey, document.getElementById("setting-groq-key")?.value || "", document.getElementById("setting-siliconflow-key")?.value || ""]
+    const invalidKey = [apiKey, document.getElementById("setting-groq-key")?.value || "", document.getElementById("setting-siliconflow-key")?.value || "", document.getElementById("setting-mimo-key")?.value || ""]
         .find((value) => /[\u3400-\u9fff]|\s/.test(String(value || "").trim()));
     if (invalidKey) throw new Error("API Key 不能包含中文或空格");
     const toneValue = Number(document.getElementById("setting-prompt-tone")?.value ?? 1);
@@ -1434,6 +1461,13 @@ async function saveSettings({ silent = false, requestGroqPermission = false } = 
         groqBaseUrlInput?.readOnly === false ? current.groqBaseUrl : groqBaseUrlInput?.value,
         DEFAULT_GROQ_ASR_BASE_URL
     );
+    const customBaseUrlInput = document.getElementById("setting-base-url");
+    const customBaseUrl = provider === "custom"
+        ? normalizeHttpsBaseUrlInput(customBaseUrlInput?.value)
+        : ensureHttpsUrlPrefixInput(current.customBaseUrl);
+    if (provider === "custom" && customBaseUrlInput && customBaseUrl) customBaseUrlInput.value = customBaseUrl;
+    const requestedAsrProvider = String(document.getElementById("setting-asr-provider")?.value || "groq").toLowerCase();
+    const asrProvider = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
     const payload = {
         ...current,
         provider,
@@ -1441,14 +1475,16 @@ async function saveSettings({ silent = false, requestGroqPermission = false } = 
         model,
         providerApiKeys: { ...(current.providerApiKeys || {}), [provider]: apiKey },
         providerModels: { ...(current.providerModels || {}), [provider]: model },
-        customBaseUrl: document.getElementById("setting-base-url")?.value.trim() || "",
+        customBaseUrl,
         customProtocol: document.getElementById("setting-custom-protocol")?.value || "openai",
-        asrProvider: document.getElementById("setting-asr-provider")?.value || "groq",
+        asrProvider,
         groqApiKey: document.getElementById("setting-groq-key")?.value.trim() || "",
         groqModel: document.getElementById("setting-groq-model")?.value.trim() || "whisper-large-v3-turbo",
         groqBaseUrl,
         siliconFlowApiKey: document.getElementById("setting-siliconflow-key")?.value.trim() || "",
         siliconFlowAsrModel: document.getElementById("setting-siliconflow-model")?.value.trim() || "FunAudioLLM/SenseVoiceSmall",
+        mimoApiKey: document.getElementById("setting-mimo-key")?.value.trim() || "",
+        mimoAsrModel: DEFAULT_MIMO_ASR_MODEL,
         themeMode: document.getElementById("setting-theme-mode")?.value || "system",
         prefMode: document.getElementById("setting-pref-mode")?.value || "quality",
         defaultOpenPage: document.getElementById("setting-default-page")?.value || "CC",
@@ -1694,9 +1730,16 @@ async function handleAction(actionNode) {
         return chrome.tabs.create({ url });
     }
     if (action === "authorize-custom-origin") {
-        const baseUrl = document.getElementById("setting-base-url")?.value.trim() || "";
+        const input = document.getElementById("setting-base-url");
+        const baseUrl = normalizeHttpsBaseUrlInput(input?.value);
         if (!baseUrl) throw new Error("请先填写 Base URL");
-        await runtimeMessage({ action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION", baseUrl });
+        if (input) input.value = baseUrl;
+        const permission = await runtimeMessage({
+            action: "ENSURE_OPTIONAL_ORIGIN_PERMISSION",
+            baseUrl,
+            request: true
+        });
+        if (!permission?.granted) throw new Error("本次未完成授权，可以重新点击“授权当前域名”");
         showToast("域名授权成功");
         return;
     }
@@ -1841,6 +1884,11 @@ app.addEventListener("focusin", (event) => {
 });
 
 app.addEventListener("focusout", hideUiTooltip);
+app.addEventListener("focusout", (event) => {
+    if (event.target.id !== "setting-base-url") return;
+    const prefixed = ensureHttpsUrlPrefixInput(event.target.value);
+    if (prefixed) event.target.value = prefixed;
+});
 
 app.addEventListener("input", (event) => {
     if (event.target.id === "chat-input") {
@@ -1912,10 +1960,12 @@ app.addEventListener("change", (event) => {
         if (button) {
             button.dataset.url = event.target.value === "siliconflow"
                 ? "https://cloud.siliconflow.cn/account/ak"
-                : "https://console.groq.com/keys";
+                : (event.target.value === "mimo" ? "https://platform.xiaomimimo.com/" : "https://console.groq.com/keys");
+            button.disabled = !button.dataset.url;
         }
         document.getElementById("setting-asr-groq-fields")?.classList.toggle("settings-hidden", event.target.value !== "groq");
         document.getElementById("setting-asr-siliconflow-fields")?.classList.toggle("settings-hidden", event.target.value !== "siliconflow");
+        document.getElementById("setting-asr-mimo-fields")?.classList.toggle("settings-hidden", event.target.value !== "mimo");
     }
     if (event.target.id === "setting-prompt-mode") {
         document.getElementById("setting-prompt-guided-fields")?.classList.toggle("settings-hidden", event.target.value === "custom");

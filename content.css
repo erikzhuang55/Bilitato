@@ -1327,6 +1327,36 @@ body::-webkit-scrollbar {
     gap: 6px;
 }
 
+.cc-video-subtitle-btn {
+    border: 1px solid #e3e5e7;
+    border-radius: 5px;
+    background: #fff;
+    color: #61666d;
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 20px;
+    padding: 0 7px;
+    white-space: nowrap;
+}
+
+.cc-video-subtitle-btn:hover,
+.cc-video-subtitle-btn.is-active {
+    border-color: #fb7299;
+    background: #fff1f5;
+    color: #fb7299;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .cc-video-subtitle-btn {
+    border-color: #4b5260;
+    background: #2b303b;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .cc-video-subtitle-btn:hover,
+.ai-summary-plugin-box[data-theme="dark"] .cc-video-subtitle-btn.is-active {
+    border-color: #fb7299;
+    background: #432d37;
+}
+
 .cc-language-btn {
     position: relative;
 }
@@ -4243,6 +4273,7 @@ input[type="range"]:active::-webkit-slider-thumb {
 .ai-summary-plugin-box[data-theme="dark"] .action-tip,
 .ai-summary-plugin-box[data-theme="dark"] .cc-time,
 .ai-summary-plugin-box[data-theme="dark"] .cc-transcribe-status,
+.ai-summary-plugin-box[data-theme="dark"] .cc-video-subtitle-btn,
 .ai-summary-plugin-box[data-theme="dark"] .feedback-subtitle,
 .ai-summary-plugin-box[data-theme="dark"] .chat-item-meta,
 .ai-summary-plugin-box[data-theme="dark"] .settings-info-icon {

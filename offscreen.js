@@ -17,11 +17,20 @@ import {
   buildAsrEndpoint,
   normalizeAsrBaseUrl
 } from "./utils/asrEndpoints.js";
+import {
+  MIMO_ASR_CHUNK_SECONDS,
+  MIMO_ASR_MODEL,
+  MIMO_ASR_TRANSCRIBE_URL,
+  blobToBase64DataUrl,
+  buildMimoAsrRequestBody,
+  extractMimoAsrText
+} from "./utils/mimoAsr.js";
 
 const FFMPEG_CORE_URL = chrome.runtime.getURL("node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js");
 const SILICONFLOW_AUDIO_TRANSCRIBE_URL = "https://api.siliconflow.cn/v1/audio/transcriptions";
 let ffmpegPromise = null;
 const chunkSessions = new Map();
+const audioUploadSessions = new Map();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const action = String(message?.action || "");
@@ -37,16 +46,85 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function handleChunkMessage(action, payload = {}) {
+  if (action === "OFFSCREEN_CHUNK_AUDIO_UPLOAD_START") return startAudioUpload(payload);
+  if (action === "OFFSCREEN_CHUNK_AUDIO_UPLOAD_APPEND") return appendAudioUpload(payload);
+  if (action === "OFFSCREEN_CHUNK_AUDIO_UPLOAD_FINISH") return finishAudioUpload(payload);
+  if (action === "OFFSCREEN_CHUNK_AUDIO_UPLOAD_RELEASE") return releaseAudioUpload(payload);
   if (action === "OFFSCREEN_CHUNK_AUDIO_PREPARE") return prepareChunkAudioSession(payload);
   if (action === "OFFSCREEN_CHUNK_AUDIO_TRANSCRIBE_ALL") return transcribePreparedChunks(payload);
   if (action === "OFFSCREEN_CHUNK_AUDIO_RELEASE") return releasePreparedChunks(payload);
   throw createOffscreenError("ASR_CHUNKING_FAILED", `未知切片动作：${action}`);
 }
 
+function startAudioUpload(payload = {}) {
+  const expectedBytes = Number(payload?.expectedBytes || 0);
+  const maxAudioBytes = Number(payload?.maxAudioBytes || 0);
+  if (!(expectedBytes > 0) || !(maxAudioBytes > 0)) {
+    throw createOffscreenError("ASR_CHUNKING_FAILED", "缺少音轨大小，无法准备切片");
+  }
+  const uploadId = `upload_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  audioUploadSessions.set(uploadId, {
+    chunks: [],
+    totalBytes: 0,
+    expectedBytes,
+    maxAudioBytes,
+    mimeType: String(payload?.mimeType || "audio/mp4").trim() || "audio/mp4",
+    provider: String(payload?.provider || "groq").toLowerCase()
+  });
+  return { uploadId };
+}
+
+function appendAudioUpload(payload = {}) {
+  const uploadId = String(payload?.uploadId || "").trim();
+  const session = audioUploadSessions.get(uploadId);
+  if (!session) throw createOffscreenError("ASR_CHUNKING_SESSION_MISSING", "音轨传输会话不存在，请重新开始转录");
+  const base64 = String(payload?.dataBase64 || "");
+  if (!base64) throw createOffscreenError("ASR_CHUNKING_FAILED", "收到空音轨分块");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  session.totalBytes += bytes.byteLength;
+  if (session.totalBytes > session.expectedBytes) {
+    audioUploadSessions.delete(uploadId);
+    throw createOffscreenError("ASR_CHUNKING_FAILED", "音轨传输大小异常，请重新开始转录");
+  }
+  session.chunks.push(bytes);
+  return { receivedBytes: session.totalBytes };
+}
+
+async function finishAudioUpload(payload = {}) {
+  const uploadId = String(payload?.uploadId || "").trim();
+  const session = audioUploadSessions.get(uploadId);
+  if (!session) throw createOffscreenError("ASR_CHUNKING_SESSION_MISSING", "音轨传输会话不存在，请重新开始转录");
+  audioUploadSessions.delete(uploadId);
+  if (session.totalBytes !== session.expectedBytes) {
+    throw createOffscreenError("ASR_CHUNKING_FAILED", "音轨传输不完整，请重新开始转录");
+  }
+  const sourceBytes = new Uint8Array(session.totalBytes);
+  let offset = 0;
+  for (const chunk of session.chunks) {
+    sourceBytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return prepareChunkAudioSession({
+    audioBytes: sourceBytes.buffer,
+    mimeType: session.mimeType,
+    maxAudioBytes: session.maxAudioBytes,
+    provider: session.provider
+  });
+}
+
+function releaseAudioUpload(payload = {}) {
+  const uploadId = String(payload?.uploadId || "").trim();
+  if (uploadId) audioUploadSessions.delete(uploadId);
+  return { released: !!uploadId };
+}
+
 async function prepareChunkAudioSession(payload = {}) {
   const audioBytes = payload?.audioBytes instanceof ArrayBuffer ? payload.audioBytes : null;
   const audioUrl = String(payload?.audioUrl || "").trim();
   const mimeType = String(payload?.mimeType || "audio/mp4").trim() || "audio/mp4";
+  const provider = String(payload?.provider || "groq").toLowerCase();
   const maxAudioBytes = Number(payload?.maxAudioBytes || 0);
   if ((!audioBytes && !audioUrl) || !(maxAudioBytes > 0)) {
     throw createOffscreenError("ASR_CHUNKING_FAILED", "缺少音轨数据，无法切片");
@@ -62,8 +140,9 @@ async function prepareChunkAudioSession(payload = {}) {
       throw createOffscreenError("ASR_CHUNK_DURATION_UNKNOWN", "无法识别音轨时长，暂时不能自动切片转录");
     }
     await ffmpeg.writeFile(inputName, new Uint8Array(sourceBytes));
+    const preferredChunkSeconds = provider === "mimo" ? MIMO_ASR_CHUNK_SECONDS : DEFAULT_ASR_CHUNK_SECONDS;
     let chunkSeconds = estimateSafeChunkSeconds(sourceBytes.byteLength, durationSec, maxAudioBytes, {
-      fallbackSeconds: DEFAULT_ASR_CHUNK_SECONDS
+      fallbackSeconds: preferredChunkSeconds
     });
     if (chunkSeconds < MIN_ASR_CHUNK_SECONDS) {
       throw createOffscreenError("ASR_CHUNKING_UNSUPPORTED", "该音轨码率过高，当前自动切片仍无法稳定转录");
@@ -71,7 +150,7 @@ async function prepareChunkAudioSession(payload = {}) {
     let plan = buildOverlappedChunkPlan(durationSec, chunkSeconds, DEFAULT_ASR_CHUNK_OVERLAP_SECONDS);
     let chunks = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      chunks = await exportAudioChunks(ffmpeg, inputName, sessionPrefix, plan, mimeType, cleanupFiles);
+      chunks = await exportAudioChunks(ffmpeg, inputName, sessionPrefix, plan, provider, cleanupFiles);
       const tooLargeChunk = chunks.find((chunk) => chunk.bytes >= maxAudioBytes);
       if (!tooLargeChunk) break;
       chunkSeconds = Math.floor(chunkSeconds * 0.7);
@@ -142,9 +221,11 @@ function mapTranscriptionToRows(data, options = {}) {
 
 async function transcribePreparedChunks(payload = {}) {
   const sessionId = String(payload?.sessionId || "").trim();
-  const provider = String(payload?.provider || "groq").toLowerCase() === "siliconflow" ? "siliconflow" : "groq";
+  const requestedProvider = String(payload?.provider || "groq").toLowerCase();
+  const provider = ["groq", "siliconflow", "mimo"].includes(requestedProvider) ? requestedProvider : "groq";
   const apiKey = String(payload?.apiKey || payload?.groqApiKey || "").trim();
-  const model = String(payload?.model || payload?.groqModel || "").trim() || (provider === "siliconflow" ? "FunAudioLLM/SenseVoiceSmall" : "whisper-large-v3-turbo");
+  const model = String(payload?.model || payload?.groqModel || "").trim()
+    || (provider === "siliconflow" ? "FunAudioLLM/SenseVoiceSmall" : (provider === "mimo" ? MIMO_ASR_MODEL : "whisper-large-v3-turbo"));
   const videoTitle = String(payload?.videoTitle || "").trim();
   const baseUrl = normalizeAsrBaseUrl(payload?.baseUrl, DEFAULT_GROQ_BASE_URL);
   const tabId = Number(payload?.tabId || 0);
@@ -154,13 +235,14 @@ async function transcribePreparedChunks(payload = {}) {
     throw createOffscreenError("ASR_CHUNKING_SESSION_MISSING", "切片会话不存在，请重新开始转录");
   }
   if (!apiKey) {
-    throw createOffscreenError("ASR_CHUNKING_FAILED", provider === "siliconflow" ? "缺少硅基流动 API Key，无法分片转录" : "缺少 Groq API Key，无法分片转录");
+    const providerLabel = provider === "siliconflow" ? "硅基流动" : (provider === "mimo" ? "小米 MiMo" : "Groq");
+    throw createOffscreenError("ASR_CHUNKING_FAILED", `缺少${providerLabel} API Key，无法分片转录`);
   }
   const chunks = Array.isArray(session.chunks) ? session.chunks : [];
   const mergedRows = [];
   let quota = null;
   const boundaries = [];
-  const noTimestamp = provider === "siliconflow";
+  const noTimestamp = provider === "siliconflow" || provider === "mimo";
   for (let index = 0; index < chunks.length; index += 1) {
     const chunk = chunks[index];
     if (!chunk) {
@@ -183,7 +265,9 @@ async function transcribePreparedChunks(payload = {}) {
     const file = new File([chunk.audioBytes], chunk.fileName, { type: chunk.mimeType || "audio/mp4" });
     const result = provider === "siliconflow"
       ? await requestSiliconFlowChunkTranscription(file, apiKey, model)
-      : await requestGroqChunkTranscription(file, apiKey, model, videoTitle, baseUrl);
+      : provider === "mimo"
+        ? await requestMimoChunkTranscription(file, apiKey, model)
+        : await requestGroqChunkTranscription(file, apiKey, model, videoTitle, baseUrl);
     quota = result.quota || quota;
     const chunkRows = mapTranscriptionToRows(result.data, { noTimestamp });
     const beforeTail = mergedRows.length ? mergedRows.slice(-2).map((row) => serializeBoundaryRow(row, noTimestamp)) : [];
@@ -325,19 +409,22 @@ async function probeAudioDurationSeconds(ffmpeg, inputName) {
   }
 }
 
-async function exportAudioChunks(ffmpeg, inputName, sessionPrefix, plan, mimeType, cleanupFiles) {
+async function exportAudioChunks(ffmpeg, inputName, sessionPrefix, plan, provider, cleanupFiles) {
   const chunks = [];
   for (const item of plan) {
-    const outputName = `${sessionPrefix}_${String(item.index).padStart(3, "0")}.m4a`;
+    const isMimo = provider === "mimo";
+    const outputName = `${sessionPrefix}_${String(item.index).padStart(3, "0")}.${isMimo ? "mp3" : "m4a"}`;
     cleanupFiles.add(outputName);
+    const outputArgs = isMimo
+      ? ["-c:a", "libmp3lame", "-b:a", "64k", "-ar", "16000", "-ac", "1"]
+      : ["-c:a", "copy", "-movflags", "+faststart"];
     const exitCode = await ffmpeg.exec([
       "-i", inputName,
       "-ss", String(item.startSec),
       "-t", String(item.durationSec),
       "-vn",
       "-map", "0:a:0",
-      "-c:a", "copy",
-      "-movflags", "+faststart",
+      ...outputArgs,
       outputName
     ]);
     if (exitCode !== 0) {
@@ -351,7 +438,7 @@ async function exportAudioChunks(ffmpeg, inputName, sessionPrefix, plan, mimeTyp
       durationSec: item.durationSec,
       endSec: item.endSec,
       bytes: exactBytes.byteLength || 0,
-      mimeType: "audio/mp4",
+      mimeType: isMimo ? "audio/mpeg" : "audio/mp4",
       audioBytes: exactBytes
     });
   }
@@ -406,6 +493,38 @@ async function requestSiliconFlowChunkTranscription(audioFile, apiKey, model) {
   }
   const data = await response.json().catch(() => null);
   return { data, quota: null };
+}
+
+async function requestMimoChunkTranscription(audioFile, apiKey, model) {
+  const audioDataUrl = await blobToBase64DataUrl(audioFile);
+  const response = await fetch(MIMO_ASR_TRANSCRIBE_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(buildMimoAsrRequestBody(audioDataUrl, model))
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    if (response.status === 429) {
+      throw createOffscreenError("ASR_RATE_LIMIT", "小米 MiMo 限流，请稍后重试");
+    }
+    throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_FAILED", `小米 MiMo 转录失败（${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
+  }
+  const responseData = await response.json().catch(() => null);
+  const finishReason = String(responseData?.choices?.[0]?.finish_reason || "").trim();
+  const text = extractMimoAsrText(responseData);
+  if (finishReason && finishReason !== "stop") {
+    throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_INCOMPLETE", `小米 MiMo 返回未完成（${finishReason}），请重新转录`);
+  }
+  if (!text) {
+    throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_EMPTY", "小米 MiMo 返回了空分片，为避免生成残缺字幕，本次转录已停止");
+  }
+  return {
+    data: { text },
+    quota: null
+  };
 }
 
 function createOffscreenError(code, message) {

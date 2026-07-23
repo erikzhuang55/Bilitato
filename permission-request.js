@@ -42,7 +42,7 @@
             const alreadyGranted = await chrome.permissions.contains({ origins: [pattern] });
             const granted = alreadyGranted || await chrome.permissions.request({ origins: [pattern] });
             if (!granted) {
-                throw new Error("你取消了该域名授权");
+                throw new Error("本次未完成授权，可以再次点击上方按钮");
             }
             setStatus("域名已授权，可以返回插件继续使用。", "success");
             setTimeout(() => window.close(), 900);

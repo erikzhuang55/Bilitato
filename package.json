@@ -11,7 +11,9 @@
     "commitlint": "commitlint --from HEAD~1 --to HEAD --verbose",
     "prepare": "husky",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "models:validate": "node scripts/modelCatalogValidator.js",
+    "models:validate:dry-run": "node scripts/modelCatalogValidator.js --dry-run"
   },
   "devDependencies": {
     "@commitlint/cli": "^21.0.1",

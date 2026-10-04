@@ -1,0 +1,120 @@
+name: Model catalog validator
+
+on:
+  schedule:
+    # GitHub Actions uses UTC. 20:00 UTC = 04:00 Asia/Shanghai the next day.
+    - cron: '0 20 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: model-catalog-validator
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Load previous model status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const title = 'ModelScope 模型检测状态（自动更新）';
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const current = issues.find(issue => !issue.pull_request && issue.title === title);
+            const match = current?.body?.match(/<!-- model-validator-state:([A-Za-z0-9+/=]+) -->/);
+            const state = match
+              ? Buffer.from(match[1], 'base64').toString('utf8')
+              : JSON.stringify({ candidates: [] });
+            fs.writeFileSync('model-catalog-state.json', state);
+      - name: Discover and validate ModelScope models
+        env:
+          MODELSCOPE_API_KEY: ${{ secrets.MODELSCOPE_API_KEY }}
+          MODEL_VALIDATOR_STATE_PATH: model-catalog-state.json
+        run: node scripts/modelCatalogValidator.js
+      - name: Update model status issue
+        if: always() && hashFiles('model-catalog-report.json') != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = JSON.parse(fs.readFileSync('model-catalog-report.json', 'utf8'));
+            const title = 'ModelScope 模型检测状态（自动更新）';
+            const encodedState = Buffer.from(JSON.stringify({ candidates: report.stateCandidates })).toString('base64');
+            const unavailable = report.unavailable.length
+              ? report.unavailable.map(item => `- \`${item.model}\`：${item.status}${item.errorCode ? `（${item.errorCode}）` : ''}`)
+              : ['- 暂无'];
+            const body = [
+              `最后检测：${report.generatedAt}`,
+              '',
+              `检测 ${report.counts.validated} 个文本模型，异常 ${report.counts.unavailable} 个。`,
+              '',
+              '## 当前不可用或不兼容',
+              '',
+              ...unavailable,
+              '',
+              '检测器只监控和提醒，不会修改扩展远程配置或自动发布版本。',
+              '',
+              `运行记录：${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              `<!-- model-validator-state:${encodedState} -->`,
+            ].join('\n');
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100,
+            });
+            const current = issues.find(issue => !issue.pull_request && issue.title === title);
+            let issueNumber;
+            if (current) {
+              issueNumber = current.number;
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body,
+              });
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+              });
+              issueNumber = created.data.number;
+            }
+            if (current && (report.added.length || report.statusChanges.length)) {
+              const changes = [
+                ...report.added.map(model => `- 新模型/新版本：\`${model}\``),
+                ...report.statusChanges.map(item => `- 状态变化：\`${item.model}\` ${item.from} → ${item.to}`),
+              ];
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issueNumber,
+                body: changes.join('\n'),
+              });
+            }
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-catalog-report
+          path: model-catalog-report.json
+          if-no-files-found: ignore
+          retention-days: 14

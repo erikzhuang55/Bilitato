@@ -28,11 +28,13 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const title = 'ModelScope 模型检测状态（自动更新）';
+            const title = 'ModelScope 模型异常汇总（自动更新）';
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              state: 'open',
+              state: 'all',
+              sort: 'updated',
+              direction: 'desc',
               per_page: 100,
             });
             const current = issues.find(issue => !issue.pull_request && issue.title === title);
@@ -46,18 +48,20 @@ jobs:
           MODELSCOPE_API_KEY: ${{ secrets.MODELSCOPE_API_KEY }}
           MODEL_VALIDATOR_STATE_PATH: model-catalog-state.json
         run: node scripts/modelCatalogValidator.js
-      - name: Update model status issue
+      - name: Update consolidated anomaly issue
         if: always() && hashFiles('model-catalog-report.json') != ''
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const report = JSON.parse(fs.readFileSync('model-catalog-report.json', 'utf8'));
-            const title = 'ModelScope 模型检测状态（自动更新）';
+            const title = 'ModelScope 模型异常汇总（自动更新）';
             const encodedState = Buffer.from(JSON.stringify({ candidates: report.stateCandidates })).toString('base64');
-            const unavailable = report.unavailable.length
-              ? report.unavailable.map(item => `- \`${item.model}\`：${item.status}${item.errorCode ? `（${item.errorCode}）` : ''}`)
-              : ['- 暂无'];
+            const newModels = report.isInitialRun ? [] : report.added;
+            const unavailable = report.unavailable.map(item =>
+              `- \`${item.model}\`：${item.status}${item.errorCode ? `（${item.errorCode}）` : ''}`
+            );
+            const hasActionableItems = unavailable.length > 0 || newModels.length > 0;
             const body = [
               `最后检测：${report.generatedAt}`,
               '',
@@ -65,7 +69,8 @@ jobs:
               '',
               '## 当前不可用或不兼容',
               '',
-              ...unavailable,
+              ...(unavailable.length ? unavailable : ['- 暂无']),
+              ...(newModels.length ? ['', '## 新模型 / 新版本', '', ...newModels.map(model => `- \`${model}\``)] : []),
               '',
               '检测器只监控和提醒，不会修改扩展远程配置或自动发布版本。',
               '',
@@ -76,38 +81,67 @@ jobs:
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              state: 'open',
+              state: 'all',
+              sort: 'updated',
+              direction: 'desc',
               per_page: 100,
             });
-            const current = issues.find(issue => !issue.pull_request && issue.title === title);
-            let issueNumber;
-            if (current) {
-              issueNumber = current.number;
-              await github.rest.issues.update({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: issueNumber,
-                body,
-              });
-            } else {
-              const created = await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                body,
-              });
-              issueNumber = created.data.number;
-            }
-            if (current && (report.added.length || report.statusChanges.length)) {
-              const changes = [
-                ...report.added.map(model => `- 新模型/新版本：\`${model}\``),
-                ...report.statusChanges.map(item => `- 状态变化：\`${item.model}\` ${item.from} → ${item.to}`),
-              ];
+            const matchingIssues = issues.filter(issue => !issue.pull_request && issue.title === title);
+            const current = matchingIssues.find(issue => issue.state === 'open');
+            const latest = matchingIssues[0];
+
+            if (hasActionableItems) {
+              let issueNumber;
+              if (current) {
+                issueNumber = current.number;
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  body,
+                });
+              } else {
+                const created = await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                });
+                issueNumber = created.data.number;
+              }
+
+              if (current && (newModels.length || report.statusChanges.length)) {
+                const changes = [
+                  ...newModels.map(model => `- 新模型/新版本：\`${model}\``),
+                  ...report.statusChanges.map(item => `- 状态变化：\`${item.model}\` ${item.from} → ${item.to}`),
+                ];
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  body: changes.join('\n'),
+                });
+              }
+            } else if (current) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: issueNumber,
-                body: changes.join('\n'),
+                issue_number: current.number,
+                body: `✅ ${report.generatedAt} 检测已全部恢复，自动关闭异常汇总。`,
+              });
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: current.number,
+                body,
+                state: 'closed',
+              });
+            } else if (latest) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: latest.number,
+                body,
               });
             }
       - name: Upload validation report

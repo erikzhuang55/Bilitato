@@ -379,6 +379,7 @@ export async function runValidator({ dryRun = false } = {}) {
     provider: PROVIDER,
     dryRun,
     generatedAt: now,
+    isInitialRun: state.candidates.length === 0,
     counts: {
       discovered: discovered.length,
       added: diff.added.length,

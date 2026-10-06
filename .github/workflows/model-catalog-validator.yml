@@ -49,7 +49,7 @@ jobs:
           MODEL_VALIDATOR_STATE_PATH: model-catalog-state.json
         run: node scripts/modelCatalogValidator.js
       - name: Update consolidated anomaly issue
-        if: always() && hashFiles('model-catalog-report.json') != ''
+        if: success() && hashFiles('model-catalog-report.json') != ''
         uses: actions/github-script@v7
         with:
           script: |

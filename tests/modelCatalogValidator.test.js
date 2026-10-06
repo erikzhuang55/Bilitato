@@ -6,6 +6,7 @@ import {
   normalizeCatalog,
   parseJsonContent,
   prioritizeValidationTargets,
+  validateModelScopeApiKey,
 } from '../scripts/modelCatalogValidator.js';
 
 describe('model catalog validator', () => {
@@ -52,5 +53,11 @@ describe('model catalog validator', () => {
       ['new', { last_checked_at: null }],
     ]);
     expect(prioritizeValidationTargets(['recent', 'old', 'new'], candidates)).toEqual(['new', 'old', 'recent']);
+  });
+
+  it('accepts only a plain ASCII ModelScope API key', () => {
+    expect(validateModelScopeApiKey('  ms-token_123.example  ')).toBe('ms-token_123.example');
+    expect(() => validateModelScopeApiKey('复制到剪贴板')).toThrow('请只复制 ModelScope 访问令牌本身');
+    expect(() => validateModelScopeApiKey('token with spaces')).toThrow('请只复制 ModelScope 访问令牌本身');
   });
 });

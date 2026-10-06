@@ -8,10 +8,10 @@
 
 ## 首次启用
 
-1. 在 GitHub 仓库的 Actions secrets 中配置 `MODELSCOPE_API_KEY`。
+1. 在 GitHub 仓库的 Actions secrets 中配置 `MODELSCOPE_API_KEY`。只复制访问令牌本身，不要复制页面说明、字段名或其他文字。
 2. 在 Actions 中手动运行一次 `Model catalog validator`，确认报告正常；之后任务每天自动运行一次。
 
-API Key 只能保存在 GitHub Secrets 中，不能写入扩展、仓库或浏览器端代码。历史状态保存在自动维护的 GitHub Issue 中，不需要数据库密钥。
+API Key 只能保存在 GitHub Secrets 中，不能写入扩展、仓库或浏览器端代码。检测器会在发起请求前拒绝包含中文、空格等非令牌内容的配置，避免生成整批模型异常的误报。历史状态保存在自动维护的 GitHub Issue 中，不需要数据库密钥。
 
 ## 本地检查
 

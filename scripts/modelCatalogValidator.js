@@ -20,6 +20,15 @@ function envNumber(name, fallback, minimum = 1) {
   return Number.isFinite(value) && value >= minimum ? value : fallback;
 }
 
+export function validateModelScopeApiKey(value) {
+  const apiKey = String(value || '').trim();
+  if (!apiKey) throw new Error('缺少 MODELSCOPE_API_KEY');
+  if (!/^[\x21-\x7E]+$/.test(apiKey)) {
+    throw new Error('MODELSCOPE_API_KEY 格式不正确：请只复制 ModelScope 访问令牌本身，不要包含中文说明、空格或换行');
+  }
+  return apiKey;
+}
+
 export function normalizeCatalog(payload) {
   if (!payload || !Array.isArray(payload.data)) {
     throw new Error('ModelScope 模型目录返回格式不正确：缺少 data 数组');
@@ -273,7 +282,8 @@ export async function runValidator({ dryRun = false } = {}) {
   const timeoutMs = envNumber('MODEL_VALIDATOR_TIMEOUT_MS', DEFAULT_TIMEOUT_MS, 1_000);
   const concurrency = envNumber('MODEL_VALIDATOR_CONCURRENCY', DEFAULT_CONCURRENCY);
   const maxValidations = envNumber('MODEL_VALIDATOR_MAX_VALIDATIONS', DEFAULT_MAX_VALIDATIONS);
-  const apiKey = process.env.MODELSCOPE_API_KEY || '';
+  const rawApiKey = process.env.MODELSCOPE_API_KEY || '';
+  const apiKey = rawApiKey ? validateModelScopeApiKey(rawApiKey) : '';
   const statePath = process.env.MODEL_VALIDATOR_STATE_PATH || '';
 
   if (!dryRun && !apiKey) throw new Error('缺少 MODELSCOPE_API_KEY');

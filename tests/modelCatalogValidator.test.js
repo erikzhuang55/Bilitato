@@ -28,6 +28,7 @@ describe('model catalog validator', () => {
     expect(isTargetTextModel('MiniMax/MiniMax-M3')).toBe(true);
     expect(isTargetTextModel('mistralai/Mistral-Large-Instruct-2407')).toBe(true);
     expect(isTargetTextModel('ZhipuAI/GLM-5.2')).toBe(true);
+    expect(isTargetTextModel('ZhipuAI/GLM-4.7-Flash')).toBe(false);
     expect(isTargetTextModel('Qwen/Qwen3.8-Flash-Next')).toBe(true);
     expect(isTargetTextModel('Qwen/Qwen-Image-Edit')).toBe(false);
     expect(isTargetTextModel('MusePublic/Qwen-Image-Edit')).toBe(false);

@@ -14,6 +14,9 @@ const TARGET_MODEL_PREFIXES = [
   'mistralai/',
   'ZhipuAI/',
 ];
+const EXCLUDED_MODEL_IDS = new Set([
+  'ZhipuAI/GLM-4.7-Flash',
+]);
 
 function envNumber(name, fallback, minimum = 1) {
   const value = Number.parseInt(process.env[name] || '', 10);
@@ -42,7 +45,8 @@ export function normalizeCatalog(payload) {
 
 export function isTargetTextModel(modelId) {
   const id = String(modelId || '').trim();
-  return TARGET_MODEL_PREFIXES.some((prefix) => id.startsWith(prefix))
+  return !EXCLUDED_MODEL_IDS.has(id)
+    && TARGET_MODEL_PREFIXES.some((prefix) => id.startsWith(prefix))
     && !/^Qwen\/.*(?:Image|VL)/i.test(id);
 }
 
@@ -293,9 +297,10 @@ export async function runValidator({ dryRun = false } = {}) {
   const discovered = normalizeCatalog(await catalogResponse.json()).filter(isTargetTextModel);
 
   const state = await readStateFile(statePath);
-  const knownModels = [...new Set(state.candidates.map((row) => row.model_id))];
+  const trackedCandidates = state.candidates.filter((row) => isTargetTextModel(row.model_id));
+  const knownModels = [...new Set(trackedCandidates.map((row) => row.model_id))];
   const diff = diffCatalog(discovered, knownModels);
-  const candidateById = new Map(state.candidates.map((row) => [row.model_id, row]));
+  const candidateById = new Map(trackedCandidates.map((row) => [row.model_id, row]));
   const targets = apiKey
     ? prioritizeValidationTargets(
       discovered,
@@ -382,7 +387,7 @@ export async function runValidator({ dryRun = false } = {}) {
       to: item.status,
     }));
 
-  const nextStateById = new Map(state.candidates.map((row) => [row.model_id, row]));
+  const nextStateById = new Map(trackedCandidates.map((row) => [row.model_id, row]));
   for (const row of rows) nextStateById.set(row.model_id, row);
 
   const report = {

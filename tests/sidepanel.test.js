@@ -9,6 +9,7 @@ const background = readFileSync(new URL("../background.js", import.meta.url), "u
 const content = readFileSync(new URL("../content.js", import.meta.url), "utf8");
 const contentCss = readFileSync(new URL("../content.css", import.meta.url), "utf8");
 const releaseNotice = readFileSync(new URL("../content/contentReleaseNotice.js", import.meta.url), "utf8");
+const githubReleaseNotes = readFileSync(new URL("../release-notes/v1.6.5.md", import.meta.url), "utf8");
 const sidepanel = readFileSync(new URL("../sidepanel.js", import.meta.url), "utf8");
 const sidepanelHtml = readFileSync(new URL("../sidepanel.html", import.meta.url), "utf8");
 const sidepanelCss = readFileSync(new URL("../sidepanel.css", import.meta.url), "utf8");
@@ -77,8 +78,19 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('window.addEventListener("pagehide"');
   });
 
+  it("switches to the native side panel in wide mode and restores embedded mode on exit", () => {
+    expect(content.indexOf("let playerWideModeActive = false")).toBeLessThan(content.indexOf("bootstrap();"));
+    expect(content.indexOf("let wideSidePanelOpenPending = false")).toBeLessThan(content.indexOf("bootstrap();"));
+    expect(content).toContain("initPlayerWideModeBridge()");
+    expect(content).toContain('reason: "player_wide"');
+    expect(content).toContain('command === "get-player-layout"');
+    expect(sidepanel).toContain("openedDuringWideMode");
+    expect(sidepanel).toContain('command: "get-player-layout"');
+    expect(sidepanel).toContain("await setEmbeddedVisibleForTab(tab.id, true)");
+  });
+
   it("checks database driven update availability without frequent polling", () => {
-    expect(manifest.version).toBe("1.6.4.1");
+    expect(manifest.version).toBe("1.6.5");
     expect(background).toContain('msg.action === "CHECK_LATEST_VERSION"');
     expect(background).toContain('msg.action === "OPEN_EXTENSION_MANAGEMENT"');
     expect(background).toContain("VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000");
@@ -99,10 +111,25 @@ describe("native side panel", () => {
     expect(sidepanel).not.toContain("有可用版本更新 v${latest}");
   });
 
-  it("ships the 1.6.4 release notice pages", () => {
-    expect(releaseNotice).toContain('"1.6.4"');
-    expect(releaseNotice).toContain("Bilitato 已更新至 v1.6.4");
-    expect(releaseNotice).toContain("修复生成中切 P 出现旧错误");
+  it("ships the 1.6.5 release notice pages", () => {
+    expect(releaseNotice).toContain('"1.6.5"');
+    expect(releaseNotice).toContain("Bilitato 已更新至 v1.6.5");
+    expect(releaseNotice).toContain("聊天推理强度可调");
+    expect(releaseNotice).toContain("模型兼容更新更及时");
+    expect(releaseNotice).toContain("MiMo Token Plan 支持多区域");
+    expect(releaseNotice).toContain("宽屏观看自动切换侧边栏");
+    expect(releaseNotice).toContain("修复下载功能影响其他网站");
+    expect(releaseNotice).toContain("下载完成、取消或中断后立即撤销");
+    expect(releaseNotice).toContain("修复无字幕视频首次转录失败");
+    expect(releaseNotice).toContain('majorHistory.push("1.6.5", "1.6.4", "1.6.3", "1.6.2"');
+    expect(releaseNotice).toContain("查看过往更新");
+    expect(releaseNotice).toContain("返回本次更新");
+    expect(releaseNotice).toContain("过往更新内容");
+    expect(releaseNotice).toContain("release-history-version-summary");
+    expect(releaseNotice).not.toContain("稍后再看");
+    expect(releaseNotice).not.toContain("release-notice-pager");
+    expect(githubReleaseNotes).toContain("request_policies");
+    expect(githubReleaseNotes).toContain("ASR 连接、上传、等待结果和总任务超时分类");
     expect(releaseNotice).toContain("修复进度条完成后不消失");
     expect(releaseNotice).toContain('majorHistory.push("1.6.4", "1.6.3", "1.6.2"');
     expect(releaseNotice).toContain('"1.6.3"');
@@ -190,39 +217,22 @@ describe("native side panel", () => {
     expect(releaseNotice).toContain("onClose?.()");
   });
 
-  it("keeps the ModelScope preset list aligned with currently supported models", () => {
+
+  it("keeps the ModelScope preset list aligned with the 1.6.5 catalog", () => {
     const modelScopeList = content.match(/modelscope:\s*\[([\s\S]*?)\]/)?.[1] || "";
-    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V4-Flash"');
+    expect(modelScopeList).toContain('"Qwen/Qwen3.8-Flash-Next"');
+    expect(modelScopeList).toContain('"Qwen/Qwen3.5-27B"');
+    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4.1-Flash"');
     expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Pro"');
-    expect(modelScopeList).toContain('"Qwen/Qwen3-30B-A3B-Instruct-2507"');
-    expect(modelScopeList).toContain('"Qwen/Qwen3-30B-A3B"');
+    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Pro-0813"');
+    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Flash-0731"');
+    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V4.1-Flash-1017"');
     expect(content).toContain("prioritizeRecommendedProviderModels(key, remoteModels)");
-    expect(content.indexOf('"Qwen/Qwen3-30B-A3B-Instruct-2507"')).toBeLessThan(content.indexOf('"Qwen/Qwen3-30B-A3B"'));
-    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V3.2"');
-    expect(modelScopeList).not.toContain('"ZhipuAI/GLM-5.2"');
-    expect(modelScopeList).not.toContain('"ZhipuAI/GLM-4.7-Flash"');
-    expect(modelScopeList).not.toContain('"stepfun-ai/Step-3.7-Flash"');
-    expect(content).toContain("Qwen3-30B-A3B-Instruct-2507：200次/天");
-    expect(content).toContain("Qwen3-235B-A22B-Instruct-2507：50次/天");
-    expect(content).toContain("Qwen3-Coder-30B-A3B-Instruct：100次/天");
-    expect(content).toContain("Qwen3-30B-A3B：200次/天");
-    expect(content).toContain("DeepSeek-V4-Pro：20次/天");
-    expect(content).toContain("DeepSeek-V4-Flash-0731：50次/天");
-    expect(content).not.toContain("DeepSeek-V3.2：20次/天");
-    expect(content).not.toContain("GLM-5.2：50次/天");
-    expect(content).not.toContain("Step-3.7-Flash：50次/天");
-    expect(content).toContain('MODELSCOPE_RECOMMENDED_MODELS.has(model) ? "推荐"');
-    expect(content).toContain('option.querySelector(".model-recommended-tag")');
-    expect(contentCss).toContain(".model-recommended-tag");
-    expect(contentCss).toContain(".custom-option-main > span:first-child");
-    expect(contentCss).toContain("text-overflow: ellipsis");
-    expect(sidepanel).toContain('recommendedModelScopeModels.has(model) ? "（推荐）"');
-    expect(sidepanel).toContain("recommendedModelScopeModelOrder.filter");
-    expect(background).toContain('model: "Qwen/Qwen3-30B-A3B-Instruct-2507"');
     expect(background).toContain("LEGACY_MODELSCOPE_MODELS");
+    expect(background).toContain('["deepseek-ai/deepseek-v4-flash", "deepseek-ai/DeepSeek-V4.1-Flash"]');
   });
 
-  it("tracks ModelScope quota headers and uses compact segments first", () => {
+  it("tracks ModelScope quota headers without displaying quota fields and uses compact segments first", () => {
     expect(background).toContain("modelscope-ratelimit-model-requests-limit");
     expect(background).toContain("x-modelscope-ratelimit-model-requests-limit");
     expect(background).toContain("x-ratelimit-model-requests-remaining");
@@ -234,8 +244,8 @@ describe("native side panel", () => {
     expect(background).toContain('"deepseek-ai/deepseek-v4-flash-0731": 50');
     expect(background).toContain("onHeadersReceived");
     expect(background).toContain('provider === "modelscope"');
-    expect(content).toContain("模型剩余");
-    expect(sidepanel).toContain("账号剩余");
+    expect(content).not.toContain("模型剩余");
+    expect(sidepanel).not.toContain("账号剩余");
   });
 
   it("uses one wrapped side panel tooltip for settings info icons", () => {
@@ -315,6 +325,28 @@ describe("native side panel", () => {
     expect(content).toContain("listNode.scrollTop = 0");
     expect(content).toContain("const rows = getCurrentSubtitleStateRows()");
     expect(content).not.toMatch(/scrollUnlockAt = Math\.max\([\s\S]*?subtitleUiCoordinator\.scrollUnlockAt,[\s\S]*?Date\.now\(\) \+ 300/);
+  });
+
+  it("keeps subtitle follow paused until the user explicitly resumes it", () => {
+    expect(content).not.toContain("FOLLOW_RESUME_MS");
+    expect(content).toContain("const canFollowScroll = appState.followEnabled || force");
+    expect(sidepanel).not.toContain("Date.now() - state.followPausedAt >= 5000");
+    expect(sidepanel).toContain('data-action="follow-now"');
+  });
+
+  it("supports local HTTP model endpoints without allowing remote insecure HTTP", () => {
+    expect(manifest.optional_host_permissions).toEqual(expect.arrayContaining([
+      "http://localhost/*",
+      "http://127.0.0.1/*"
+    ]));
+    expect(content).toContain('["localhost", "127.0.0.1"].includes(url.hostname.toLowerCase())');
+    expect(sidepanel).toContain("远程 Base URL 必须使用 HTTPS");
+    expect(background).toContain("本地 HTTP 仅支持 localhost 或 127.0.0.1");
+  });
+
+  it("turns a missing content receiver into an actionable page refresh error", () => {
+    expect(sidepanel).toContain('connectionError.code = "CONTENT_SCRIPT_UNAVAILABLE"');
+    expect(sidepanel).toContain('data-action="refresh-page">刷新页面</button>');
   });
 
   it("deduplicates route, playinfo, and subtitle follow polling", () => {
@@ -594,7 +626,7 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('"setting-groq-key": "groqApiKey"');
     expect(content).toContain('if (navId === "CC") await refreshAsrSettingsFromBackground();');
     expect(content).toContain("const asrKeyRequirement = getAsrApiKeyRequirement(appState.settings || {});");
-    expect(content).toContain("asrKeyRequirement.missing\n    ].join(\"|\");");
+    expect(content).toMatch(/asrKeyRequirement\.missing\r?\n    \]\.join\("\|"\);/);
     expect(content).toContain('const asrKeyRequirement = await refreshAsrSettingsFromBackground();');
     expect(sidepanel).toContain('if (nav.dataset.nav === "CC") await refreshAsrSettingsFromBackground();');
     expect(content).toContain('if (appState.activePage !== "settings") renderContent();');
@@ -755,12 +787,19 @@ describe("native side panel", () => {
   it("supports Xiaomi MiMo transcription and removes the generic custom ASR provider", () => {
     expect(background).toContain('mimoApiKey: ""');
     expect(background).toContain("mimoAsrModel: MIMO_ASR_MODEL");
+    expect(background).toContain('mimoTokenPlanRegion: "cn"');
+    expect(background).toContain('mimoTokenPlanRegionMode: "auto"');
+    expect(background).toContain("rememberMimoTokenPlanRegion");
     expect(background).toContain('["groq", "siliconflow", "mimo"].includes(requestedAsrProvider)');
     expect(background).toContain("subtitleSource = asrProvider");
     expect(background).toContain('provider: asrProvider');
     expect(background).toContain('asrProvider === "mimo" || audioBlob.size >= asrMaxAudioBytes');
     expect(background).toContain('provider: String(payload?.provider || "groq")');
     expect(content).toContain('renderSecretInput("settings-mimo-api-key"');
+    expect(content).toContain('id="settings-mimo-token-plan-region"');
+    expect(sidepanel).toContain('id="setting-mimo-token-plan-region"');
+    expect(content).toContain('value="auto"');
+    expect(sidepanel).toContain('value="auto"');
     expect(content).toContain('id="settings-mimo-asr-model"');
     expect(sidepanel).toContain('secretField("setting-mimo-key"');
     expect(sidepanel).toContain('id="setting-mimo-model"');

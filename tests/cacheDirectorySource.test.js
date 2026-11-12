@@ -126,6 +126,28 @@ describe("CID-scoped AI cache with legacy subtitle flow", () => {
     expect(contentSource).toContain("syncActiveCacheByBvid(incomingBvid).catch(() => {})");
   });
 
+  it("keeps single-part identity and subtitle cache reconciliation idempotent", () => {
+    const captureStart = backgroundSource.indexOf("async function handleSubtitleCaptured(");
+    const captureEnd = backgroundSource.indexOf("async function pushSubtitleSyncToTab(", captureStart);
+    const captureBlock = backgroundSource.slice(captureStart, captureEnd);
+
+    expect(captureBlock.match(/activePartCount: partCount/g)?.length).toBe(2);
+    expect(contentSource).toContain("const subtitleCacheSyncInFlight = new Map()");
+    expect(contentSource).toContain('detail: { reason: "sync_already_in_flight" }');
+    expect(contentSource).toContain("subtitleCacheSyncInFlight.delete(target)");
+  });
+
+  it("logs subtitle reads, applied rows, skips, and discarded cache identities", () => {
+    expect(backgroundSource).toContain('logBackground.info("subtitle_read_received"');
+    expect(backgroundSource).toContain('logBackground.info("subtitle_read_stored"');
+    expect(backgroundSource).toContain('logBackground.info("subtitle_sync_sent"');
+    expect(contentSource).toContain('logContent.info("subtitle_rows_applied"');
+    expect(contentSource).toContain('logContent.info("subtitle_rows_skipped"');
+    expect(contentSource).toContain('logContent.warn("subtitle_rows_discarded"');
+    expect(contentSource).toContain('logContent.warn("subtitle_cache_sync_discarded"');
+    expect(contentSource).toContain('logContent.warn("subtitle_sync_discarded"');
+  });
+
   it("restarts subtitle timing and DOM observation on inject route switches", () => {
     const routeSwitchStart = contentSource.indexOf('if (msgType === "BILI_ROUTE_SWITCH")');
     const routeSwitchEnd = contentSource.indexOf('if (msgType !== "BILI_SUBTITLE_DATA") return;', routeSwitchStart);

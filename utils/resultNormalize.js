@@ -189,3 +189,26 @@ export function normalizeRumors(value) {
         }))
     };
 }
+
+export function isValidRumorsResult(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    if (!Object.prototype.hasOwnProperty.call(value, "overall_score")
+        || !Object.prototype.hasOwnProperty.call(value, "overview")
+        || !Object.prototype.hasOwnProperty.call(value, "claims")) return false;
+    const score = Number(value.overall_score);
+    if (!Number.isFinite(score) || score < 0 || score > 100) return false;
+    if (typeof value.overview !== "string" || !value.overview.trim()) return false;
+    if (!Array.isArray(value.claims)) return false;
+    return value.claims.every((claim) => {
+        if (!claim || typeof claim !== "object" || Array.isArray(claim)) return false;
+        const claimText = String(claim.claim || claim.text || "").trim();
+        const verdict = claim.verdict;
+        const confidence = Number(claim.confidence);
+        const timestamp = Number(claim.timestamp_sec ?? claim.timestamp);
+        return !!claimText
+            && (typeof verdict === "boolean" || (typeof verdict === "string" && !!verdict.trim()))
+            && Number.isFinite(confidence) && confidence >= 0 && confidence <= 100
+            && typeof claim.analysis === "string"
+            && Number.isFinite(timestamp) && timestamp >= 0;
+    });
+}

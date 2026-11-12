@@ -17,7 +17,7 @@ describe("contentChat", () => {
       modelScopeModelLimit: 50,
       modelScopeUserRemaining: 1995,
       modelScopeUserLimit: 2000
-    })).toBe("用时 1.2s · Tokens 30 (In 10 / Out 20) · 模型剩余 5/50 · 账号剩余 1995/2000");
+    })).toBe("用时 1.2s · Tokens 30 (In 10 / Out 20)");
   });
 
   it("marks missing quota headers without faking remaining usage", () => {
@@ -26,7 +26,7 @@ describe("contentChat", () => {
       tokens: 30,
       provider: "modelscope",
       modelScopeModelLimit: 50
-    })).toBe("用时 1.2s · Tokens 30 · 模型剩余 官网未返回/50 · 账号剩余 官网未返回");
+    })).toBe("用时 1.2s · Tokens 30");
   });
 
   it("omits ModelScope quota text for non-ModelScope providers", () => {

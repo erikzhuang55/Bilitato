@@ -33,4 +33,12 @@ describe("ASR chunk audio transport", () => {
     expect(backgroundSource).toContain('action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_FINISH"');
     expect(offscreenSource).toContain('action === "OFFSCREEN_CHUNK_AUDIO_UPLOAD_APPEND"');
   });
+
+  it("waits for the offscreen receiver and shows a friendly load failure", () => {
+    expect(offscreenSource).toContain('action === "OFFSCREEN_PING"');
+    expect(offscreenSource).toContain('chrome.runtime.sendMessage({ action: "OFFSCREEN_READY" })');
+    expect(backgroundSource).toContain('msg?.action === "OFFSCREEN_READY"');
+    expect(backgroundSource).toContain("await waitForOffscreenReady()");
+    expect(backgroundSource).toContain('"音频处理组件加载失败，请刷新页面后重试"');
+  });
 });

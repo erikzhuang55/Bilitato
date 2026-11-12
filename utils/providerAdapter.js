@@ -1,16 +1,28 @@
 import { createAppError, createHttpError } from "./appError.js";
+import {
+    getMimoTokenPlanRegionCandidates,
+    isMimoTokenPlanKey,
+    normalizeMimoTokenPlanRegion,
+    normalizeMimoTokenPlanRegionMode,
+    shouldTryNextMimoTokenPlanRegion,
+    resolveMimoApiBaseUrl
+} from "./mimoAsr.js";
 
 export const PROVIDERS = {
     modelscope: {
         name: "ModelScope (魔搭)",
         baseUrl: "https://api-inference.modelscope.cn/v1/",
-        model: "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        model: "Qwen/Qwen3.8-Flash-Next",
         models: [
-            "Qwen/Qwen3-30B-A3B-Instruct-2507",
-            "Qwen/Qwen3-235B-A22B-Instruct-2507",
-            "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-            "Qwen/Qwen3-30B-A3B",
+            "Qwen/Qwen3.8-Flash-Next",
+            "Qwen/Qwen3.8-27B",
+            "Qwen/Qwen3.5-397B-A17B",
+            "Qwen/Qwen3.5-122B-A10B",
+            "Qwen/Qwen3.5-35B-A3B",
+            "Qwen/Qwen3.5-27B",
+            "deepseek-ai/DeepSeek-V4.1-Flash",
             "deepseek-ai/DeepSeek-V4-Pro",
+            "deepseek-ai/DeepSeek-V4-Pro-0813",
             "deepseek-ai/DeepSeek-V4-Flash-0731"
         ],
         headerKey: "Authorization",
@@ -20,7 +32,7 @@ export const PROVIDERS = {
     zhipu: {
         name: "智谱 AI",
         baseUrl: "https://open.bigmodel.cn/api/paas/v4/",
-        model: "glm-4-flash",
+        model: "glm-5-turbo",
         headerKey: "Authorization",
         tokenPrefix: "Bearer ",
         regUrl: "https://open.bigmodel.cn/usercenter/apikeys"
@@ -28,14 +40,14 @@ export const PROVIDERS = {
     gemini: {
         name: "Google Gemini",
         baseUrl: "https://generativelanguage.googleapis.com/v1beta/",
-        model: "gemini-2.0-flash",
+        model: "gemini-3.8-flash",
         type: "google",
         regUrl: "https://aistudio.google.com/apikey"
     },
     openai: {
         name: "OpenAI / 兼容",
         baseUrl: "https://api.openai.com/v1/",
-        model: "gpt-4o-mini",
+        model: "gpt-6.1-sol",
         headerKey: "Authorization",
         tokenPrefix: "Bearer ",
         regUrl: "https://platform.openai.com/api-keys"
@@ -51,7 +63,7 @@ export const PROVIDERS = {
     deepseek: {
         name: "DeepSeek",
         baseUrl: "https://api.deepseek.com/",
-        model: "deepseek-chat",
+        model: "deepseek-flash",
         headerKey: "Authorization",
         tokenPrefix: "Bearer ",
         regUrl: "https://platform.deepseek.com/api_keys"
@@ -59,7 +71,7 @@ export const PROVIDERS = {
     kimi: {
         name: "Moonshot (Kimi)",
         baseUrl: "https://api.moonshot.cn/v1/",
-        model: "moonshot-v1-8k",
+        model: "kimi-k3",
         headerKey: "Authorization",
         tokenPrefix: "Bearer ",
         regUrl: "https://platform.moonshot.cn/console/api-keys"
@@ -67,7 +79,7 @@ export const PROVIDERS = {
     mimo: {
         name: "小米 MiMo",
         baseUrl: "https://api.xiaomimimo.com/v1/",
-        model: "mimo-v2.5-pro",
+        model: "mimo-v2.6-flash",
         headerKey: "api-key",
         tokenPrefix: "",
         regUrl: "https://mimo.mi.com/platform"
@@ -75,7 +87,7 @@ export const PROVIDERS = {
     claude: {
         name: "Claude",
         baseUrl: "https://api.anthropic.com",
-        model: "claude-sonnet-4-6",
+        model: "claude-sonnet-5-5",
         type: "claude",
         regUrl: "https://console.anthropic.com/settings/keys"
     },
@@ -88,6 +100,114 @@ export const PROVIDERS = {
         regUrl: ""
     }
 };
+
+export const MODEL_CAPABILITY_RULES = Object.freeze([
+    { providers: ["openai"], pattern: /^gpt-(?:5|6)(?:[.-]|$)/i, parameterMode: "openai_reasoning", defaultEffort: "medium" },
+    { providers: ["deepseek"], pattern: /^deepseek-(?:flash|v4(?:[.-]pro)?(?:[.-]|$))/i, parameterMode: "openai_reasoning", defaultEffort: "high", thinkingControl: "thinking_type" },
+    { providers: ["gemini"], pattern: /^gemini-(?:2\.5|3(?:\.|-))/i, parameterMode: "gemini_thinking", defaultEffort: "medium" },
+    { providers: ["claude"], pattern: /^claude-(?:(?:sonnet|opus)-5-5|sonnet-4-6|opus-4-5)$/i, parameterMode: "claude_effort", defaultEffort: "medium" },
+    { providers: ["openrouter"], pattern: /^(?:openai\/gpt-(?:5|6)|deepseek\/|qwen\/qwen3|moonshotai\/kimi-k[23]|z-ai\/glm-5|anthropic\/claude-(?:sonnet|opus)-(?:5|4\.7))/i, parameterMode: "openrouter_reasoning", defaultEffort: "medium" },
+    { providers: ["kimi"], pattern: /^kimi-k3(?:[-.]|$)/i, parameterMode: "openai_reasoning", defaultEffort: "low" },
+    { providers: ["modelscope"], pattern: /^qwen\/qwen3\.(?:5|6|7|8)-/i, parameterMode: "provider_default", thinkingControl: "enable_thinking" },
+    { providers: ["modelscope"], pattern: /^deepseek-ai\/deepseek-v4(?:[.-]|$)/i, parameterMode: "provider_default", thinkingControl: "thinking_type" },
+    { providers: ["modelscope", "zhipu", "mimo"], pattern: /./, parameterMode: "provider_default" },
+    { providers: ["kimi"], pattern: /^(?:kimi-k|moonshot-v1)/i, parameterMode: "provider_default" },
+    { providers: ["openrouter"], pattern: /./, parameterMode: "provider_default" },
+    { providers: ["openai", "claude", "custom"], pattern: /./, parameterMode: "temperature" }
+]);
+
+export function getModelCapability(providerKey, model) {
+    const provider = String(providerKey || "").trim().toLowerCase();
+    const modelId = String(model || "").trim();
+    const rule = MODEL_CAPABILITY_RULES.find((item) => item.providers.includes(provider) && item.pattern.test(modelId));
+    return rule
+        ? { parameterMode: rule.parameterMode, defaultEffort: rule.defaultEffort || "", thinkingControl: rule.thinkingControl || "" }
+        : { parameterMode: "provider_default", defaultEffort: "", thinkingControl: "" };
+}
+
+function resolveReasoningEffort(config, capability) {
+    const configured = String(config?.reasoningEffort || "").trim().toLowerCase();
+    return ["none", "low", "medium", "high"].includes(configured)
+        ? configured
+        : capability.defaultEffort || "medium";
+}
+
+function usesReducedTaskReasoning(config = {}) {
+    return ["summary", "segments", "summary_segments_merged"].includes(String(config?.requestTask || "").trim());
+}
+
+function getRemoteRequestPolicy(config, providerKey, model) {
+    const policies = config?.requestPolicies || config?.remoteConfig?.requestPolicies;
+    if (!policies?.enabled || Number(policies?.schemaVersion || 0) !== 1 || !Array.isArray(policies.rules)) return null;
+    const provider = String(providerKey || "").trim().toLowerCase();
+    const task = String(config?.requestTask || config?.task || "").trim().toLowerCase();
+    return policies.rules.find((rule) => {
+        if (!rule || (rule.provider !== "*" && rule.provider !== provider) || !rule.tasks?.includes(task)) return false;
+        try {
+            return new RegExp(rule.modelPattern, "i").test(String(model || ""));
+        } catch {
+            return false;
+        }
+    }) || null;
+}
+
+function resolveRequestPolicy(config, providerKey, model) {
+    const localCapability = getModelCapability(providerKey, model);
+    const remoteRule = getRemoteRequestPolicy(config, providerKey, model);
+    if (!remoteRule) {
+        return { capability: localCapability, source: "local", ruleId: "", mode: "" };
+    }
+    const transport = String(remoteRule.transport || "provider_default");
+    const parameterModeByTransport = {
+        reasoning_effort: "openai_reasoning",
+        openrouter_reasoning: "openrouter_reasoning",
+        gemini_thinking: "gemini_thinking",
+        claude_effort: "claude_effort",
+    };
+    const thinkingControl = ["enable_thinking", "thinking_type", "chat_template_enable_thinking"].includes(transport)
+        ? transport
+        : "";
+    return {
+        capability: {
+            parameterMode: parameterModeByTransport[transport] || "provider_default",
+            defaultEffort: ["none", "low", "medium", "high"].includes(remoteRule.mode) ? remoteRule.mode : "",
+            thinkingControl,
+        },
+        source: "remote",
+        ruleId: String(remoteRule.id || ""),
+        mode: String(remoteRule.mode || "provider_default"),
+    };
+}
+
+function buildProviderRequestMetadata(config, requestBody = {}, messages = [], streaming = false, requestPolicy = {}) {
+    const thinkingDisabled = requestBody.thinking?.type === "disabled"
+        || requestBody.enable_thinking === false
+        || requestBody.chat_template_kwargs?.enable_thinking === false;
+    const reasoningEffort = String(requestBody.reasoning_effort || requestBody.reasoning?.effort || requestBody.output_config?.effort || requestBody.generationConfig?.thinkingConfig?.thinkingLevel || "");
+    const outputLimit = Number(requestBody.max_tokens || requestBody.max_completion_tokens || requestBody.generationConfig?.maxOutputTokens || 0);
+    const inputChars = (Array.isArray(messages) ? messages : []).reduce((sum, item) => (
+        sum + normalizeTextContent(item?.content).length
+    ), 0);
+    return {
+        request_task: String(config?.requestTask || ""),
+        stream_requested: !!streaming,
+        turn_count: Array.isArray(messages) ? messages.length : 0,
+        input_chars: inputChars,
+        output_limit: outputLimit,
+        parameter_names: Object.keys(requestBody).filter((key) => !["messages", "contents"].includes(key)).sort(),
+        sampling_temperature: Number.isFinite(Number(requestBody.temperature)) ? Number(requestBody.temperature) : undefined,
+        top_p: Number.isFinite(Number(requestBody.top_p)) ? Number(requestBody.top_p) : undefined,
+        top_k: Number.isFinite(Number(requestBody.top_k)) ? Number(requestBody.top_k) : undefined,
+        response_format_type: String(requestBody.response_format?.type || ""),
+        stream_usage_requested: requestBody.stream_options?.include_usage === true,
+        reasoning_policy: thinkingDisabled ? "thinking_disabled" : (reasoningEffort ? "reasoning_effort" : "provider_default"),
+        thinking_disabled: thinkingDisabled,
+        reasoning_effort: reasoningEffort,
+        reasoning_policy_source: String(requestPolicy?.source || "local"),
+        reasoning_policy_rule_id: String(requestPolicy?.ruleId || ""),
+        custom_protocol: String(config?.customProtocol || "")
+    };
+}
 
 function getKnownProviderModels(provider = {}) {
     return new Set([
@@ -210,7 +330,25 @@ function isQwenModel(model) {
 }
 
 function isDeepSeekV4Model(model) {
-    return /(?:^|\/)deepseek-v4(?:-|$)/i.test(String(model || "").trim());
+    return /(?:^|\/)(?:deepseek-v4(?:[.-]|$)|deepseek-flash$)/i.test(String(model || "").trim());
+}
+
+function isOpenAIModelSupportingNoReasoning(model) {
+    const normalized = String(model || "").trim().toLowerCase();
+    if (/(?:^|-)pro(?:-|$)/.test(normalized)) return false;
+    const match = normalized.match(/^gpt-(\d+)\.(\d+)(?:-|$)/);
+    if (!match) return false;
+    const major = Number(match[1]);
+    const minor = Number(match[2]);
+    return major > 5 || (major === 5 && minor >= 1);
+}
+
+function isModelScopeGlmThinkingModel(model) {
+    return /(?:^|\/)glm-(?:4\.(?:5|6|7)|5(?:\.|-|$))/i.test(String(model || "").trim());
+}
+
+function isMiMoModel(model) {
+    return /(?:^|\/)mimo-v2(?:\.|-|$)/i.test(String(model || "").trim());
 }
 
 function shouldUseJsonResponseFormat(messages) {
@@ -240,12 +378,6 @@ function shouldIncludeStreamUsage(providerKey, isCustom, protocol) {
 
 function isClaudeRequest(req) {
     return req?.provider?.type === "claude" || (req?.isCustom && req?.protocol === "claude");
-}
-
-function isOpenRouterProvider(providerKey, config, provider, baseUrl) {
-    const key = String(providerKey || config?.provider || "").toLowerCase();
-    const url = String(baseUrl || provider?.baseUrl || "").toLowerCase();
-    return key === "openrouter" || url.includes("openrouter.ai");
 }
 
 function normalizeTextContent(content) {
@@ -408,16 +540,19 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
         || PROVIDERS[config.provider]
         || PROVIDERS.modelscope
         || PROVIDERS.default;
-    const isCustom = (providerKey || config.provider) === "custom";
+    const resolvedProviderKey = providerKey || config.provider;
+    const isCustom = resolvedProviderKey === "custom";
     const protocol = String(config.customProtocol || "openai").toLowerCase() === "claude" ? "claude" : "openai";
+    const apiKey = config.apiKey || "";
     const baseUrl = isCustom
         ? String(config.customBaseUrl || "").trim()
-        : (provider.baseUrl || "").trim();
+        : resolvedProviderKey === "mimo" && isMimoTokenPlanKey(apiKey)
+            ? resolveMimoApiBaseUrl(apiKey, config.mimoTokenPlanRegion)
+            : (provider.baseUrl || "").trim();
     const { model } = resolveProviderScopedModel(providerKey || config.provider, config, {
         ...PROVIDERS,
         ...providerCatalog
     });
-    const apiKey = config.apiKey || "";
     if (!baseUrl) throw new Error("自定义 Provider 需要填写 Base URL");
     if (!model) throw new Error("请填写模型名称");
 
@@ -448,7 +583,16 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
             provider_name: provider.name,
             protocol,
             is_custom: isCustom,
-            url_host: safeUrlHost(finalUrl)
+            url_host: safeUrlHost(finalUrl),
+            credential_type: resolvedProviderKey === "mimo"
+                ? (isMimoTokenPlanKey(apiKey) ? "token_plan" : "standard")
+                : "provider_default",
+            token_plan_region: resolvedProviderKey === "mimo" && isMimoTokenPlanKey(apiKey)
+                ? normalizeMimoTokenPlanRegion(config.mimoTokenPlanRegion)
+                : "",
+            token_plan_region_mode: resolvedProviderKey === "mimo" && isMimoTokenPlanKey(apiKey)
+                ? normalizeMimoTokenPlanRegionMode(config.mimoTokenPlanRegionMode)
+                : ""
         }
     });
 
@@ -464,12 +608,27 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
     }
 
     const maxOutputTokens = resolveMaxOutputTokens(config);
+    const requestPolicy = resolveRequestPolicy(config, providerKey || config.provider, model);
+    const capability = requestPolicy.capability;
+    const reducedTaskReasoning = usesReducedTaskReasoning(config);
+    const remoteThinkingDisabled = requestPolicy.source === "remote" && requestPolicy.mode === "disabled";
+    const thinkingDisabled = remoteThinkingDisabled || (requestPolicy.source !== "remote" && reducedTaskReasoning && !!capability.thinkingControl);
+    const reasoningEffort = remoteThinkingDisabled && capability.parameterMode === "openai_reasoning"
+        ? "none"
+        : requestPolicy.source === "remote" && ["none", "low", "medium", "high"].includes(requestPolicy.mode)
+            ? (String(config?.requestTask || "").toLowerCase() === "chat" ? resolveReasoningEffort(config, capability) : requestPolicy.mode)
+            : reducedTaskReasoning && !thinkingDisabled
+        ? "low"
+        : resolveReasoningEffort(config, capability);
     let body = {};
     if (provider.type === "google") {
         body = {
             contents: [{ parts: [{ text: messages[messages.length-1].content }] }],
             generationConfig: { maxOutputTokens }
         };
+        if (capability.parameterMode === "gemini_thinking") {
+            body.generationConfig.thinkingConfig = { thinkingLevel: reasoningEffort };
+        }
         const urlObj = new URL(finalUrl);
         urlObj.searchParams.set('key', apiKey);
         if (streaming) urlObj.searchParams.set("alt", "sse");
@@ -480,6 +639,7 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
             model,
             headers,
             body,
+            requestPolicy,
             finalUrl: urlObj.toString()
         };
     } else if (provider.type === "claude" || (isCustom && protocol === "claude")) {
@@ -491,6 +651,11 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
                 content: String(item.content || "")
             }))
         };
+        if (capability.parameterMode === "claude_effort") {
+            body.output_config = { effort: reasoningEffort };
+        } else if (capability.parameterMode === "temperature") {
+            body.temperature = 0.3;
+        }
         if (streaming) body.stream = true;
         return {
             provider,
@@ -499,25 +664,54 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
             model,
             headers,
             body,
+            requestPolicy,
             finalUrl
         };
     } else {
         const qwenModel = isQwenModel(model);
         const jsonMode = shouldUseJsonResponseFormat(messages);
         const normalizedMessages = qwenModel && jsonMode ? appendJsonFormatHint(messages) : messages;
-        const isOpenRouter = isOpenRouterProvider(providerKey, config, provider, baseUrl);
         body = {
             model: model,
             messages: normalizedMessages,
-            temperature: 0.3,
             max_tokens: maxOutputTokens,
             stream: !!streaming
         };
-        if (isOpenRouter) {
-            body.reasoning = { effort: "none", exclude: true };
-        }
-        if (config?.deepSeekV4ThinkingDisabled === true && isDeepSeekV4Model(model)) {
+        if (thinkingDisabled && capability.thinkingControl === "enable_thinking") {
+            body.enable_thinking = false;
+        } else if (thinkingDisabled && capability.thinkingControl === "thinking_type") {
             body.thinking = { type: "disabled" };
+        } else if (thinkingDisabled && capability.thinkingControl === "chat_template_enable_thinking") {
+            body.chat_template_kwargs = { enable_thinking: false };
+        } else if (capability.parameterMode === "temperature") {
+            body.temperature = 0.3;
+        } else if (capability.parameterMode === "openai_reasoning") {
+            body.reasoning_effort = reasoningEffort;
+        } else if (capability.parameterMode === "openrouter_reasoning") {
+            body.reasoning = { effort: reasoningEffort, exclude: true };
+        }
+        if ((providerKey || config.provider) === "openai") {
+            body.max_completion_tokens = body.max_tokens;
+            delete body.max_tokens;
+        }
+        if (requestPolicy.source !== "remote" && config?.deepSeekV4ThinkingDisabled === true && isDeepSeekV4Model(model)) {
+            body.thinking = { type: "disabled" };
+            delete body.reasoning_effort;
+        }
+        const requestTask = String(config?.requestTask || config?.task || "").trim().toLowerCase();
+        const isStructuredTask = requestTask === "summary" || requestTask === "segments";
+        const normalizedProviderKey = String(providerKey || config?.provider || "").trim().toLowerCase();
+        if (requestPolicy.source !== "remote" && isMiMoModel(model) && isStructuredTask) {
+            body.thinking = { type: "disabled" };
+        }
+        if (requestPolicy.source !== "remote" && normalizedProviderKey === "openai" && isOpenAIModelSupportingNoReasoning(model) && isStructuredTask) {
+            body.reasoning_effort = "none";
+        }
+        if (requestPolicy.source !== "remote" && normalizedProviderKey === "modelscope" && isModelScopeGlmThinkingModel(model) && isStructuredTask) {
+            body.chat_template_kwargs = {
+                ...(body.chat_template_kwargs || {}),
+                enable_thinking: false
+            };
         }
         if (streaming && shouldIncludeStreamUsage(providerKey || config.provider, isCustom, protocol)) {
             body.stream_options = { include_usage: true };
@@ -529,16 +723,57 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
             model,
             headers,
             body,
+            requestPolicy,
             finalUrl
         };
     }
 }
 
-export async function callAI(providerKey, config, messages, signal) {
+export async function callAI(providerKey, config, messages, signal, callbacks = {}) {
+    const resolvedProviderKey = providerKey || config?.provider;
+    if (resolvedProviderKey === "mimo"
+        && isMimoTokenPlanKey(config?.apiKey)
+        && normalizeMimoTokenPlanRegionMode(config?.mimoTokenPlanRegionMode) === "auto"
+        && config?.mimoTokenPlanRegionProbe !== true) {
+        const regions = getMimoTokenPlanRegionCandidates(
+            config.apiKey,
+            config.mimoTokenPlanRegion,
+            config.mimoTokenPlanRegionMode
+        );
+        let lastError = null;
+        for (let index = 0; index < regions.length; index += 1) {
+            const region = regions[index];
+            try {
+                const result = await callAI(providerKey, {
+                    ...config,
+                    mimoTokenPlanRegion: region,
+                    mimoTokenPlanRegionMode: "manual",
+                    mimoTokenPlanRegionProbe: true
+                }, messages, signal, callbacks);
+                await Promise.resolve(callbacks?.onMimoTokenPlanRegionResolved?.(region)).catch(() => {});
+                return result;
+            } catch (error) {
+                lastError = error;
+                const hasNext = index < regions.length - 1;
+                if (!hasNext || !shouldTryNextMimoTokenPlanRegion(error?.status, error?.message)) throw error;
+                getProviderLogger()?.warn("mimo_token_plan_region_retry", {
+                    task: "ai",
+                    provider: "mimo",
+                    model: config?.model || "",
+                    status: Number(error?.status || 0) || undefined,
+                    detail: { failed_region: region, next_region: regions[index + 1] }
+                });
+            }
+        }
+        throw lastError;
+    }
     const req = resolveProviderRequest(providerKey, config, messages, false);
     const requestBody = req.body || {};
     const retryDelaysMs = getProviderRetryDelays(config);
     const maxAttempts = retryDelaysMs.length + 1;
+    if (typeof callbacks?.onRequestMetadata === "function") {
+        callbacks.onRequestMetadata(buildProviderRequestMetadata(config, requestBody, messages, false, req.requestPolicy));
+    }
     getProviderLogger()?.debug("provider_request_body_built", {
         task: "ai",
         provider: providerKey,
@@ -547,7 +782,11 @@ export async function callAI(providerKey, config, messages, signal) {
             message_count: Array.isArray(requestBody.messages) ? requestBody.messages.length : 0,
             max_tokens: Number(requestBody.max_tokens || 0),
             stream: !!requestBody.stream,
-            thinking_disabled: requestBody.thinking?.type === "disabled"
+            request_task: String(config?.requestTask || ""),
+            thinking_disabled: requestBody.thinking?.type === "disabled" || requestBody.enable_thinking === false,
+            reasoning_effort: String(requestBody.reasoning_effort || requestBody.reasoning?.effort || requestBody.output_config?.effort || requestBody.generationConfig?.thinkingConfig?.thinkingLevel || ""),
+            reasoning_policy_source: String(req.requestPolicy?.source || "local"),
+            reasoning_policy_rule_id: String(req.requestPolicy?.ruleId || "")
         }
     });
     let res;
@@ -594,6 +833,7 @@ export async function callAI(providerKey, config, messages, signal) {
             await sleepWithSignal(delayMs, signal);
         }
     }
+    if (typeof callbacks?.onResponseStart === "function") callbacks.onResponseStart();
     if (!res.ok) {
         const errText = await res.text();
         if (req.isCustom && (getResponseContentType(res).includes("text/html") || looksLikeHtmlResponse(errText))) {
@@ -642,9 +882,49 @@ export async function callAI(providerKey, config, messages, signal) {
     };
 }
 
-export async function callAIStream(providerKey, config, messages, signal, onDelta) {
+export async function callAIStream(providerKey, config, messages, signal, onDelta, callbacks = {}) {
+    const resolvedProviderKey = providerKey || config?.provider;
+    if (resolvedProviderKey === "mimo"
+        && isMimoTokenPlanKey(config?.apiKey)
+        && normalizeMimoTokenPlanRegionMode(config?.mimoTokenPlanRegionMode) === "auto"
+        && config?.mimoTokenPlanRegionProbe !== true) {
+        const regions = getMimoTokenPlanRegionCandidates(
+            config.apiKey,
+            config.mimoTokenPlanRegion,
+            config.mimoTokenPlanRegionMode
+        );
+        let lastError = null;
+        for (let index = 0; index < regions.length; index += 1) {
+            const region = regions[index];
+            try {
+                const result = await callAIStream(providerKey, {
+                    ...config,
+                    mimoTokenPlanRegion: region,
+                    mimoTokenPlanRegionMode: "manual",
+                    mimoTokenPlanRegionProbe: true
+                }, messages, signal, onDelta, callbacks);
+                await Promise.resolve(callbacks?.onMimoTokenPlanRegionResolved?.(region)).catch(() => {});
+                return result;
+            } catch (error) {
+                lastError = error;
+                const hasNext = index < regions.length - 1;
+                if (!hasNext || !shouldTryNextMimoTokenPlanRegion(error?.status, error?.message)) throw error;
+                getProviderLogger()?.warn("mimo_token_plan_region_retry", {
+                    task: "ai",
+                    provider: "mimo",
+                    model: config?.model || "",
+                    status: Number(error?.status || 0) || undefined,
+                    detail: { failed_region: region, next_region: regions[index + 1] }
+                });
+            }
+        }
+        throw lastError;
+    }
     const req = resolveProviderRequest(providerKey, config, messages, true);
     const requestBody = req.body || {};
+    if (typeof callbacks?.onRequestMetadata === "function") {
+        callbacks.onRequestMetadata(buildProviderRequestMetadata(config, requestBody, messages, true, req.requestPolicy));
+    }
     getProviderLogger()?.debug("provider_request_body_built", {
         task: "ai",
         provider: providerKey,
@@ -653,7 +933,9 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
             message_count: Array.isArray(requestBody.messages) ? requestBody.messages.length : 0,
             max_tokens: Number(requestBody.max_tokens || 0),
             stream: !!requestBody.stream,
-            thinking_disabled: requestBody.thinking?.type === "disabled"
+            request_task: String(config?.requestTask || ""),
+            thinking_disabled: requestBody.thinking?.type === "disabled" || requestBody.enable_thinking === false,
+            reasoning_effort: String(requestBody.reasoning_effort || requestBody.reasoning?.effort || requestBody.output_config?.effort || requestBody.generationConfig?.thinkingConfig?.thinkingLevel || "")
         }
     });
     let res;
@@ -680,6 +962,7 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
             requestPhase: "initial_fetch"
         });
     }
+    if (typeof callbacks?.onResponseHeaders === "function") callbacks.onResponseHeaders();
     if (!res.ok) {
         const errText = await res.text();
         if (req.isCustom && (getResponseContentType(res).includes("text/html") || looksLikeHtmlResponse(errText))) {
@@ -724,6 +1007,12 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
     let finishReason = "";
     let choiceCount = 0;
     let reasoningChars = 0;
+    let firstStreamEventReceived = false;
+    const notifyFirstStreamEvent = () => {
+        if (firstStreamEventReceived) return;
+        firstStreamEventReceived = true;
+        if (typeof callbacks?.onFirstStreamEvent === "function") callbacks.onFirstStreamEvent();
+    };
     const appendRawResponse = (value) => {
         if (rawResponse.length >= MAX_PROVIDER_RESPONSE_DEBUG_CHARS) return;
         const next = `${rawResponse ? "\n" : ""}${String(value || "")}`;
@@ -738,6 +1027,7 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
     const consumeOpenAISsePart = (part) => {
         for (const dataPart of getSseDataPayloads(part)) {
             if (!dataPart || dataPart === "[DONE]") continue;
+            notifyFirstStreamEvent();
             let parsed;
             try {
                 parsed = JSON.parse(dataPart);
@@ -780,6 +1070,7 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
     const consumeGeminiSsePart = (part) => {
         for (const dataPart of getSseDataPayloads(part)) {
             if (!dataPart || dataPart === "[DONE]") continue;
+            notifyFirstStreamEvent();
             let parsed;
             try {
                 parsed = JSON.parse(dataPart);
@@ -809,6 +1100,7 @@ export async function callAIStream(providerKey, config, messages, signal, onDelt
             if (value.startsWith("data:")) event.data = `${event.data || ""}${value.slice(5).trim()}`;
         });
         if (!event.data || event.data === "[DONE]") return;
+        notifyFirstStreamEvent();
         let parsed;
         try {
             parsed = JSON.parse(event.data);

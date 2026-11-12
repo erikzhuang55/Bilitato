@@ -55,4 +55,20 @@ describe("summary streaming performance", () => {
     expect(background).toContain('statusMap[task] = "done"');
     expect(background).toContain("await flushTabStateNow(tabId)");
   });
+
+  it("validates a complete quality-mode segment response before honoring truncation signals", () => {
+    const qualityStart = background.indexOf("async function runSummarySegmentsInQuality");
+    const qualityEnd = background.indexOf("async function runSummarySegmentsInEfficiency", qualityStart);
+    const qualitySource = background.slice(qualityStart, qualityEnd);
+    const parseIndex = qualitySource.indexOf("const parsed = parseSegmentsJSON(aiRes.text, settings)");
+    const normalizeIndex = qualitySource.indexOf("const normalized = normalizeSegments(parsed, cache", parseIndex);
+    const coverageIndex = qualitySource.indexOf("hasCompleteValidatedSegments(parsed, normalized, cache)", normalizeIndex);
+    const truncationIndex = qualitySource.indexOf("isLikelyTruncatedSegmentOutput(aiRes.text, aiRes.metrics, aiRes.responseMeta)", coverageIndex);
+
+    expect(parseIndex).toBeGreaterThan(-1);
+    expect(normalizeIndex).toBeGreaterThan(parseIndex);
+    expect(coverageIndex).toBeGreaterThan(normalizeIndex);
+    expect(truncationIndex).toBeGreaterThan(coverageIndex);
+    expect(qualitySource).toContain('"segments_complete_despite_truncation_signal"');
+  });
 });

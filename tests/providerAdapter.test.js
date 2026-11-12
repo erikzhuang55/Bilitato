@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { callAI, callAIStream, resolveProviderScopedModel } from "../utils/providerAdapter.js";
+import { callAI, callAIStream, getModelCapability, resolveProviderScopedModel } from "../utils/providerAdapter.js";
 
 function mockJsonResponse(body, ok = true, status = 200) {
   return {
@@ -39,8 +39,8 @@ describe("providerAdapter", () => {
       }
     });
 
-    expect(result.model).toBe("gemini-2.0-flash");
-    expect(result.providerModels.gemini).toBe("gemini-2.0-flash");
+    expect(result.model).toBe("gemini-3.8-flash");
+    expect(result.providerModels.gemini).toBe("gemini-3.8-flash");
     expect(result.repaired).toBe(true);
   });
 
@@ -57,7 +57,7 @@ describe("providerAdapter", () => {
       providerModels: { modelscope: "Qwen/Qwen3-30B-A3B-Instruct-2507" }
     }, [{ role: "user", content: "test" }]);
 
-    expect(fetchMock.mock.calls[0][0]).toContain("/models/gemini-2.0-flash:generateContent");
+    expect(fetchMock.mock.calls[0][0]).toContain("/models/gemini-3.8-flash:generateContent");
   });
 
   it("preserves an unknown custom model for a built-in provider", () => {
@@ -109,9 +109,26 @@ describe("providerAdapter", () => {
     expect(JSON.parse(init.body)).toMatchObject({
       model: "gpt-test",
       messages: [{ role: "user", content: "hello" }],
-      max_tokens: 4096,
+      max_completion_tokens: 4096,
+      temperature: 0.3,
       stream: false
     });
+  });
+
+  it("reports when a non-streaming response starts", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "完成" } }]
+    }));
+    const onResponseStart = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("modelscope", {
+      provider: "modelscope",
+      apiKey: "ms-test",
+      model: "Qwen/Qwen3.5-35B-A3B"
+    }, [{ role: "user", content: "生成分段" }], undefined, { onResponseStart });
+
+    expect(onResponseStart).toHaveBeenCalledTimes(1);
   });
 
   it("uses a remotely supplied provider catalog for requests", async () => {
@@ -154,7 +171,7 @@ describe("providerAdapter", () => {
     }, [{ role: "user", content: "生成分段" }]);
 
     const [, init] = fetchMock.mock.calls[0];
-    expect(JSON.parse(init.body).max_tokens).toBe(8192);
+    expect(JSON.parse(init.body).max_completion_tokens).toBe(8192);
   });
 
   it("disables thinking only for an explicitly retried DeepSeek V4 request", async () => {
@@ -175,13 +192,19 @@ describe("providerAdapter", () => {
     }, [{ role: "user", content: "生成分段" }]);
     await callAI("modelscope", {
       ...baseConfig,
+      model: "deepseek-ai/DeepSeek-V4.1-Flash",
+      deepSeekV4ThinkingDisabled: true
+    }, [{ role: "user", content: "生成分段" }]);
+    await callAI("modelscope", {
+      ...baseConfig,
       model: "Qwen/Qwen3-30B-A3B-Instruct-2507",
       deepSeekV4ThinkingDisabled: true
     }, [{ role: "user", content: "生成分段" }]);
 
     expect(JSON.parse(fetchMock.mock.calls[0][1].body).thinking).toBeUndefined();
     expect(JSON.parse(fetchMock.mock.calls[1][1].body).thinking).toEqual({ type: "disabled" });
-    expect(JSON.parse(fetchMock.mock.calls[2][1].body).thinking).toBeUndefined();
+    expect(JSON.parse(fetchMock.mock.calls[2][1].body).thinking).toEqual({ type: "disabled" });
+    expect(JSON.parse(fetchMock.mock.calls[3][1].body).thinking).toBeUndefined();
   });
 
   it("keeps the raw provider response when OpenAI-compatible content is empty", async () => {
@@ -281,9 +304,222 @@ describe("providerAdapter", () => {
     expect(JSON.parse(init.body)).toMatchObject({
       model: "openrouter/auto",
       messages: [{ role: "user", content: "hello" }],
-      stream: false,
-      reasoning: { effort: "none", exclude: true }
+      stream: false
     });
+    expect(JSON.parse(init.body).reasoning).toBeUndefined();
+    expect(JSON.parse(init.body).temperature).toBeUndefined();
+  });
+
+  it("uses reasoning effort instead of temperature for current OpenAI models", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "完成" } }]
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("openai", {
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-6.1-sol"
+    }, [{ role: "user", content: "hello" }]);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.reasoning_effort).toBe("medium");
+    expect(body.temperature).toBeUndefined();
+    expect(body.max_completion_tokens).toBe(4096);
+    expect(body.max_tokens).toBeUndefined();
+  });
+
+  it("applies a matching remote request policy and logs its source", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "完成" } }]
+    }));
+    const metadata = [];
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("modelscope", {
+      provider: "modelscope",
+      apiKey: "ms-key",
+      model: "Qwen/Qwen3.8-Flash-Next",
+      requestTask: "summary",
+      remoteConfig: {
+        requestPolicies: {
+          schemaVersion: 1,
+          enabled: true,
+          rules: [{
+            id: "qwen-summary-off",
+            provider: "modelscope",
+            modelPattern: "^Qwen/Qwen3\\.",
+            tasks: ["summary"],
+            mode: "disabled",
+            transport: "enable_thinking"
+          }]
+        }
+      }
+    }, [{ role: "user", content: "总结" }], undefined, {
+      onRequestMetadata: (value) => metadata.push(value)
+    });
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).enable_thinking).toBe(false);
+    expect(metadata[0]).toMatchObject({
+      reasoning_policy_source: "remote",
+      reasoning_policy_rule_id: "qwen-summary-off",
+      thinking_disabled: true
+    });
+  });
+
+  it("uses the explicit chat reasoning effort without changing structured task defaults", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "完成" } }]
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("openai", {
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-6.1-sol",
+      requestTask: "chat",
+      reasoningEffort: "high"
+    }, [{ role: "user", content: "聊天" }]);
+
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body).reasoning_effort).toBe("high");
+  });
+
+  it("maintains explicit parameter modes for representative model families", () => {
+    expect(getModelCapability("openai", "gpt-5.6").parameterMode).toBe("openai_reasoning");
+    expect(getModelCapability("openai", "gpt-4o").parameterMode).toBe("temperature");
+    expect(getModelCapability("deepseek", "deepseek-flash")).toMatchObject({
+      parameterMode: "openai_reasoning",
+      defaultEffort: "high"
+    });
+    expect(getModelCapability("kimi", "kimi-k3")).toMatchObject({
+      parameterMode: "openai_reasoning",
+      defaultEffort: "low"
+    });
+    expect(getModelCapability("kimi", "kimi-k2.6").parameterMode).toBe("provider_default");
+    expect(getModelCapability("modelscope", "Qwen/Qwen3.8-Flash-Next")).toMatchObject({
+      parameterMode: "provider_default",
+      thinkingControl: "enable_thinking"
+    });
+    expect(getModelCapability("modelscope", "deepseek-ai/DeepSeek-V4.1-Flash").thinkingControl).toBe("thinking_type");
+    expect(getModelCapability("mimo", "mimo-v2.6-pro").thinkingControl).toBe("");
+    expect(getModelCapability("openrouter", "openrouter/auto").parameterMode).toBe("provider_default");
+    expect(getModelCapability("claude", "claude-sonnet-5-5").parameterMode).toBe("claude_effort");
+  });
+
+  it("sets Gemini thinking level without a sampling temperature", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      candidates: [{ content: { parts: [{ text: "完成" }] } }]
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("gemini", {
+      provider: "gemini",
+      apiKey: "gemini-key",
+      model: "gemini-3.8-flash"
+    }, [{ role: "user", content: "hello" }]);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.generationConfig).toEqual({
+      maxOutputTokens: 4096,
+      thinkingConfig: { thinkingLevel: "medium" }
+    });
+    expect(body.generationConfig.temperature).toBeUndefined();
+  });
+
+  it("uses low reasoning effort for Kimi K3", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "完成" } }]
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("kimi", {
+      provider: "kimi",
+      apiKey: "kimi-key",
+      model: "kimi-k3"
+    }, [{ role: "user", content: "hello" }]);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.reasoning_effort).toBe("low");
+    expect(body.temperature).toBeUndefined();
+  });
+
+  it("reduces reasoning only for summary and segment tasks when the model supports it", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "完成" } }]
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("modelscope", {
+      provider: "modelscope",
+      apiKey: "ms-key",
+      model: "Qwen/Qwen3.8-Flash-Next",
+      requestTask: "summary"
+    }, [{ role: "user", content: "总结" }]);
+    await callAI("deepseek", {
+      provider: "deepseek",
+      apiKey: "ds-key",
+      model: "deepseek-v4-pro",
+      requestTask: "segments"
+    }, [{ role: "user", content: "分段" }]);
+    await callAI("openai", {
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-6.1-sol",
+      requestTask: "summary"
+    }, [{ role: "user", content: "总结" }]);
+    await callAI("mimo", {
+      provider: "mimo",
+      apiKey: "mimo-key",
+      model: "mimo-v2.6-pro",
+      requestTask: "summary"
+    }, [{ role: "user", content: "总结" }]);
+    await callAI("openai", {
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-6.1-sol",
+      requestTask: "chat"
+    }, [{ role: "user", content: "聊天" }]);
+
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(call[1].body));
+    expect(bodies[0].enable_thinking).toBe(false);
+    expect(bodies[0].reasoning_effort).toBeUndefined();
+    expect(bodies[1].thinking).toEqual({ type: "disabled" });
+    expect(bodies[1].reasoning_effort).toBeUndefined();
+    expect(bodies[2].reasoning_effort).toBe("none");
+    expect(bodies[3].thinking).toEqual({ type: "disabled" });
+    expect(bodies[3].reasoning_effort).toBeUndefined();
+    expect(bodies[4].reasoning_effort).toBe("medium");
+  });
+
+  it("reports safe request metadata without exposing request text", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "完成" } }]
+    }));
+    const onRequestMetadata = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("modelscope", {
+      provider: "modelscope",
+      apiKey: "ms-key",
+      model: "Qwen/Qwen3.8-Flash-Next",
+      requestTask: "summary",
+      maxOutputTokens: 2048
+    }, [{ role: "user", content: "这是不能写入日志的总结原文" }], undefined, { onRequestMetadata });
+
+    expect(onRequestMetadata).toHaveBeenCalledTimes(1);
+    const metadata = onRequestMetadata.mock.calls[0][0];
+    expect(metadata).toMatchObject({
+      request_task: "summary",
+      stream_requested: false,
+      turn_count: 1,
+      input_chars: 13,
+      output_limit: 2048,
+      reasoning_policy: "thinking_disabled",
+      thinking_disabled: true,
+      reasoning_effort: ""
+    });
+    expect(metadata.parameter_names).toContain("enable_thinking");
+    expect(JSON.stringify(metadata)).not.toContain("不能写入日志");
   });
 
   it("builds Gemini generateContent requests with API key in the URL", async () => {
@@ -384,6 +620,7 @@ describe("providerAdapter", () => {
     expect(JSON.parse(init.body)).toMatchObject({
       model: "claude-sonnet-4-6",
       max_tokens: 4096,
+      output_config: { effort: "medium" },
       messages: [{ role: "user", content: "总结" }]
     });
   });
@@ -398,7 +635,7 @@ describe("providerAdapter", () => {
     const result = await callAI("mimo", {
       provider: "mimo",
       apiKey: "mimo-key",
-      model: "mimo-v2.5-pro"
+      model: "mimo-v2.6-pro"
     }, [{ role: "user", content: "总结" }]);
 
     expect(result.text).toBe("MiMo 返回");
@@ -407,10 +644,94 @@ describe("providerAdapter", () => {
     expect(init.headers["api-key"]).toBe("mimo-key");
     expect(init.headers.Authorization).toBeUndefined();
     expect(JSON.parse(init.body)).toMatchObject({
-      model: "mimo-v2.5-pro",
+      model: "mimo-v2.6-pro",
       messages: [{ role: "user", content: "总结" }],
       stream: false
     });
+    expect(JSON.parse(init.body).temperature).toBeUndefined();
+  });
+
+  it("routes Xiaomi MiMo Token Plan keys to the selected regional endpoint", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "Token Plan 返回" } }]
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("mimo", {
+      provider: "mimo",
+      apiKey: "tp-test",
+      model: "mimo-v2.6-pro",
+      mimoTokenPlanRegion: "sgp"
+    }, [{ role: "user", content: "总结" }]);
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://token-plan-sgp.xiaomimimo.com/v1/chat/completions");
+    expect(init.headers["api-key"]).toBe("tp-test");
+    expect(init.headers.Authorization).toBeUndefined();
+  });
+
+  it("auto-detects and remembers the working Xiaomi MiMo Token Plan region", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mockJsonResponse({ error: "unauthorized" }, false, 401))
+      .mockResolvedValueOnce(mockJsonResponse({ choices: [{ message: { content: "新加坡可用" } }] }));
+    const onRegionResolved = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAI("mimo", {
+      provider: "mimo",
+      apiKey: "tp-test",
+      model: "mimo-v2.6-pro",
+      mimoTokenPlanRegion: "cn",
+      mimoTokenPlanRegionMode: "auto"
+    }, [{ role: "user", content: "总结" }], undefined, {
+      onMimoTokenPlanRegionResolved: onRegionResolved
+    });
+
+    expect(result.text).toBe("新加坡可用");
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://token-plan-cn.xiaomimimo.com/v1/chat/completions",
+      "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions"
+    ]);
+    expect(onRegionResolved).toHaveBeenCalledWith("sgp");
+  });
+
+  it("respects manual Xiaomi MiMo Token Plan region selection", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({ error: "unauthorized" }, false, 401));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(callAI("mimo", {
+      provider: "mimo",
+      apiKey: "tp-test",
+      model: "mimo-v2.6-pro",
+      mimoTokenPlanRegion: "ams",
+      mimoTokenPlanRegionMode: "manual"
+    }, [{ role: "user", content: "总结" }])).rejects.toMatchObject({ status: 401 });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://token-plan-ams.xiaomimimo.com/v1/chat/completions");
+  });
+
+  it("auto-detects Token Plan region before streaming content", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(mockJsonResponse({ error: "forbidden" }, false, 403))
+      .mockResolvedValueOnce(mockJsonResponse({ choices: [{ message: { content: "流式回退成功" } }] }));
+    const onDelta = vi.fn();
+    const onRegionResolved = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await callAIStream("mimo", {
+      provider: "mimo",
+      apiKey: "ttp-test",
+      model: "mimo-v2.6-pro",
+      mimoTokenPlanRegion: "cn",
+      mimoTokenPlanRegionMode: "auto"
+    }, [{ role: "user", content: "聊天" }], undefined, onDelta, {
+      onMimoTokenPlanRegionResolved: onRegionResolved
+    });
+
+    expect(result.text).toBe("流式回退成功");
+    expect(onDelta).toHaveBeenCalledWith("流式回退成功");
+    expect(onRegionResolved).toHaveBeenCalledWith("sgp");
   });
 
   it("falls back to non-streaming calls for Gemini streaming requests", async () => {
@@ -580,15 +901,21 @@ describe("providerAdapter", () => {
       body: stream
     }));
     const onDelta = vi.fn();
+    const callbacks = {
+      onResponseHeaders: vi.fn(),
+      onFirstStreamEvent: vi.fn()
+    };
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await callAIStream("openai", {
       provider: "openai",
       apiKey: "sk-test",
       model: "gpt-test"
-    }, [{ role: "user", content: "hello" }], undefined, onDelta);
+    }, [{ role: "user", content: "hello" }], undefined, onDelta, callbacks);
 
     expect(result.text).toBe("正式总结");
+    expect(callbacks.onResponseHeaders).toHaveBeenCalledTimes(1);
+    expect(callbacks.onFirstStreamEvent).toHaveBeenCalledTimes(1);
     expect(onDelta).toHaveBeenCalledTimes(1);
     expect(onDelta).toHaveBeenCalledWith("正式总结");
     expect(result.responseMeta.reasoningChars).toBe(6);

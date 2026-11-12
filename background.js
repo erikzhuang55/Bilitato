@@ -41,8 +41,16 @@ import {
 } from "./utils/asrChunking.js";
 import { getAsrAudioCandidateUrls } from "./utils/asrAudioCandidates.js";
 import {
-    MIMO_ASR_MODEL
+    MIMO_ASR_MODEL,
+    isMimoTokenPlanKey,
+    normalizeMimoTokenPlanRegion,
+    normalizeMimoTokenPlanRegionMode,
+    resolveMimoApiBaseUrl
 } from "./utils/mimoAsr.js";
+import {
+    isOffscreenReceiverUnavailableError,
+    sendMessageWithReceiverRetry
+} from "./utils/offscreenMessaging.js";
 import {
     DEFAULT_PROMPT_SETTINGS,
     buildCompactSegmentsPrompt,
@@ -52,7 +60,7 @@ import {
     extractProtocolSection,
     normalizePromptSettings
 } from "./utils/promptBuilder.js";
-import { normalizeRumors as normalizeRumorsResult, normalizeSegments as normalizeSegmentsResult } from "./utils/resultNormalize.js";
+import { isValidRumorsResult, normalizeRumors as normalizeRumorsResult, normalizeSegments as normalizeSegmentsResult } from "./utils/resultNormalize.js";
 import { reportToSentry } from "./utils/sentryReporter.js";
 import { createAppError, createHttpError, serializeAppError } from "./utils/appError.js";
 import { isSupabaseEnabled, supabaseRpc, supabaseSelect, supabaseWrite } from "./utils/supabaseClient.js";
@@ -81,6 +89,7 @@ const ASR_PAGE_FETCH_MAX_CHUNKS = 512;
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const FIREFOX_OFFSCREEN_IFRAME_ID = "bilitato-firefox-offscreen-document";
 let offscreenDocumentPromise = null;
+let offscreenReady = false;
 let firefoxActionClickRegistered = false;
 const MAX_ASR_BOUNDARY_DIAGNOSTICS = 8;
 const USAGE_EVENT_SESSION_ID = createUsageEventSessionId();
@@ -319,7 +328,10 @@ function buildProviderRequestTelemetry(settings, timeoutMs, options = {}) {
         active_count_at_start: Number(options.activeCountAtStart || 0),
         queue_wait_ms: Number(options.queueWaitMs || 0) || 0,
         provider_request_ms: Number(options.providerRequestMs || 0) || undefined,
+        response_headers_ms: Number(options.responseHeadersMs || 0) || undefined,
+        first_stream_event_ms: Number(options.firstStreamEventMs || 0) || undefined,
         first_response_ms: Number(options.firstResponseMs || 0) || undefined,
+        first_visible_text_ms: Number(options.firstVisibleTextMs || options.firstResponseMs || 0) || undefined,
         timeout_phase: String(options.timeoutPhase || ""),
         first_response_received: options.firstResponseReceived === undefined ? undefined : !!options.firstResponseReceived
     };
@@ -1106,6 +1118,7 @@ async function submitFeedbackFromContent(msg, sender) {
 
 const MAX_GLOBAL_CONCURRENCY = 1;
 const TASK_TIMEOUT_MS = 60000;
+const SEGMENTS_RESPONSE_TIMEOUT_MS = 90000;
 const ASR_TASK_TIMEOUT_MS = 120000;
 const EFFICIENCY_TASK_TIMEOUT_MS = 120000;
 const EXPANDED_SEGMENTS_MAX_OUTPUT_TOKENS = 8192;
@@ -1116,8 +1129,14 @@ const GROQ_MAX_AUDIO_BYTES = 24 * 1024 * 1024;
 const SILICONFLOW_MAX_AUDIO_BYTES = 50 * 1024 * 1024;
 const MIMO_MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const GROQ_CONNECTIVITY_TIMEOUT_MS = 6000;
-const DOWNLOAD_HEADER_RULE_ID = 910001;
-const pendingDownloadFilenames = new Map();
+const LEGACY_DOWNLOAD_HEADER_RULE_ID = 910001;
+const DOWNLOAD_HEADER_RULE_ID_START = 911001;
+const DOWNLOAD_HEADER_RULE_ID_END = 919999;
+const DOWNLOAD_HEADER_RULE_STORAGE_KEY = "activeDownloadHeaderRules";
+const ownedDownloadIds = new Set();
+const downloadHeaderRuleIds = new Map();
+let downloadHeaderRulesHydrated = false;
+let downloadHeaderRuleMutation = Promise.resolve();
 const BILI_PLAYURL_API = "https://api.bilibili.com/x/player/playurl";
 const SUPABASE_DEFAULT_VIDEO_CACHE_TABLE = "video_cache";
 const SUPABASE_DEFAULT_FEEDBACK_TABLE = "feedback";
@@ -1145,7 +1164,7 @@ const CLOUD_TASK_FIELD_MAP = {
 };
 const DEFAULT_SETTINGS = {
     provider: "modelscope",
-    model: "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    model: "Qwen/Qwen3.8-Flash-Next",
     apiKey: "",
     providerApiKeys: {},
     providerModels: {},
@@ -1160,6 +1179,8 @@ const DEFAULT_SETTINGS = {
     siliconFlowAsrModel: "FunAudioLLM/SenseVoiceSmall",
     mimoApiKey: "",
     mimoAsrModel: MIMO_ASR_MODEL,
+    mimoTokenPlanRegion: "cn",
+    mimoTokenPlanRegionMode: "auto",
     supabaseUrl: "https://qdksdauixnbgrgkilgac.supabase.co",
     supabaseAnonKey: "sb_publishable_55zwbZc_sQ0k4EDJBgpxsQ_1F86l1vT",
     supabaseVideoCacheTable: SUPABASE_DEFAULT_VIDEO_CACHE_TABLE,
@@ -1173,18 +1194,32 @@ const DEFAULT_SETTINGS = {
     debugMode: false,
     sentryEnabled: true,
     sentryDsn: DEFAULT_SENTRY_DSN,
-    disableCloudCacheRead: false
+    disableCloudCacheRead: false,
+    chatReasoningEffort: "auto"
 };
-const LEGACY_MODELSCOPE_MODELS = new Set([
-    "moonshotai/Kimi-K2.5",
-    "moonshotai/Kimi-K2.6",
-    "MiniMax/MiniMax-M2.5",
-    "ZhipuAI/GLM-5.1",
-    "ZhipuAI/GLM-4.7-Flash",
-    "Qwen/Qwen3.5-27B",
-    "Qwen/Qwen2.5-72B-Instruct",
-    "deepseek-ai/DeepSeek-V4-Flash"
+const LEGACY_MODELSCOPE_MODELS = new Map([
+    ["moonshotai/kimi-k2.5", "Qwen/Qwen3.8-Flash-Next"],
+    ["moonshotai/kimi-k2.6", "Qwen/Qwen3.8-Flash-Next"],
+    ["minimax/minimax-m2.5", "Qwen/Qwen3.8-Flash-Next"],
+    ["minimax/minimax-m3", "Qwen/Qwen3.8-Flash-Next"],
+    ["minimax/minimax-m1-80k", "Qwen/Qwen3.8-Flash-Next"],
+    ["meituan-longcat/longcat-flash-lite", "Qwen/Qwen3.8-Flash-Next"],
+    ["zhipuai/glm-5.1", "Qwen/Qwen3.8-Flash-Next"],
+    ["zhipuai/glm-5.2", "Qwen/Qwen3.8-Flash-Next"],
+    ["zhipuai/glm-4.7-flash", "Qwen/Qwen3.8-Flash-Next"],
+    ["mistralai/mistral-large-instruct-2407", "Qwen/Qwen3.8-Flash-Next"],
+    ["qwen/qwen2.5-72b-instruct", "Qwen/Qwen3.8-Flash-Next"],
+    ["deepseek-ai/deepseek-v4-flash", "deepseek-ai/DeepSeek-V4.1-Flash"],
+    ["qwen/qwen3-30b-a3b-instruct-2507", "Qwen/Qwen3.8-Flash-Next"],
+    ["qwen/qwen3-235b-a22b-instruct-2507", "Qwen/Qwen3.8-Flash-Next"],
+    ["qwen/qwen3-coder-30b-a3b-instruct", "Qwen/Qwen3.8-Flash-Next"],
+    ["qwen/qwen3-30b-a3b", "Qwen/Qwen3.8-Flash-Next"]
 ]);
+
+function mapLegacyModelScopeModel(model) {
+    const value = String(model || "").trim();
+    return LEGACY_MODELSCOPE_MODELS.get(value.toLowerCase()) || value;
+}
 
 const queue = [];
 let activeCount = 0;
@@ -1985,6 +2020,11 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 });
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg?.action === "OFFSCREEN_READY") {
+        offscreenReady = true;
+        sendResponse({ ok: true });
+        return false;
+    }
     if (msg?.action === "OFFSCREEN_CHUNK_AUDIO_PROGRESS") {
         handleOffscreenChunkProgress(msg?.payload || {}).catch(() => {});
         sendResponse({ ok: true });
@@ -2050,7 +2090,16 @@ globalThis.addEventListener?.("unhandledrejection", (event) => {
     });
 });
 
-chrome.downloads.onChanged.addListener((delta) => {
+cleanupLegacyDownloadHeaderRule().catch((error) => {
+    logDownload.warn("legacy_download_header_rule_cleanup_failed", {
+        task: "download",
+        detail: { error: error?.message || "failed to remove legacy download header rule" }
+    });
+});
+
+async function handleOwnedDownloadChanged(delta) {
+    const ruleId = await getDownloadHeaderRuleId(delta.id);
+    if (!ownedDownloadIds.has(delta.id) && !ruleId) return;
     if (delta.state && delta.state.current) {
         if (delta.state.current === "interrupted") {
             logDownload.error("download_interrupted", {
@@ -2075,17 +2124,24 @@ chrome.downloads.onChanged.addListener((delta) => {
                 }
             });
         }
+        if (["complete", "interrupted"].includes(delta.state.current)) {
+            ownedDownloadIds.delete(delta.id);
+            await releaseDownloadHeaderRule(delta.id, ruleId);
+        }
     }
-});
+}
 
-chrome.downloads.onDeterminingFilename?.addListener((item, suggest) => {
-    const matchedUrl = [item?.url, item?.finalUrl]
-        .map((value) => String(value || "").trim())
-        .find((value) => pendingDownloadFilenames.has(value));
-    if (!matchedUrl) return;
-    const filename = pendingDownloadFilenames.get(matchedUrl);
-    pendingDownloadFilenames.delete(matchedUrl);
-    suggest({ filename, conflictAction: "uniquify" });
+chrome.downloads.onChanged.addListener((delta) => {
+    handleOwnedDownloadChanged(delta).catch((error) => {
+        logDownload.warn("download_header_rule_cleanup_failed", {
+            task: "download",
+            code: "DOWNLOAD_HEADER_RULE_CLEANUP_FAILED",
+            detail: {
+                download_id: delta.id,
+                error: error?.message || "failed to clean download header rule"
+            }
+        });
+    });
 });
 
 async function handleMessage(msg, sender) {
@@ -2138,6 +2194,8 @@ async function handleMessage(msg, sender) {
             }
         });
 
+        let headerRuleId = null;
+        let headerRuleBoundToDownload = false;
         try {
             const status = tabId
                 ? await probeUrlStatusForTab(tabId, url)
@@ -2150,7 +2208,7 @@ async function handleMessage(msg, sender) {
                 error.status = status;
                 throw error;
             }
-            await ensureDownloadHeaderRule(url);
+            headerRuleId = await createTemporaryMediaHeaderRule(url);
             const responseMeta = await probeDownloadContentType(url);
             if (responseMeta && (
                 responseMeta.isHtml
@@ -2168,21 +2226,19 @@ async function handleMessage(msg, sender) {
                 throw error;
             }
             const requestedFilename = filename || "download.mp4";
-            pendingDownloadFilenames.set(url, requestedFilename);
-            let downloadId;
-            try {
-                downloadId = await chrome.downloads.download({
-                    url,
-                    filename: requestedFilename,
-                    conflictAction: "uniquify",
-                    saveAs: true
-                });
-            } catch (error) {
-                pendingDownloadFilenames.delete(url);
-                throw error;
+            const downloadId = await chrome.downloads.download({
+                url,
+                filename: requestedFilename,
+                conflictAction: "uniquify",
+                saveAs: true
+            });
+            if (!Number.isInteger(downloadId)) {
+                throw new Error(chrome.runtime.lastError?.message || "浏览器未返回下载任务 ID");
             }
-            if (!downloadId && chrome.runtime.lastError) {
-                throw new Error(chrome.runtime.lastError.message);
+            ownedDownloadIds.add(downloadId);
+            if (headerRuleId) {
+                await rememberDownloadHeaderRule(downloadId, headerRuleId);
+                headerRuleBoundToDownload = true;
             }
             logDownload.info("download_chrome_api_success", {
                 task: "download",
@@ -2217,6 +2273,10 @@ async function handleMessage(msg, sender) {
                 }
             });
             throw error;
+        } finally {
+            if (headerRuleId && !headerRuleBoundToDownload) {
+                await removeTemporaryMediaHeaderRule(headerRuleId, { reason: "download_start_failed" });
+            }
         }
     }
     if (msg.action === "PROBE_URL") {
@@ -2591,8 +2651,10 @@ async function handleMessage(msg, sender) {
         let origin;
         try {
             const url = new URL(baseUrl);
-            if (url.protocol !== "https:") {
-                throw new Error("自定义 API 地址必须使用 https");
+            const isLocalHttp = url.protocol === "http:"
+                && ["localhost", "127.0.0.1"].includes(url.hostname.toLowerCase());
+            if (url.protocol !== "https:" && !isLocalHttp) {
+                throw new Error("远程自定义 API 地址必须使用 HTTPS；本地 HTTP 仅支持 localhost 或 127.0.0.1");
             }
             origin = url.origin;
         } catch (error) {
@@ -3089,45 +3151,161 @@ async function probeUrlStatusForTab(tabId, url) {
     }
 }
 
-async function ensureDownloadHeaderRule(url) {
-    if (!chrome.declarativeNetRequest?.updateSessionRules) return false;
-    const meta = getUrlMeta(url);
+function buildExactMediaUrlRegex(url) {
+    const parsed = new URL(String(url || "").trim());
+    parsed.hash = "";
+    return `^${parsed.href.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`;
+}
+
+async function cleanupLegacyDownloadHeaderRule() {
+    if (!chrome.declarativeNetRequest?.getSessionRules || !chrome.declarativeNetRequest?.updateSessionRules) return;
+    await mutateDownloadHeaderRules(async () => {
+        const rules = await chrome.declarativeNetRequest.getSessionRules();
+        const legacyRuleExists = (rules || []).some((rule) => (
+            Number(rule?.id || 0) === LEGACY_DOWNLOAD_HEADER_RULE_ID
+            && !!rule?.condition?.urlFilter
+            && !rule?.condition?.regexFilter
+        ));
+        if (legacyRuleExists) {
+            await chrome.declarativeNetRequest.updateSessionRules({
+                removeRuleIds: [LEGACY_DOWNLOAD_HEADER_RULE_ID]
+            });
+        }
+    });
+}
+
+async function allocateDownloadHeaderRuleId() {
+    const rules = await chrome.declarativeNetRequest.getSessionRules();
+    const usedIds = new Set((rules || []).map((rule) => Number(rule?.id || 0)));
+    for (let id = DOWNLOAD_HEADER_RULE_ID_START; id <= DOWNLOAD_HEADER_RULE_ID_END; id += 1) {
+        if (!usedIds.has(id)) return id;
+    }
+    throw new Error("临时下载规则已达到上限");
+}
+
+function mutateDownloadHeaderRules(task) {
+    const operation = downloadHeaderRuleMutation.then(task, task);
+    downloadHeaderRuleMutation = operation.catch(() => {});
+    return operation;
+}
+
+async function createTemporaryMediaHeaderRule(url) {
+    if (!chrome.declarativeNetRequest?.updateSessionRules || !chrome.declarativeNetRequest?.getSessionRules) return null;
+    const targetUrl = String(url || "").trim();
+    const meta = getUrlMeta(targetUrl);
     const host = String(meta.host || "").toLowerCase();
-    if (!host || !/(bilivideo|hdslb|bilibili)\.(com|cn)$/.test(host)) return false;
+    if (!host || !/(^|\.)(bilivideo|hdslb|bilibili)\.(com|cn)$/.test(host)) return null;
+    let ruleId = null;
     try {
-        await chrome.declarativeNetRequest.updateSessionRules({
-            removeRuleIds: [DOWNLOAD_HEADER_RULE_ID],
-            addRules: [{
-                id: DOWNLOAD_HEADER_RULE_ID,
-                priority: 1,
-                action: {
-                    type: "modifyHeaders",
-                    requestHeaders: [
-                        { header: "Referer", operation: "set", value: "https://www.bilibili.com/" }
-                    ]
-                },
-                condition: {
-                    urlFilter: `||${host}/`,
-                    resourceTypes: ["main_frame", "sub_frame", "xmlhttprequest", "media", "other"]
-                }
-            }]
+        ruleId = await mutateDownloadHeaderRules(async () => {
+            const nextRuleId = await allocateDownloadHeaderRuleId();
+            await chrome.declarativeNetRequest.updateSessionRules({
+                addRules: [{
+                    id: nextRuleId,
+                    priority: 1,
+                    action: {
+                        type: "modifyHeaders",
+                        requestHeaders: [
+                            { header: "Referer", operation: "set", value: "https://www.bilibili.com/" }
+                        ]
+                    },
+                    condition: {
+                        regexFilter: buildExactMediaUrlRegex(targetUrl),
+                        isUrlFilterCaseSensitive: true,
+                        resourceTypes: ["main_frame", "sub_frame", "xmlhttprequest", "media", "other"]
+                    }
+                }]
+            });
+            return nextRuleId;
         });
         logDownload.info("download_header_rule_enabled", {
             task: "download",
-            detail: { url_host: host }
+            detail: { url_host: host, rule_id: ruleId, match_scope: "exact_url" }
         });
-        return true;
+        return ruleId;
     } catch (error) {
         logDownload.warn("download_header_rule_failed", {
             task: "download",
             code: "DOWNLOAD_HEADER_RULE_FAILED",
             detail: {
                 url_host: host,
+                rule_id: ruleId || 0,
                 error: error.message || "failed to enable download headers"
             }
         });
-        return false;
+        return null;
     }
+}
+
+async function removeTemporaryMediaHeaderRule(ruleId, detail = {}) {
+    const id = Number(ruleId || 0);
+    if (!id || !chrome.declarativeNetRequest?.updateSessionRules) return;
+    await mutateDownloadHeaderRules(() => chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [id] }));
+    logDownload.info("download_header_rule_removed", {
+        task: "download",
+        detail: { rule_id: id, reason: String(detail.reason || "finished") }
+    });
+}
+
+async function readStoredDownloadHeaderRules() {
+    if (!chrome.storage.session?.get) return {};
+    const stored = await chrome.storage.session.get(DOWNLOAD_HEADER_RULE_STORAGE_KEY).catch(() => ({}));
+    const value = stored?.[DOWNLOAD_HEADER_RULE_STORAGE_KEY];
+    return value && typeof value === "object" ? value : {};
+}
+
+async function hydrateDownloadHeaderRules() {
+    if (downloadHeaderRulesHydrated) return;
+    const stored = await readStoredDownloadHeaderRules();
+    for (const [downloadId, ruleId] of Object.entries(stored)) {
+        const id = Number(downloadId || 0);
+        const headerRuleId = Number(ruleId || 0);
+        if (id && headerRuleId) downloadHeaderRuleIds.set(id, headerRuleId);
+    }
+    downloadHeaderRulesHydrated = true;
+}
+
+async function persistDownloadHeaderRules() {
+    if (!chrome.storage.session?.set) return;
+    try {
+        await mutateDownloadHeaderRules(() => chrome.storage.session.set({
+            [DOWNLOAD_HEADER_RULE_STORAGE_KEY]: Object.fromEntries(downloadHeaderRuleIds)
+        }));
+    } catch (error) {
+        logDownload.warn("download_header_rule_state_save_failed", {
+            task: "download",
+            code: "DOWNLOAD_HEADER_RULE_STATE_SAVE_FAILED",
+            detail: { error: error?.message || "failed to save download header rule state" }
+        });
+    }
+}
+
+async function rememberDownloadHeaderRule(downloadId, ruleId) {
+    const id = Number(downloadId || 0);
+    const headerRuleId = Number(ruleId || 0);
+    if (!id || !headerRuleId) return;
+    await hydrateDownloadHeaderRules();
+    downloadHeaderRuleIds.set(id, headerRuleId);
+    await persistDownloadHeaderRules();
+}
+
+async function getDownloadHeaderRuleId(downloadId) {
+    const id = Number(downloadId || 0);
+    if (!id) return null;
+    await hydrateDownloadHeaderRules();
+    const memoryRuleId = downloadHeaderRuleIds.get(id);
+    return memoryRuleId || null;
+}
+
+async function releaseDownloadHeaderRule(downloadId, knownRuleId = null) {
+    const id = Number(downloadId || 0);
+    await hydrateDownloadHeaderRules();
+    const ruleId = Number(knownRuleId || await getDownloadHeaderRuleId(id) || 0);
+    if (ruleId) {
+        await removeTemporaryMediaHeaderRule(ruleId, { reason: "download_finished" });
+    }
+    downloadHeaderRuleIds.delete(id);
+    await persistDownloadHeaderRules();
 }
 
 async function probeDownloadContentType(url) {
@@ -3247,6 +3425,26 @@ async function mergeSettings(patch) {
     return getResolvedSettings();
 }
 
+async function rememberMimoTokenPlanRegion(region) {
+    const normalizedRegion = normalizeMimoTokenPlanRegion(region);
+    const { settings } = await chrome.storage.local.get(["settings"]);
+    const current = settings && typeof settings === "object" ? settings : {};
+    if (normalizeMimoTokenPlanRegionMode(current.mimoTokenPlanRegionMode) !== "auto") return;
+    if (normalizeMimoTokenPlanRegion(current.mimoTokenPlanRegion) === normalizedRegion) return;
+    await chrome.storage.local.set({
+        settings: {
+            ...current,
+            mimoTokenPlanRegion: normalizedRegion,
+            mimoTokenPlanRegionMode: "auto"
+        }
+    });
+    logAI.info("mimo_token_plan_region_remembered", {
+        task: "ai",
+        provider: "mimo",
+        detail: { token_plan_region: normalizedRegion, selection_mode: "auto" }
+    });
+}
+
 class ContentProvider {
     static async transcribeFallback(tabId, payload) {
         const tabState = await getTabState(tabId);
@@ -3269,6 +3467,8 @@ class ContentProvider {
                 ? MIMO_ASR_MODEL
                 : (String(normalizedSettings.groqModel || "").trim() || "whisper-large-v3-turbo");
         const asrBaseUrl = normalizeAsrBaseUrl(normalizedSettings.groqBaseUrl, DEFAULT_GROQ_BASE_URL);
+        const mimoTokenPlanRegion = normalizeMimoTokenPlanRegion(normalizedSettings.mimoTokenPlanRegion);
+        const mimoTokenPlanRegionMode = normalizeMimoTokenPlanRegionMode(normalizedSettings.mimoTokenPlanRegionMode);
         const asrMaxAudioBytes = asrProvider === "siliconflow"
             ? SILICONFLOW_MAX_AUDIO_BYTES
             : (asrProvider === "mimo" ? MIMO_MAX_AUDIO_BYTES : GROQ_MAX_AUDIO_BYTES);
@@ -3320,6 +3520,18 @@ class ContentProvider {
                     tab_id: tabId,
                     cid: Number.isFinite(cid) ? cid : 0,
                     has_payload_audio_locator: !!payload?.audioUrl,
+                    credential_type: asrProvider === "mimo"
+                        ? (isMimoTokenPlanKey(asrApiKey) ? "token_plan" : "standard")
+                        : "provider_default",
+                    token_plan_region: asrProvider === "mimo" && isMimoTokenPlanKey(asrApiKey)
+                        ? mimoTokenPlanRegion
+                        : "",
+                    token_plan_region_mode: asrProvider === "mimo" && isMimoTokenPlanKey(asrApiKey)
+                        ? mimoTokenPlanRegionMode
+                        : "",
+                    api_host: asrProvider === "mimo"
+                        ? new URL(resolveMimoApiBaseUrl(asrApiKey, mimoTokenPlanRegion)).host
+                        : "",
                     ...payloadAudioSummary
                 }
             });
@@ -3451,6 +3663,8 @@ class ContentProvider {
                         groqModel: asrModel,
                         baseUrl: asrBaseUrl,
                         provider: asrProvider,
+                        mimoTokenPlanRegion,
+                        mimoTokenPlanRegionMode,
                         maxAudioBytes: asrMaxAudioBytes,
                         audioUrl: selectedAudioUrl,
                         signal: operationController.signal
@@ -3912,10 +4126,9 @@ class ContentProvider {
             const url = candidateUrls[index];
             const locator = await summarizeMediaLocator(url);
             const attempt = index + 1;
+            let headerRuleId = null;
             try {
-                // Refresh any legacy session rule before fetching. Rewriting Origin would
-                // make Chrome compare the Bilibili ACAO value with the immutable extension origin.
-                await ensureDownloadHeaderRule(url);
+                headerRuleId = await createTemporaryMediaHeaderRule(url);
                 logASR.info("asr_audio_fetch_host_attempt", {
                     bvid,
                     task: "asr",
@@ -3971,6 +4184,10 @@ class ContentProvider {
                         reason: String(error?.message || error || "audio fetch failed")
                     }
                 });
+            } finally {
+                if (headerRuleId) {
+                    await removeTemporaryMediaHeaderRule(headerRuleId, { reason: "asr_fetch_finished" });
+                }
             }
         }
         throw lastError || new Error("所有音轨 CDN 均下载失败");
@@ -4083,6 +4300,8 @@ class ContentProvider {
                     attachSentryContext(timeoutError, {
                         provider: "groq_asr",
                         model: String(groqModel || ""),
+                        asr_stage: "provider_transcription",
+                        timeout_phase: "provider_transcription",
                         timeout_ms: ASR_TASK_TIMEOUT_MS,
                         request_stream: false,
                         bypass_queue: true
@@ -4199,10 +4418,17 @@ class ContentProvider {
                 apiKey: groqApiKey,
                 model: groqModel,
                 baseUrl: String(options.baseUrl || DEFAULT_GROQ_BASE_URL),
+                mimoTokenPlanRegion: normalizeMimoTokenPlanRegion(options.mimoTokenPlanRegion),
+                mimoTokenPlanRegionMode: normalizeMimoTokenPlanRegionMode(options.mimoTokenPlanRegionMode),
                 videoTitle
             });
             const mergedRows = Array.isArray(chunkResult?.rows) ? chunkResult.rows : [];
             const quota = chunkResult?.quota || null;
+            if (provider === "mimo"
+                && normalizeMimoTokenPlanRegionMode(options.mimoTokenPlanRegionMode) === "auto"
+                && chunkResult?.mimoTokenPlanRegion) {
+                await rememberMimoTokenPlanRegion(chunkResult.mimoTokenPlanRegion).catch(() => {});
+            }
             await recordAsrChunkingDebugState(tabId, chunkResult?.diagnostics || null);
             return {
                 data: {
@@ -4339,6 +4565,8 @@ class ContentProvider {
                     attachSentryContext(timeoutError, {
                         provider: "siliconflow_asr",
                         model: String(model || ""),
+                        asr_stage: "provider_transcription",
+                        timeout_phase: "provider_transcription",
                         timeout_ms: ASR_TASK_TIMEOUT_MS,
                         request_stream: false,
                         bypass_queue: true
@@ -4598,6 +4826,18 @@ async function handleSubtitleCaptured(tabId, payload) {
     const subtitleLanguage = String(payload?.subtitleLanguage || "").trim();
     const subtitleLanguageLabel = String(payload?.subtitleLanguageLabel || subtitleLanguage || "").trim();
     const clearDerived = payload?.clearDerived === true;
+    logBackground.info("subtitle_read_received", {
+        task: "subtitle",
+        bvid,
+        detail: {
+            tab_id: tabId,
+            source: subtitleSource,
+            row_count: Array.isArray(payload?.subtitle) ? payload.subtitle.length : 0,
+            payload_cid: Number(payload?.cid || 0),
+            resolved_cid: cid,
+            part_count: partCount
+        }
+    });
     logBackground.info("subtitle_detected", { tab_id: tabId, bvid, cid, tid });
     const existing = await getCache(bvid);
     const existingPart = selectCachePart(existing, { bvid, cid, tid, partCount }) || {};
@@ -4605,6 +4845,16 @@ async function handleSubtitleCaptured(tabId, payload) {
     const rawHash = makeSubtitleHash(rawSubtitle);
     if (existingPart?.rawHash && existingPart.rawHash === rawHash) {
         logBackground.debug("subtitle_duplicate_ignore", { bvid, tab_id: tabId, raw_hash: rawHash });
+        logBackground.info("subtitle_read_skipped", {
+            task: "subtitle",
+            bvid,
+            detail: {
+                reason: "duplicate_hash",
+                row_count: rawSubtitle.length,
+                cid,
+                part_count: partCount
+            }
+        });
         const existingSource = String(existingPart?.subtitleSource || "");
         const existingLanguage = String(existingPart?.subtitleLanguage || "");
         const existingCid = Number(existingPart?.cid || 0);
@@ -4640,6 +4890,7 @@ async function handleSubtitleCaptured(tabId, payload) {
             activeBvid: bvid,
             activeCid: Number.isFinite(cid) ? cid : 0,
             activeTid: tid,
+            activePartCount: partCount,
             subtitleSource,
             subtitleLanguage,
             subtitleLanguageLabel,
@@ -4697,10 +4948,22 @@ async function handleSubtitleCaptured(tabId, payload) {
         } : {}),
         updatedAt: Date.now()
     });
+    logBackground.info("subtitle_read_stored", {
+        task: "subtitle",
+        bvid,
+        detail: {
+            source: subtitleSource,
+            raw_count: rawSubtitle.length,
+            processed_count: processedSubtitle.length,
+            cid,
+            part_count: partCount
+        }
+    });
     await updateTabState(tabId, {
         activeBvid: bvid,
         activeCid: Number.isFinite(cid) ? cid : 0,
         activeTid: tid,
+        activePartCount: partCount,
         subtitleSource,
         subtitleLanguage,
         subtitleLanguageLabel,
@@ -4730,11 +4993,26 @@ async function handleSubtitleCaptured(tabId, payload) {
 }
 
 async function pushSubtitleSyncToTab(tabId, bvid, cache, reason) {
-    if (!tabId || !bvid) return;
+    if (!tabId || !bvid) {
+        logBackground.warn("subtitle_sync_discarded", {
+            task: "subtitle",
+            bvid: normalizeBvid(bvid),
+            code: "SUBTITLE_SYNC_IDENTITY_MISSING",
+            detail: { tab_id: Number(tabId || 0), reason: "missing_tab_or_bvid" }
+        });
+        return;
+    }
     const key = String(tabId);
     const normalizedBvid = normalizeBvid(bvid);
     const prev = lastSubtitleSync.get(key);
-    if (reason !== "duplicate" && prev && prev.bvid === normalizedBvid && Date.now() - Number(prev.at || 0) < 300) return;
+    if (reason !== "duplicate" && prev && prev.bvid === normalizedBvid && Date.now() - Number(prev.at || 0) < 300) {
+        logBackground.info("subtitle_sync_skipped", {
+            task: "subtitle",
+            bvid: normalizedBvid,
+            detail: { reason: "recent_sync", sync_reason: reason }
+        });
+        return;
+    }
     lastSubtitleSync.set(key, { bvid: normalizedBvid, at: Date.now() });
     const tabState = await getTabState(tabId);
     try {
@@ -4748,7 +5026,24 @@ async function pushSubtitleSyncToTab(tabId, bvid, cache, reason) {
             tabState: tabState || null,
             reason
         });
-    } catch (_) {}
+        logBackground.info("subtitle_sync_sent", {
+            task: "subtitle",
+            bvid: normalizedBvid,
+            detail: {
+                reason,
+                row_count: Array.isArray(safeCache?.rawSubtitle) ? safeCache.rawSubtitle.length : 0,
+                cid: Number(safeCache?.cid || 0),
+                part_count: Number(safeCache?.partCount || tabState?.activePartCount || 0)
+            }
+        });
+    } catch (error) {
+        logBackground.warn("subtitle_sync_failed", {
+            task: "subtitle",
+            bvid: normalizedBvid,
+            code: "SUBTITLE_SYNC_DELIVERY_FAILED",
+            detail: { reason, error_message: error?.message || String(error) }
+        });
+    }
 }
 
 function normalizeCacheForUI(cache, bvid) {
@@ -5381,6 +5676,13 @@ async function runChatForPort(port, msg) {
     if (!identity.partKey) throw createAppError("PART_IDENTITY_PENDING", "正在识别当前分 P，请稍候再试");
     await setTaskStatus(tabId, ["chat"], "processing", "", identity);
     const resolvedSettings = await getResolvedSettings();
+    const requestedReasoningEffort = ["auto", "low", "medium", "high"].includes(String(msg?.reasoningEffort || "").toLowerCase())
+        ? String(msg.reasoningEffort).toLowerCase()
+        : "auto";
+    const chatSettings = {
+        ...resolvedSettings,
+        reasoningEffort: requestedReasoningEffort === "auto" ? "" : requestedReasoningEffort
+    };
     await hydrateCloudCacheIfNeeded(bvid, ["subtitle"], resolvedSettings, identity);
     const rawCache = await getCache(bvid);
     const cache = getPartCacheForContext(rawCache, bvid, identity);
@@ -5424,7 +5726,7 @@ async function runChatForPort(port, msg) {
             const prompt = `你是 B 站视频助手。基于字幕回答用户的问题，回答要准确、简洁。\n字幕：\n${subtitleText}\n历史：\n${conversation}\n用户问题：${text}`;
             logAIPromptBuilt({ bvid, task: "chat_stream", provider: resolvedSettings.provider, mode: "chat", prompt, promptSettings: resolvedSettings.promptSettings });
             let streamedAnswerText = "";
-            const aiRes = await callAIWithTimeoutStream(resolvedSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, (delta) => {
+            const aiRes = await callAIWithTimeoutStream(chatSettings, [{ role: "user", content: prompt }], TASK_TIMEOUT_MS, (delta) => {
                 const chunk = String(delta || "");
                 streamedAnswerText += chunk;
                 safePortPost(port, { type: "delta", messageId, partKey: identity.partKey, delta: chunk });
@@ -5798,16 +6100,50 @@ async function requestTaskResult(bvid, task, settings, taskContext = {}) {
         logSegmentQualitySummary(bvid, normalized, cache, { task: "segments", mode: "single", subtitlePayload: getSubtitlePayloadMeta(cache, subtitleText, subtitlePayloadOptions) });
         return normalized;
     }
-    const parsed = robustJSONParse(aiRes.text);
-    if (parsed) {
+    let parsed = robustJSONParse(aiRes.text);
+    let normalized = isValidRumorsResult(parsed) ? normalizeRumors(parsed, cache) : null;
+    if (!normalized) {
+        const retryReason = String(aiRes.text || "").trim() ? "invalid_json_or_schema" : "empty_response";
+        logAI.warn("rumors_json_retry", {
+            task: "rumors",
+            bvid,
+            code: retryReason === "empty_response" ? "RUMORS_EMPTY_RESPONSE" : "RUMORS_JSON_PARSE_FAILED",
+            detail: {
+                reason: retryReason,
+                finish_reason: String(aiRes.responseMeta?.finishReason || ""),
+                output_chars: String(aiRes.text || "").length
+            }
+        });
+        const retryPrompt = `${prompt}\n\n上一次返回为空或 JSON 字段无效。请重新作答，只输出一个完整 JSON 对象；即使没有值得核查的声明，也必须返回 overall_score、overview 和空 claims 数组。`;
+        const retryRes = await callAIWithTimeout(settings, [{ role: "user", content: retryPrompt }], TASK_TIMEOUT_MS, {
+            tabId: taskContext.tabId,
+            taskContext,
+            component: task,
+            bvid
+        });
+        await appendMetrics(bvid, null, task, retryRes.metrics, taskContext);
+        await reportFeatureUsage(task, bvid, settings, retryRes.metrics);
+        aiRes = retryRes;
+        parsed = robustJSONParse(aiRes.text);
+        normalized = isValidRumorsResult(parsed) ? normalizeRumors(parsed, cache) : null;
+    }
+    if (normalized) {
         logBackground.info("json_parse_success", { task: "rumors", bvid });
     } else {
-        logAI.error("json_parse_error", { task: "rumors", bvid, code: "JSON_PARSE_ERROR", detail: { reason: "empty_result" } });
+        logAI.error("json_parse_error", {
+            task: "rumors",
+            bvid,
+            code: "RUMORS_JSON_PARSE_FAILED",
+            detail: {
+                reason: String(aiRes.text || "").trim() ? "invalid_json_or_schema" : "empty_response",
+                finish_reason: String(aiRes.responseMeta?.finishReason || ""),
+                output_chars: String(aiRes.text || "").length
+            }
+        });
     }
-    const normalized = normalizeRumors(parsed, cache);
     if (!normalized) {
         throw attachSentryContext(
-            createAppError("JSON_PARSE_ERROR", "验真 JSON 解析失败"),
+            createAppError("RUMORS_JSON_PARSE_FAILED", "验真 JSON 解析失败"),
             buildAIResponseSentryContext({
                 task: "rumors",
                 bvid,
@@ -5867,7 +6203,7 @@ function isOutputLengthFinishReason(responseMeta = {}) {
 }
 
 function isDeepSeekV4ModelName(model) {
-    return /(?:^|\/)deepseek-v4(?:-|$)/i.test(String(model || "").trim());
+    return /(?:^|\/)deepseek-v4(?:[.-]|$)/i.test(String(model || "").trim());
 }
 
 function getDeepSeekV4RetryDiagnostics(response = {}) {
@@ -5920,6 +6256,45 @@ function isLikelyTruncatedSegmentOutput(text, metrics = {}, responseMeta = {}) {
     if (/<<<\s*SEGMENTS_START\s*>>>/i.test(value) && !/<<<\s*SEGMENTS_END\s*>>>/i.test(value)) return true;
     if (/SEGMENTS_START/i.test(value) && !/SEGMENTS_END/i.test(value)) return true;
     return false;
+}
+
+function hasCompleteValidatedSegments(parsed, normalized, cache = {}) {
+    const sourceItems = getSegmentCandidateList(parsed);
+    const segments = Array.isArray(normalized) ? normalized : [];
+    const rawCount = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0;
+    if (!Array.isArray(sourceItems) || !sourceItems.length || !segments.length || !rawCount) return false;
+    if (segments.length < sourceItems.length) return false;
+    const fieldsValid = segments.every((segment) => {
+        const start = Number(segment?.start);
+        const end = Number(segment?.end);
+        const startLine = Number(segment?.start_line);
+        const endLine = Number(segment?.end_line);
+        const type = String(segment?.type || "");
+        if (!String(segment?.label || "").trim()) return false;
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+        if (!Number.isInteger(startLine) || !Number.isInteger(endLine) || startLine < 0 || endLine < startLine) return false;
+        if (type !== "content" && type !== "ad") return false;
+        if (type === "ad") {
+            const adStartLine = Number(segment?.ad_start_line);
+            const adEndLine = Number(segment?.ad_end_line);
+            if (!Number.isInteger(adStartLine) || !Number.isInteger(adEndLine) || adStartLine < 0 || adEndLine < adStartLine) return false;
+        }
+        return true;
+    });
+    if (!fieldsValid) return false;
+    const lastCoveredLine = Math.max(...segments.map((segment) => Number(segment?.end_line)).filter(Number.isInteger));
+    return lastCoveredLine >= rawCount - 1;
+}
+
+function createSegmentsCoverageError(normalized, cache = {}) {
+    const segments = Array.isArray(normalized) ? normalized : [];
+    const rawCount = Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0;
+    const coveredLineIds = segments.map((segment) => Number(segment?.end_line)).filter(Number.isInteger);
+    const lastCoveredLine = coveredLineIds.length ? Math.max(...coveredLineIds) : -1;
+    return createAppError("SEGMENTS_OUTPUT_TRUNCATED", "分段没有完整覆盖字幕末尾", {
+        lastCoveredLine,
+        expectedLastLine: rawCount ? rawCount - 1 : undefined
+    });
 }
 
 function getSegmentCandidateList(parsed) {
@@ -6362,14 +6737,56 @@ async function ensureOffscreenDocument() {
     return offscreenDocumentPromise;
 }
 
-async function requestOffscreenAudioChunkingPrepare(payload = {}) {
+async function waitForOffscreenReady() {
+    if (offscreenReady) return;
+    try {
+        const response = await sendMessageWithReceiverRetry(
+            (message) => chrome.runtime.sendMessage(message),
+            { action: "OFFSCREEN_PING" }
+        );
+        if (!response?.ok || response?.ready !== true) {
+            throw new Error("Offscreen document did not report ready");
+        }
+        offscreenReady = true;
+    } catch (error) {
+        offscreenDocumentPromise = null;
+        const unavailable = createAppError(
+            "ASR_CHUNKING_UNAVAILABLE",
+            "音频处理组件加载失败，请刷新页面后重试"
+        );
+        unavailable.cause = error;
+        throw unavailable;
+    }
+}
+
+async function sendOffscreenMessage(message) {
     await ensureOffscreenDocument();
+    await waitForOffscreenReady();
+    try {
+        return await sendMessageWithReceiverRetry(
+            (payload) => chrome.runtime.sendMessage(payload),
+            message
+        );
+    } catch (error) {
+        if (!isOffscreenReceiverUnavailableError(error)) throw error;
+        offscreenReady = false;
+        offscreenDocumentPromise = null;
+        const unavailable = createAppError(
+            "ASR_CHUNKING_UNAVAILABLE",
+            "音频处理组件加载失败，请刷新页面后重试"
+        );
+        unavailable.cause = error;
+        throw unavailable;
+    }
+}
+
+async function requestOffscreenAudioChunkingPrepare(payload = {}) {
     if (payload?.audioBlob instanceof Blob) {
         return requestOffscreenAudioChunkingPrepareFromBlob(payload);
     }
     const audioUrl = String(payload?.audioUrl || "").trim();
     if (audioUrl) {
-        const response = await chrome.runtime.sendMessage({
+        const response = await sendOffscreenMessage({
             action: "OFFSCREEN_CHUNK_AUDIO_PREPARE",
             payload: {
                 audioUrl,
@@ -6388,7 +6805,6 @@ async function requestOffscreenAudioChunkingPrepare(payload = {}) {
 }
 
 async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
-    await ensureOffscreenDocument();
     const audioBlob = payload?.audioBlob instanceof Blob ? payload.audioBlob : null;
     if (!audioBlob) {
         throw createAppError("ASR_CHUNKING_FAILED", "缺少已下载音轨，无法切片");
@@ -6397,7 +6813,7 @@ async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
     let uploadId = "";
     let finished = false;
     try {
-        const started = await chrome.runtime.sendMessage({
+        const started = await sendOffscreenMessage({
             action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_START",
             payload: {
                 expectedBytes: audioBlob.size,
@@ -6420,7 +6836,7 @@ async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
             for (let index = 0; index < bytes.length; index += 0x8000) {
                 binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
             }
-            const appended = await chrome.runtime.sendMessage({
+            const appended = await sendOffscreenMessage({
                 action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_APPEND",
                 payload: { uploadId, dataBase64: btoa(binary) }
             });
@@ -6429,7 +6845,7 @@ async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
             }
         }
 
-        const response = await chrome.runtime.sendMessage({
+        const response = await sendOffscreenMessage({
             action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_FINISH",
             payload: { uploadId }
         });
@@ -6443,7 +6859,7 @@ async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
         return response.result || {};
     } finally {
         if (uploadId && !finished) {
-            await chrome.runtime.sendMessage({
+            await sendOffscreenMessage({
                 action: "OFFSCREEN_CHUNK_AUDIO_UPLOAD_RELEASE",
                 payload: { uploadId }
             }).catch(() => {});
@@ -6452,8 +6868,7 @@ async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
 }
 
 async function requestOffscreenGroqChunkTranscription(payload = {}) {
-    await ensureOffscreenDocument();
-    const response = await chrome.runtime.sendMessage({
+    const response = await sendOffscreenMessage({
         action: "OFFSCREEN_CHUNK_AUDIO_TRANSCRIBE_ALL",
         payload
     });
@@ -6472,8 +6887,7 @@ async function requestOffscreenChunkTranscriptionAll(payload = {}) {
 
 async function releaseOffscreenAudioChunkSession(sessionId) {
     if (!sessionId) return;
-    await ensureOffscreenDocument();
-    await chrome.runtime.sendMessage({
+    await sendOffscreenMessage({
         action: "OFFSCREEN_CHUNK_AUDIO_RELEASE",
         payload: { sessionId }
     }).catch(() => {});
@@ -7535,9 +7949,7 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                     mode: "quality",
                     message: "主响应已返回，正在解析分段"
                 }, "quality 主响应已返回，开始解析分段");
-                const parsed = isLikelyTruncatedSegmentOutput(aiRes.text, aiRes.metrics, aiRes.responseMeta)
-                    ? null
-                    : parseSegmentsJSON(aiRes.text, settings);
+                const parsed = parseSegmentsJSON(aiRes.text, settings);
                 if (!parsed) {
                     throw attachSentryContext(
                         createSegmentsParseError(aiRes.text, aiRes.metrics, aiRes.responseMeta),
@@ -7577,6 +7989,42 @@ async function runSummarySegmentsInQuality(tabId, bvid, force, settings, taskCon
                             }
                         })
                     );
+                }
+                if (!hasCompleteValidatedSegments(parsed, normalized, cache)) {
+                    throw attachSentryContext(
+                        createSegmentsCoverageError(normalized, cache),
+                        buildAIResponseSentryContext({
+                            task: "segments",
+                            bvid,
+                            provider: settings.provider,
+                            model: settings.model || "",
+                            mode: "quality",
+                            source: segmentPromptPlan.compact ? "segments_quality_compact_primary_coverage" : "segments_quality_coverage",
+                            responseText: aiRes.text,
+                            responseMeta: aiRes.responseMeta,
+                            metrics: aiRes.metrics,
+                            extra: {
+                                compact_segments: !!segmentPromptPlan.compact,
+                                parsed_item_count: getSegmentCandidateList(parsed)?.length || 0,
+                                valid_segment_count: normalized.length
+                            }
+                        })
+                    );
+                }
+                if (isLikelyTruncatedSegmentOutput(aiRes.text, aiRes.metrics, aiRes.responseMeta)) {
+                    const coveredLineIds = normalized.map((segment) => Number(segment?.end_line)).filter(Number.isInteger);
+                    logAI.info("segments_complete_despite_truncation_signal", {
+                        bvid,
+                        task: "segments",
+                        provider: settings.provider,
+                        model: settings.model || "",
+                        detail: {
+                            finish_reason: String(aiRes.responseMeta?.finishReason || ""),
+                            segment_count: normalized.length,
+                            last_covered_line: coveredLineIds.length ? Math.max(...coveredLineIds) : -1,
+                            expected_last_line: Math.max(0, (Array.isArray(cache?.rawSubtitle) ? cache.rawSubtitle.length : 0) - 1)
+                        }
+                    });
                 }
                 await recordSegmentsDebugState(tabId, {
                     status: "done",
@@ -9194,6 +9642,15 @@ async function callAIWithTimeout(settings, messages, timeoutMs, options = {}) {
     }
 }
 
+function logProviderRequestMetadata(settings, options = {}, metadata = {}) {
+    logAI.info("provider_request_metadata", {
+        task: String(options?.component || metadata?.request_task || "ai"),
+        provider: settings?.provider || "",
+        model: settings?.model || "",
+        detail: metadata
+    });
+}
+
 async function callAIWithTimeoutOnce(settings, messages, timeoutMs, options = {}) {
     const controller = new AbortController();
     const unregister = registerTabAbortController(options?.tabId, controller);
@@ -9215,7 +9672,32 @@ async function callAIWithTimeoutOnce(settings, messages, timeoutMs, options = {}
                     bypass_queue: !!options?.bypassQueue
                 }
             });
-            return callAI(settings.provider, settings, messages, controller.signal);
+            const providerSettings = options?.component
+                ? { ...settings, requestTask: options.component }
+                : settings;
+            return callAI(providerSettings.provider, providerSettings, messages, controller.signal, {
+                onRequestMetadata: (metadata) => {
+                    logProviderRequestMetadata(providerSettings, options, metadata);
+                },
+                onResponseStart: () => {
+                    const responseTiming = timing.markFirstResponse();
+                    if (options?.component === "segments") {
+                        timing.extendTimeout(SEGMENTS_RESPONSE_TIMEOUT_MS);
+                        logAI.debug("provider_response_started", {
+                            task: "ai",
+                            provider: settings.provider,
+                            model: settings.model || "",
+                            duration_ms: responseTiming.firstResponseMs || 0,
+                            detail: {
+                                component: "segments",
+                                first_response_ms: responseTiming.firstResponseMs,
+                                timeout_extended_to_ms: SEGMENTS_RESPONSE_TIMEOUT_MS
+                            }
+                        });
+                    }
+                },
+                onMimoTokenPlanRegionResolved: rememberMimoTokenPlanRegion
+            });
         };
         const res = options?.bypassQueue ? await requestRunner() : await runQueued(requestRunner);
         const requestTiming = timing.snapshot();
@@ -9248,6 +9730,9 @@ async function callAIWithTimeoutOnce(settings, messages, timeoutMs, options = {}
         };
     } catch (error) {
         const requestTiming = timing.snapshot();
+        const effectiveTimeoutMs = options?.component === "segments" && requestTiming.firstResponseMs !== undefined
+            ? SEGMENTS_RESPONSE_TIMEOUT_MS
+            : timeoutMs;
         logAI[options?.suppress429FailureLog && Number(error?.status || 0) === 429 ? "warn" : "error"]("ai_request_failed", buildFailureLog(error, {
             task: "ai",
             provider: settings.provider,
@@ -9262,13 +9747,13 @@ async function callAIWithTimeoutOnce(settings, messages, timeoutMs, options = {}
                 throw createUserAbortedError();
             }
             const timeoutError = createTaskTimeoutError("AI_RESPONSE_TIMEOUT", "模型请求超时，请重试");
-            attachSentryContext(timeoutError, buildProviderRequestTelemetry(settings, timeoutMs, {
+            attachSentryContext(timeoutError, buildProviderRequestTelemetry(settings, effectiveTimeoutMs, {
                 stream: false,
                 bypassQueue: !!options?.bypassQueue,
                 queueSizeAtStart,
                 activeCountAtStart,
                 ...requestTiming,
-                timeoutPhase: "provider_request"
+                timeoutPhase: requestTiming.firstResponseMs === undefined ? "provider_request" : "response_body"
             }));
             logAI.error("ai_request_timeout", buildFailureLog(timeoutError, {
                 task: "ai",
@@ -9279,8 +9764,8 @@ async function callAIWithTimeoutOnce(settings, messages, timeoutMs, options = {}
                     queue_wait_ms: requestTiming.queueWaitMs || 0,
                     provider_request_ms: requestTiming.providerRequestMs,
                     first_response_ms: requestTiming.firstResponseMs,
-                    timeout_phase: "provider_request",
-                    timeout_ms: timeoutMs
+                    timeout_phase: requestTiming.firstResponseMs === undefined ? "provider_request" : "response_body",
+                    timeout_ms: effectiveTimeoutMs
                 }
             }));
             throw timeoutError;
@@ -9347,9 +9832,51 @@ async function callAIWithTimeoutStreamOnce(settings, messages, timeoutMs, onDelt
         const wrappedOnDelta = (delta) => {
             if (!firstResponseReceived) {
                 firstResponseReceived = true;
-                timing.markFirstResponse();
+                const contentTiming = timing.markFirstResponse();
+                logAI.info("provider_stream_first_content", {
+                    task: "ai",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    duration_ms: contentTiming.firstVisibleTextMs || 0,
+                    detail: {
+                        response_headers_ms: contentTiming.responseHeadersMs,
+                        first_stream_event_ms: contentTiming.firstStreamEventMs,
+                        first_visible_text_ms: contentTiming.firstVisibleTextMs
+                    }
+                });
             }
             if (typeof onDelta === "function") onDelta(delta);
+        };
+        const streamCallbacks = {
+            onRequestMetadata: (metadata) => {
+                logProviderRequestMetadata(settings, options, metadata);
+            },
+            onResponseHeaders: () => {
+                const headerTiming = timing.markResponseHeaders();
+                logAI.info("provider_response_headers_received", {
+                    task: "ai",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    duration_ms: headerTiming.responseHeadersMs || 0,
+                    detail: {
+                        response_headers_ms: headerTiming.responseHeadersMs
+                    }
+                });
+            },
+            onFirstStreamEvent: () => {
+                const eventTiming = timing.markFirstStreamEvent();
+                logAI.info("provider_stream_first_event", {
+                    task: "ai",
+                    provider: settings.provider,
+                    model: settings.model || "",
+                    duration_ms: eventTiming.firstStreamEventMs || 0,
+                    detail: {
+                        response_headers_ms: eventTiming.responseHeadersMs,
+                        first_stream_event_ms: eventTiming.firstStreamEventMs
+                    }
+                });
+            },
+            onMimoTokenPlanRegionResolved: rememberMimoTokenPlanRegion
         };
         let res = null;
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -9370,7 +9897,10 @@ async function callAIWithTimeoutStreamOnce(settings, messages, timeoutMs, onDelt
                             }
                         });
                     }
-                    return callAIStream(settings.provider, settings, messages, controller.signal, wrappedOnDelta);
+                    const providerSettings = options?.component
+                        ? { ...settings, requestTask: options.component }
+                        : settings;
+                    return callAIStream(providerSettings.provider, providerSettings, messages, controller.signal, wrappedOnDelta, streamCallbacks);
                 });
                 break;
             } catch (error) {
@@ -9406,7 +9936,10 @@ async function callAIWithTimeoutStreamOnce(settings, messages, timeoutMs, onDelt
                 request_stream: true,
                 queue_wait_ms: requestTiming.queueWaitMs || 0,
                 provider_request_ms: latencyMs,
+                response_headers_ms: requestTiming.responseHeadersMs,
+                first_stream_event_ms: requestTiming.firstStreamEventMs,
                 first_response_ms: requestTiming.firstResponseMs,
+                first_visible_text_ms: requestTiming.firstVisibleTextMs,
                 first_response_received: firstResponseReceived,
                 ...tokenInfo
             }
@@ -9446,7 +9979,10 @@ async function callAIWithTimeoutStreamOnce(settings, messages, timeoutMs, onDelt
                 detail: {
                     queue_wait_ms: requestTiming.queueWaitMs || 0,
                     provider_request_ms: requestTiming.providerRequestMs,
+                    response_headers_ms: requestTiming.responseHeadersMs,
+                    first_stream_event_ms: requestTiming.firstStreamEventMs,
                     first_response_ms: requestTiming.firstResponseMs,
+                    first_visible_text_ms: requestTiming.firstVisibleTextMs,
                     timeout_phase: "first_response",
                     timeout_ms: timeoutMs,
                     first_response_received: firstResponseReceived
@@ -10294,7 +10830,10 @@ function normalizeSettings(settings, providerCatalog = PROVIDERS) {
     delete base.customAsrApiKey;
     delete base.customAsrModel;
     const customProtocol = String(base.customProtocol || "openai").toLowerCase() === "claude" ? "claude" : "openai";
-    const customBaseUrl = ensureHttpsUrlPrefix(base.customBaseUrl);
+    const rawCustomBaseUrl = String(base.customBaseUrl || "").trim();
+    const customBaseUrl = /^(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(rawCustomBaseUrl)
+        ? `http://${rawCustomBaseUrl.replace(/^\/+/, "")}`
+        : ensureHttpsUrlPrefix(rawCustomBaseUrl);
     const customModel = String(base.customModel || "").trim();
     const provider = String(base.provider || DEFAULT_SETTINGS.provider || "modelscope").trim() || "modelscope";
     const providerApiKeysRaw = base.providerApiKeys && typeof base.providerApiKeys === "object" ? base.providerApiKeys : {};
@@ -10308,11 +10847,9 @@ function normalizeSettings(settings, providerCatalog = PROVIDERS) {
         String(value || "").trim()
     ]).filter(([key]) => key));
     const rawModel = String(base.model || DEFAULT_SETTINGS.model || "").trim();
-    const legacyNormalizedModel = provider === "modelscope" && LEGACY_MODELSCOPE_MODELS.has(rawModel)
-        ? DEFAULT_SETTINGS.model
-        : rawModel;
-    if (LEGACY_MODELSCOPE_MODELS.has(String(providerModels.modelscope || "").trim())) {
-        providerModels.modelscope = DEFAULT_SETTINGS.model;
+    const legacyNormalizedModel = provider === "modelscope" ? mapLegacyModelScopeModel(rawModel) : rawModel;
+    if (String(providerModels.modelscope || "").trim()) {
+        providerModels.modelscope = mapLegacyModelScopeModel(providerModels.modelscope);
     }
     const resolvedProviderModel = resolveProviderScopedModel(provider, {
         ...base,
@@ -10334,6 +10871,8 @@ function normalizeSettings(settings, providerCatalog = PROVIDERS) {
     const siliconFlowAsrModel = String(base.siliconFlowAsrModel || DEFAULT_SETTINGS.siliconFlowAsrModel || "FunAudioLLM/SenseVoiceSmall").trim() || "FunAudioLLM/SenseVoiceSmall";
     const mimoApiKey = String(base.mimoApiKey || "").trim();
     const mimoAsrModel = MIMO_ASR_MODEL;
+    const mimoTokenPlanRegion = normalizeMimoTokenPlanRegion(base.mimoTokenPlanRegion);
+    const mimoTokenPlanRegionMode = normalizeMimoTokenPlanRegionMode(base.mimoTokenPlanRegionMode);
     const supabaseUrl = String(base.supabaseUrl || DEFAULT_SETTINGS.supabaseUrl || "").trim().replace(/\/+$/, "");
     const supabaseAnonKey = String(base.supabaseAnonKey || DEFAULT_SETTINGS.supabaseAnonKey || "").trim();
     const supabaseVideoCacheTable = String(base.supabaseVideoCacheTable || DEFAULT_SETTINGS.supabaseVideoCacheTable || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE).trim() || SUPABASE_DEFAULT_VIDEO_CACHE_TABLE;
@@ -10361,6 +10900,9 @@ function normalizeSettings(settings, providerCatalog = PROVIDERS) {
     const disableCloudCacheRead = Object.prototype.hasOwnProperty.call(base, "disableCloudCacheRead")
         ? !!base.disableCloudCacheRead
         : !!DEFAULT_SETTINGS.disableCloudCacheRead;
+    const chatReasoningEffort = ["auto", "low", "medium", "high"].includes(String(base.chatReasoningEffort || "").toLowerCase())
+        ? String(base.chatReasoningEffort).toLowerCase()
+        : "auto";
     return {
         ...DEFAULT_SETTINGS,
         ...base,
@@ -10383,6 +10925,8 @@ function normalizeSettings(settings, providerCatalog = PROVIDERS) {
         siliconFlowAsrModel,
         mimoApiKey,
         mimoAsrModel,
+        mimoTokenPlanRegion,
+        mimoTokenPlanRegionMode,
         supabaseUrl,
         supabaseAnonKey,
         supabaseVideoCacheTable,
@@ -10393,7 +10937,8 @@ function normalizeSettings(settings, providerCatalog = PROVIDERS) {
         prefMode,
         pluginDisplayMode,
         pluginDisplayFeatureSeen,
-        disableCloudCacheRead
+        disableCloudCacheRead,
+        chatReasoningEffort
     };
 }
 

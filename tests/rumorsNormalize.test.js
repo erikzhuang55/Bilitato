@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeRumors } from "../utils/resultNormalize.js";
+import { isValidRumorsResult, normalizeRumors } from "../utils/resultNormalize.js";
 
 describe("normalizeRumors", () => {
   it("normalizes rumor overview and claims", () => {
@@ -70,5 +70,20 @@ describe("normalizeRumors", () => {
   it("returns null for non-object inputs", () => {
     expect(normalizeRumors(null)).toBeNull();
     expect(normalizeRumors("nope")).toBeNull();
+  });
+
+  it("accepts a complete no-claim result and rejects empty or malformed schemas", () => {
+    expect(isValidRumorsResult({
+      overall_score: 100,
+      overview: "未发现值得核查的重要声明",
+      claims: []
+    })).toBe(true);
+    expect(isValidRumorsResult({})).toBe(false);
+    expect(isValidRumorsResult({ overall_score: 100, overview: "", claims: [] })).toBe(false);
+    expect(isValidRumorsResult({
+      overall_score: 60,
+      overview: "需要核查",
+      claims: [{ text: "说法", verdict: true, confidence: 101, analysis: "", timestamp_sec: 0 }]
+    })).toBe(false);
   });
 });

@@ -4,6 +4,94 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.6.5": {
+      title: "Bilitato 已更新至 v1.6.5",
+      displayVersion: "v1.6.5",
+      subtitle: "聊天推理强度现已可调，同时改善宽屏观看、语音识别、字幕读取和下载体验。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "聊天推理强度可调",
+              desc: "聊天页可选择自动、低、中、高；自动模式继续沿用插件内置的模型适配规则。",
+              highlight: true,
+            },
+            {
+              title: "模型兼容更新更及时",
+              desc: "模型兼容规则可以更及时地更新；远程配置不可用时仍会自动使用插件内置规则。",
+            },
+            {
+              title: "MiMo Token Plan 支持多区域",
+              desc: "默认从中国大陆区域开始，遇到鉴权或区域不匹配时会自动尝试新加坡和欧洲；也可以在设置中手动固定区域。",
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "总结与分段生成更快",
+              desc: "针对不同模型调整生成方式，减少长时间停留在思考阶段或迟迟没有正文的问题。",
+              highlight: true,
+            },
+            {
+              title: "更新模型兼容范围",
+              desc: "改善 OpenAI、DeepSeek、Qwen、GLM、MiMo、Kimi、Gemini、Claude 和 OpenRouter 等模型的使用体验，并兼容部分旧模型名称。",
+            },
+            {
+              title: "长内容生成更稳定",
+              desc: "模型已经开始返回内容时会给予更充足的完成时间，减少总结或分段生成到一半被中断。",
+            },
+            {
+              title: "模型信息显示更简洁",
+              desc: "暂时隐藏不稳定的模型剩余与账号剩余字段，保留用时和 Token 信息。",
+            },
+            {
+              title: "宽屏观看自动切换侧边栏",
+              desc: "进入宽屏后自动使用 Bilitato 浏览器侧边栏，避免面板被播放器遮挡；退出宽屏会恢复原来的内嵌样式。",
+              highlight: true,
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "修复部分 B 站视频读取不到字幕",
+              desc: "改善字幕延迟加载和视频身份判断，减少页面已有字幕但插件没有读取到的情况。",
+              highlight: true,
+            },
+            {
+              title: "修复字幕反复刷新或短暂消失",
+              desc: "相同字幕不会重复写入，已经确认的当前分 P 字幕也不会被迟到的页面事件错误清空。",
+            },
+            {
+              title: "修复分段结果完整却重复生成",
+              desc: "完整且覆盖字幕末尾的分段会直接采用，不再因为结束标记而重复请求。",
+            },
+            {
+              title: "修复下载功能影响其他网站",
+              desc: "每个下载任务只对本次媒体地址临时补齐请求信息，下载完成、取消或中断后立即撤销，不再影响其他网站或其他下载任务。",
+              highlight: true,
+            },
+            {
+              title: "修复验真与语音识别异常",
+              desc: "改善验真空结果、格式异常和语音识别超时的处理，失败提示更准确。",
+            },
+            {
+              title: "修复无字幕视频首次转录失败",
+              desc: "音频处理组件会在准备完成后再开始切片，减少首次转录时提示组件未加载或页面连接失败。",
+            },
+            {
+              title: "修复本地模型 HTTP 地址无法授权",
+              desc: "localhost 与 127.0.0.1 可以继续使用 HTTP，本机之外的地址仍要求 HTTPS。",
+            },
+          ],
+        },
+      ],
+      privacy: "Bilitato 不会上传您的 API Key、Prompt 或与 AI 的聊天内容。远程请求策略仅包含模型匹配和白名单参数，不包含用户数据。",
+    },
     "1.6.4": {
       title: "Bilitato 已更新至 v1.6.4",
       displayVersion: "v1.6.4",
@@ -1065,10 +1153,9 @@
       <div class="release-notice-card" role="dialog" aria-modal="true">
         <button class="release-notice-close" type="button" title="关闭">×</button>
         <div class="release-notice-content"></div>
-        <div class="release-notice-pager"></div>
         <div class="release-notice-actions">
           <button class="release-notice-secondary" type="button">
-            稍后再看
+            查看过往更新
           </button>
           <button class="release-notice-primary" type="button">
             我知道了
@@ -1077,7 +1164,7 @@
       </div>
     `;
 
-    let pageIndex = 0;
+    let showingHistory = false;
     const normalizeGroups = (pageNote) => {
       if (Array.isArray(pageNote?.groups)) return pageNote.groups;
       const buckets = [];
@@ -1094,12 +1181,24 @@
     };
 
     const renderPage = () => {
-      const pageVersion = pageVersions[pageIndex] || version;
-      const pageNote = RELEASE_NOTES[pageVersion] || note;
-      const displayVersion = pageNote.displayVersion || `v${pageVersion}`;
+      const historyVersions = pageVersions.filter((item) => item !== version);
+      const pageNote = showingHistory ? {
+        title: "过往更新内容",
+        displayVersion: "历史版本",
+        subtitle: "按版本展开查看 Bilitato 以往的新增、优化与修复。",
+        groups: historyVersions.map((historyVersion) => {
+          const historyNote = RELEASE_NOTES[historyVersion];
+          return {
+            tag: historyNote?.displayVersion || `v${historyVersion}`,
+            sections: normalizeGroups(historyNote),
+          };
+        }),
+        privacy: note.privacy,
+      } : note;
+      const displayVersion = pageNote.displayVersion || `v${version}`;
       const groups = normalizeGroups(pageNote);
       const content = overlay.querySelector(".release-notice-content");
-      const pager = overlay.querySelector(".release-notice-pager");
+      const historyButton = overlay.querySelector(".release-notice-secondary");
       if (content) {
         content.innerHTML = `
           <div class="release-notice-fixed-head">
@@ -1117,8 +1216,9 @@
               ${groups
               .map(
                 (group) => `
-                  <section class="release-notice-group">
-                    <div class="release-notice-group-tag">${escapeHtml(group.tag)}</div>
+                  ${showingHistory
+                    ? `<details class="release-notice-group release-history-version"><summary class="release-history-version-summary">${escapeHtml(group.tag)}</summary>`
+                    : `<section class="release-notice-group"><div class="release-notice-group-tag">${escapeHtml(group.tag)}</div>`}
                     ${Array.isArray(group.sections) ? `
                       <div class="release-notice-section-list">
                         ${group.sections
@@ -1157,7 +1257,7 @@
                         .join("")}
                       </div>
                     `}
-                  </section>
+                  ${showingHistory ? "</details>" : "</section>"}
                 `
               )
               .join("")}
@@ -1169,12 +1269,9 @@
           </div>
         `;
       }
-      if (pager) {
-        pager.innerHTML = pageVersions.length > 1 ? `
-          <button class="release-notice-page-btn" type="button" data-release-page="prev" ${pageIndex === 0 ? "disabled" : ""}>上一页</button>
-          <span class="release-notice-page-count">${pageIndex + 1} / ${pageVersions.length}</span>
-          <button class="release-notice-page-btn" type="button" data-release-page="next" ${pageIndex >= pageVersions.length - 1 ? "disabled" : ""}>下一页</button>
-        ` : "";
+      if (historyButton) {
+        historyButton.hidden = pageVersions.length <= 1;
+        historyButton.textContent = showingHistory ? "返回本次更新" : "查看过往更新";
       }
     };
     renderPage();
@@ -1206,16 +1303,10 @@
 
     overlay
       .querySelector(".release-notice-secondary")
-      ?.addEventListener("click", closeOnly);
-
-    overlay.addEventListener("click", (event) => {
-      const pageButton = event.target.closest?.("[data-release-page]");
-      if (!pageButton) return;
-      const direction = pageButton.dataset.releasePage;
-      if (direction === "prev") pageIndex = Math.max(0, pageIndex - 1);
-      if (direction === "next") pageIndex = Math.min(pageVersions.length - 1, pageIndex + 1);
-      renderPage();
-    });
+      ?.addEventListener("click", () => {
+        showingHistory = !showingHistory;
+        renderPage();
+      });
 
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) closeOnly();
@@ -1227,7 +1318,9 @@
 
   function buildReleasePageVersions(version) {
     const majorHistory = [];
-    if (version === "1.6.4") {
+    if (version === "1.6.5") {
+      majorHistory.push("1.6.5", "1.6.4", "1.6.3", "1.6.2", "1.6.1", "1.6.0", "1.5.x", "1.4.x", "1.3.x", "1.2.x");
+    } else if (version === "1.6.4") {
       majorHistory.push("1.6.4", "1.6.3", "1.6.2", "1.6.1", "1.6.0", "1.5.x", "1.4.x", "1.3.x", "1.2.x");
     } else if (version === "1.6.3") {
       majorHistory.push("1.6.3", "1.6.2", "1.6.1", "1.6.0", "1.5.x", "1.4.x", "1.3.x", "1.2.x");

@@ -1259,6 +1259,33 @@ button {
     flex-shrink: 0;
 }
 
+.chat-reasoning-control {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+    margin: 0 2px 6px;
+    color: #7d8694;
+    font-size: 11px;
+}
+
+.chat-reasoning-control select {
+    min-width: 56px;
+    padding: 3px 20px 3px 7px;
+    border: 1px solid #e3e8ec;
+    border-radius: 7px;
+    background: #fff;
+    color: #2f3542;
+    font: inherit;
+    cursor: pointer;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .chat-reasoning-control select {
+    border-color: #3a414d;
+    background: #252a33;
+    color: #eef1f5;
+}
+
 .chat-input-wrap {
     position: relative;
 }

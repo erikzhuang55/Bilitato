@@ -68,6 +68,7 @@ describe("AIPluginLogger", () => {
       detail: {
         prompt: "please summarize this",
         subtitle: "long subtitle",
+        first_visible_text_ms: 1234,
         response_preview: "x".repeat(400),
         ranges: Array.from({ length: 25 }, (_, index) => ({ index }))
       }
@@ -77,6 +78,7 @@ describe("AIPluginLogger", () => {
     expect(detail.apiKey).toBe("[Filtered]");
     expect(detail.prompt).toBe("[Filtered]");
     expect(detail.subtitle).toBe("[Filtered]");
+    expect(detail.first_visible_text_ms).toBe(1234);
     expect(detail.response_preview).toContain("[Truncated]");
     expect(detail.ranges).toHaveLength(21);
     expect(detail.ranges.at(-1)).toBe("...[5 more]");

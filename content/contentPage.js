@@ -59,9 +59,27 @@
         return false;
     }
 
+    function isWidePlayerLayout(metrics = {}) {
+        const danmakuMarginTop = Number(metrics.danmakuMarginTop || 0);
+        if (Number.isFinite(danmakuMarginTop) && danmakuMarginTop > 100) return true;
+
+        const playerWidth = Number(metrics.playerWidth || 0);
+        const leftContainerWidth = Number(metrics.leftContainerWidth || 0);
+        return playerWidth > 0
+            && leftContainerWidth > 0
+            && playerWidth > leftContainerWidth + 24;
+    }
+
+    function isWideScreenToggleMarker(marker) {
+        const normalized = String(marker || "").trim().toLowerCase();
+        return normalized.includes("bpx-player-ctrl-wide") || normalized.includes("宽屏");
+    }
+
     globalThis.BilitatoContentPage = {
         cleanBilibiliTitle,
         isStorageChangeStateDirty,
+        isWidePlayerLayout,
+        isWideScreenToggleMarker,
         normalizeSubtitleOptions,
         pickSubtitle,
         resolveCidFromState,

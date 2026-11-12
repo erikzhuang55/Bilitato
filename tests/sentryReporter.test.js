@@ -340,6 +340,24 @@ describe("sentryReporter", () => {
     expect(rateLimitEvent.fingerprint.at(-1)).toBe("rate_limited");
   });
 
+  it("groups ASR timeouts by provider and stage", () => {
+    const event = createSentryEvent({
+      message: "转录请求超时，请稍后重试",
+      code: "ASR_REQUEST_TIMEOUT"
+    }, {
+      task: "transcribe",
+      provider: "groq_asr",
+      asr_stage: "provider_transcription"
+    });
+
+    expect(event.fingerprint).toEqual([
+      "bilitato-asr-timeout",
+      "groq_asr",
+      "provider_transcription"
+    ]);
+    expect(event.tags.asr_stage).toBe("provider_transcription");
+  });
+
   it("sends sentry envelope when enabled", async () => {
     const fetchImpl = vi.fn().mockResolvedValue({ ok: true, status: 200 });
     const result = await reportToSentry(

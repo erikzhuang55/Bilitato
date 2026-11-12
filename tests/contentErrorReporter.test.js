@@ -182,4 +182,23 @@ describe("contentErrorReporter", () => {
       source: "content_window_error"
     })).toBe(true);
   });
+
+  it("ignores unattributed Firefox Text-node append errors but keeps extension-owned ones", () => {
+    globalThis.chrome = {
+      runtime: { getURL: () => "moz-extension://bilitato-id/" }
+    };
+    const pageError = new DOMException("Node.appendChild: Cannot add children to a Text", "HierarchyRequestError");
+    pageError.stack = "p@https://www.bilibili.com/video/BV1:1:1";
+    expect(reporter.shouldReportContentError(pageError, {
+      task: "global_error",
+      source: "content_window_error"
+    })).toBe(false);
+
+    const extensionError = new DOMException("Node.appendChild: Cannot add children to a Text", "HierarchyRequestError");
+    extensionError.stack = "renderContent@moz-extension://bilitato-id/content.js:100:1";
+    expect(reporter.shouldReportContentError(extensionError, {
+      task: "global_error",
+      source: "content_window_error"
+    })).toBe(true);
+  });
 });

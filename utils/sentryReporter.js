@@ -123,6 +123,8 @@ export function createSentryEvent(errorInput, context = {}, runtime = {}) {
   const bvid = String(safeContext.bvid || "").trim();
   const pageType = String(safeContext.pageType || "").trim();
   const is429 = Number(errorMeta.status || 0) === 429 || String(errorMeta.code || "").startsWith("HTTP_429");
+  const isAsrTimeout = String(errorMeta.code || "") === "ASR_REQUEST_TIMEOUT";
+  const asrStage = String(safeContext.asr_stage || safeContext.timeout_phase || "provider_transcription").trim();
   const failureReason = is429 ? classifyProvider429Error({
     message: error.message,
     responseText: errorInput?.responseText,
@@ -139,7 +141,9 @@ export function createSentryEvent(errorInput, context = {}, runtime = {}) {
     environment: String(runtime.environment || "production"),
     fingerprint: is429
       ? ["bilitato-429", task || "unknown-task", provider || "unknown-provider", failureReason]
-      : undefined,
+      : (isAsrTimeout
+        ? ["bilitato-asr-timeout", provider || "unknown-provider", asrStage]
+        : undefined),
     tags: removeEmpty({
       extension_version: extensionVersion,
       provider,
@@ -153,6 +157,7 @@ export function createSentryEvent(errorInput, context = {}, runtime = {}) {
       page_type: pageType,
       source: safeContext.source,
       timeout_phase: safeContext.timeout_phase,
+      asr_stage: safeContext.asr_stage,
       request_stream: typeof safeContext.request_stream === "boolean"
         ? String(safeContext.request_stream)
         : undefined,

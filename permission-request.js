@@ -16,8 +16,10 @@
         const params = new URLSearchParams(window.location.search);
         baseUrl = String(params.get("baseUrl") || "").trim();
         const parsed = new URL(baseUrl);
-        if (parsed.protocol !== "https:") {
-            throw new Error("只支持 https 域名授权");
+        const isLocalHttp = parsed.protocol === "http:"
+            && ["localhost", "127.0.0.1"].includes(parsed.hostname.toLowerCase());
+        if (parsed.protocol !== "https:" && !isLocalHttp) {
+            throw new Error("远程地址必须使用 HTTPS；本地 HTTP 仅支持 localhost 或 127.0.0.1");
         }
         origin = parsed.origin;
         if (domainEl) {

@@ -12,12 +12,31 @@ const DEFAULT_MODELSCOPE_FALLBACK = Object.freeze({
   enabled: true,
   maxAttempts: 4,
   tasks: Object.freeze({
-    default: Object.freeze(["Qwen/Qwen3-30B-A3B-Instruct-2507", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V4-Flash-0731", "deepseek-ai/DeepSeek-V4-Pro"]),
-    summary: Object.freeze(["Qwen/Qwen3-30B-A3B-Instruct-2507", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V4-Flash-0731", "deepseek-ai/DeepSeek-V4-Pro"]),
-    segments: Object.freeze(["Qwen/Qwen3-Coder-30B-A3B-Instruct", "Qwen/Qwen3-30B-A3B-Instruct-2507", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V4-Flash-0731"]),
-    rumors: Object.freeze(["Qwen/Qwen3-30B-A3B-Instruct-2507", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V4-Flash-0731"]),
-    chat: Object.freeze(["Qwen/Qwen3-30B-A3B-Instruct-2507", "Qwen/Qwen3-30B-A3B", "Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V4-Flash-0731"]),
+    default: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
+    summary: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
+    segments: Object.freeze(["Qwen/Qwen3.5-27B", "Qwen/Qwen3.8-Flash-Next", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
+    rumors: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
+    chat: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
   }),
+});
+
+const REQUEST_POLICY_TASKS = new Set(["summary", "segments", "summary_segments_merged", "rumors", "chat"]);
+const REQUEST_POLICY_MODES = new Set(["provider_default", "disabled", "none", "low", "medium", "high"]);
+const REQUEST_POLICY_TRANSPORTS = new Set([
+  "provider_default",
+  "reasoning_effort",
+  "openrouter_reasoning",
+  "gemini_thinking",
+  "claude_effort",
+  "enable_thinking",
+  "thinking_type",
+  "chat_template_enable_thinking",
+]);
+
+const DEFAULT_REQUEST_POLICIES = Object.freeze({
+  schemaVersion: 1,
+  enabled: true,
+  rules: Object.freeze([]),
 });
 
 export const DEFAULT_REMOTE_CONFIG = Object.freeze({
@@ -28,9 +47,10 @@ export const DEFAULT_REMOTE_CONFIG = Object.freeze({
   providers: {},
   asr: {},
   modelFallback: DEFAULT_MODELSCOPE_FALLBACK,
+  requestPolicies: DEFAULT_REQUEST_POLICIES,
 });
 
-export const REMOTE_CONFIG_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+export const REMOTE_CONFIG_CACHE_MAX_AGE_MS = 72 * 60 * 60 * 1000;
 
 export function isRemoteConfigCacheFresh(
   fetchedAt,
@@ -119,10 +139,49 @@ function normalizeModelFallback(value = {}) {
   };
 }
 
+function normalizeRequestPolicies(value = {}) {
+  const incoming = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const schemaVersion = Math.max(0, Math.floor(Number(incoming.schema_version ?? incoming.schemaVersion ?? 1)) || 1);
+  if (schemaVersion !== 1) return { schemaVersion, enabled: false, rules: [] };
+  const rules = (Array.isArray(incoming.rules) ? incoming.rules : []).slice(0, 100).map((rule) => {
+    if (!rule || typeof rule !== "object" || Array.isArray(rule)) return null;
+    const id = cleanText(rule.id, 80);
+    const provider = cleanText(rule.provider, 50).toLowerCase().replace(/[^a-z0-9_*-]/g, "");
+    const modelPattern = cleanText(rule.model_pattern || rule.modelPattern, 200);
+    const tasks = [...new Set((Array.isArray(rule.tasks) ? rule.tasks : [])
+      .map((task) => cleanText(task, 40).toLowerCase())
+      .filter((task) => REQUEST_POLICY_TASKS.has(task)))];
+    const reasoning = rule.reasoning && typeof rule.reasoning === "object" && !Array.isArray(rule.reasoning)
+      ? rule.reasoning
+      : rule;
+    const mode = cleanText(reasoning.mode, 30).toLowerCase();
+    const transport = cleanText(reasoning.transport, 50).toLowerCase();
+    const validModeTransport = (
+      (mode === "provider_default" && transport === "provider_default")
+      || (mode === "disabled" && ["reasoning_effort", "enable_thinking", "thinking_type", "chat_template_enable_thinking"].includes(transport))
+      || (["none", "low", "medium", "high"].includes(mode)
+        && ["reasoning_effort", "openrouter_reasoning", "gemini_thinking", "claude_effort"].includes(transport))
+    );
+    try {
+      if (!id || !provider || !modelPattern || !tasks.length || !REQUEST_POLICY_MODES.has(mode)
+        || !REQUEST_POLICY_TRANSPORTS.has(transport) || !validModeTransport) return null;
+      new RegExp(modelPattern, "i");
+    } catch {
+      return null;
+    }
+    return { id, provider, modelPattern, tasks, mode, transport };
+  }).filter(Boolean);
+  return {
+    schemaVersion,
+    enabled: incoming.enabled !== false,
+    rules,
+  };
+}
+
 export function normalizeRemoteConfigRow(row = {}) {
   const payload = row?.payload && typeof row.payload === "object" && !Array.isArray(row.payload)
     ? row.payload
-    : {};
+    : row && typeof row === "object" && !Array.isArray(row) ? row : {};
   return {
     configKey: cleanText(row.config_key || row.configKey || "production", 80) || "production",
     revision: Math.max(0, Math.floor(Number(row.revision || 0)) || 0),
@@ -131,6 +190,7 @@ export function normalizeRemoteConfigRow(row = {}) {
     providers: normalizeProviderMap(payload.providers),
     asr: normalizeProviderMap(payload.asr),
     modelFallback: normalizeModelFallback(payload.model_fallback || payload.modelFallback),
+    requestPolicies: normalizeRequestPolicies(payload.request_policies || payload.requestPolicies),
   };
 }
 

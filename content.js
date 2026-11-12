@@ -98,17 +98,23 @@ function dedupeDisplayedLineOnlyContentSegments(segments, cache = {}) {
 }
 
 const MODELSCOPE_RECOMMENDED_MODEL_ORDER = [
-    "Qwen/Qwen3-30B-A3B-Instruct-2507",
-    "Qwen/Qwen3-30B-A3B"
+    "Qwen/Qwen3.8-Flash-Next",
+    "Qwen/Qwen3.5-27B"
 ];
 const MODELSCOPE_RECOMMENDED_MODELS = new Set(MODELSCOPE_RECOMMENDED_MODEL_ORDER);
+const MODELSCOPE_RETIRED_MODELS = new Set([
+    "zhipuai/glm-5.2",
+    "minimax/minimax-m1-80k",
+    "mistralai/mistral-large-instruct-2407"
+]);
 
 function prioritizeRecommendedProviderModels(providerKey, models) {
     const list = [...new Set((models || []).map((model) => String(model || "").trim()).filter(Boolean))];
     if (String(providerKey || "").toLowerCase() !== "modelscope") return list;
+    const available = list.filter((model) => !MODELSCOPE_RETIRED_MODELS.has(model.toLowerCase()));
     return [
-        ...MODELSCOPE_RECOMMENDED_MODEL_ORDER.filter((model) => list.includes(model)),
-        ...list.filter((model) => !MODELSCOPE_RECOMMENDED_MODELS.has(model))
+        ...MODELSCOPE_RECOMMENDED_MODEL_ORDER.filter((model) => available.includes(model)),
+        ...available.filter((model) => !MODELSCOPE_RECOMMENDED_MODELS.has(model))
     ];
 }
 
@@ -120,42 +126,50 @@ function getProviderModelOptions(providerKey) {
     }
     const options = {
         modelscope: [
-            "Qwen/Qwen3-30B-A3B-Instruct-2507",
-            "Qwen/Qwen3-235B-A22B-Instruct-2507",
-            "Qwen/Qwen3-Coder-30B-A3B-Instruct",
-            "Qwen/Qwen3-30B-A3B",
+            "Qwen/Qwen3.8-Flash-Next",
+            "Qwen/Qwen3.8-27B",
+            "Qwen/Qwen3.5-397B-A17B",
+            "Qwen/Qwen3.5-122B-A10B",
+            "Qwen/Qwen3.5-35B-A3B",
+            "Qwen/Qwen3.5-27B",
+            "deepseek-ai/DeepSeek-V4.1-Flash",
             "deepseek-ai/DeepSeek-V4-Pro",
+            "deepseek-ai/DeepSeek-V4-Pro-0813",
             "deepseek-ai/DeepSeek-V4-Flash-0731"
         ],
         zhipu: [
+            "glm-5.2",
+            "glm-5-turbo",
             "glm-5.1",
             "glm-5",
-            "glm-5-turbo",
             "glm-4.7",
             "glm-4.6",
             "glm-4.5"
         ],
         gemini: [
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
             "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
             "gemini-3.1-pro-preview",
             "gemini-3-flash-preview",
-            "gemini-3.1-flash-lite",
             "gemini-2.5-pro",
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite"
         ],
         openai: [
+            "gpt-6.1-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-5.6",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
             "gpt-5.5",
-            "gpt-5.5-pro",
             "gpt-5.4",
-            "gpt-5.4-pro",
             "gpt-5.4-mini",
-            "gpt-5.4-nano",
             "gpt-5.2",
-            "gpt-5.2-pro",
-            "gpt-5.1",
             "gpt-5",
-            "gpt-5-pro",
             "gpt-5-mini",
             "gpt-5-nano",
             "gpt-4.1",
@@ -164,32 +178,39 @@ function getProviderModelOptions(providerKey) {
             "gpt-4o-mini"
         ],
         openrouter: [
-            "openrouter/free",
             "openrouter/auto",
+            "openrouter/free",
             "~openai/gpt-latest",
             "~openai/gpt-mini-latest",
+            "openai/gpt-6.1-sol",
+            "openai/gpt-6-astra",
+            "openai/gpt-6-luna",
             "openai/gpt-5.5",
             "openai/gpt-chat-latest",
             "~anthropic/claude-sonnet-latest",
+            "anthropic/claude-sonnet-5.5",
+            "anthropic/claude-opus-5.5",
             "anthropic/claude-opus-4.7",
-            "anthropic/claude-opus-4.7-fast",
             "~google/gemini-pro-latest",
             "~google/gemini-flash-latest",
+            "google/gemini-3.8-flash",
             "google/gemini-3.5-flash",
             "qwen/qwen3.7-max",
-            "x-ai/grok-4.3",
-            "x-ai/grok-build-0.1",
-            "moonshotai/kimi-k2.6",
             "deepseek/deepseek-v4-pro",
             "deepseek/deepseek-v3.2",
+            "moonshotai/kimi-k3",
+            "moonshotai/kimi-k2.6",
+            "z-ai/glm-5.2",
             "z-ai/glm-5.1",
-            "openrouter/owl-alpha"
+            "x-ai/grok-4.3",
+            "x-ai/grok-build-0.1"
         ],
         deepseek: [
-            "deepseek-v4-flash",
+            "deepseek-flash",
             "deepseek-v4-pro"
         ],
         kimi: [
+            "kimi-k3",
             "kimi-k2.6",
             "kimi-k2.5",
             "kimi-k2-turbo-preview",
@@ -200,15 +221,14 @@ function getProviderModelOptions(providerKey) {
             "moonshot-v1-128k"
         ],
         mimo: [
-            "mimo-v2.5-pro",
-            "mimo-v2.5",
-            "mimo-v2-pro",
-            "mimo-v2-omni",
-            "mimo-v2-flash"
+            "mimo-v2.6-flash",
+            "mimo-v2.6-pro"
         ],
         claude: [
-            "claude-opus-4-5",
+            "claude-sonnet-5-5",
+            "claude-opus-5-5",
             "claude-sonnet-4-6",
+            "claude-opus-4-5",
             "claude-sonnet-4-5",
             "claude-haiku-4-5"
         ]
@@ -229,11 +249,19 @@ function resolveProviderModelValue(providerKey, model) {
         "moonshotai/Kimi-K2.5",
         "moonshotai/Kimi-K2.6",
         "MiniMax/MiniMax-M2.5",
+        "MiniMax/MiniMax-M3",
+        "MiniMax/MiniMax-M1-80k",
+        "meituan-longcat/LongCat-Flash-Lite",
         "ZhipuAI/GLM-5.1",
+        "ZhipuAI/GLM-5.2",
         "ZhipuAI/GLM-4.7-Flash",
-        "Qwen/Qwen3.5-27B",
+        "mistralai/Mistral-Large-Instruct-2407",
         "Qwen/Qwen2.5-72B-Instruct",
-        "deepseek-ai/DeepSeek-V4-Flash"
+        "deepseek-ai/DeepSeek-V4-Flash",
+        "Qwen/Qwen3-30B-A3B-Instruct-2507",
+        "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+        "Qwen/Qwen3-30B-A3B"
     ]);
     return legacyModelScopeModels.has(value) ? getDefaultProviderModel("modelscope") : value;
 }
@@ -256,20 +284,14 @@ function getProviderFreeQuotaText(providerKey) {
     const quotaText = {
         modelscope: [
             "ModelScope 免费额度",
-            "Qwen3-30B-A3B-Instruct-2507：200次/天",
-            "Qwen3-235B-A22B-Instruct-2507：50次/天",
-            "Qwen3-Coder-30B-A3B-Instruct：100次/天",
-            "Qwen3-30B-A3B：200次/天",
-            "DeepSeek-V4-Pro：20次/天",
-            "DeepSeek-V4-Flash-0731：50次/天",
-            "RPM：每个模型约5-20"
+            "额度会随模型和活动调整",
+            "请以 ModelScope 控制台及调用响应头为准",
+            "插件会在可用时显示当前模型的剩余次数"
         ],
         gemini: [
             "Gemini 免费额度",
-            "3.5 Flash：5 RPM / 250K TPM / 20 RPD",
-            "2.5 Flash：5 RPM / 250K TPM / 20 RPD",
-            "3.1 Flash Lite：15 RPM / 250K TPM / 500 RPD",
-            "2.5 Flash Lite：10 RPM / 250K TPM / 20 RPD"
+            "额度因模型、账号和项目而异",
+            "请以 Google AI Studio 的 Rate limits 页面为准"
         ],
         openrouter: [
             "OpenRouter 免费额度",
@@ -320,6 +342,8 @@ const {
 const {
     cleanBilibiliTitle,
     isStorageChangeStateDirty: isStorageChangeStateDirtyFromPage,
+    isWidePlayerLayout,
+    isWideScreenToggleMarker,
     normalizeSubtitleOptions: normalizeSubtitleOptionsFromPage,
     pickSubtitle: pickSubtitleFromPage,
     resolveCurrentBvidFromState
@@ -337,6 +361,16 @@ const DEFAULT_GROQ_ASR_BASE_URL = "https://api.groq.com/openai/v1";
 const DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1";
 const DEFAULT_MIMO_ASR_BASE_URL = "https://api.xiaomimimo.com/v1";
 const DEFAULT_MIMO_ASR_MODEL = "mimo-v2.5-asr";
+const MIMO_TOKEN_PLAN_REGION_LABELS = Object.freeze({ cn: "中国大陆", sgp: "新加坡", ams: "欧洲" });
+
+function normalizeMimoTokenPlanRegionInput(region) {
+    const normalized = String(region || "").trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(MIMO_TOKEN_PLAN_REGION_LABELS, normalized) ? normalized : "cn";
+}
+
+function normalizeMimoTokenPlanRegionModeInput(mode) {
+    return String(mode || "").trim().toLowerCase() === "manual" ? "manual" : "auto";
+}
 
 const SETUP_PREVIEW_VIDEO_URL = "https://www.bilibili.com/video/BV1ojfDBSEPv/?spm_id_from=333.337.search-card.all.click&vd_source=3f5a30216e0108cea18aa63a3bff11b8";
 const SETUP_PREVIEW_BVID = normalizeBvidCase(getBvidFromUrl?.(SETUP_PREVIEW_VIDEO_URL) || "BV1ojfDBSEPv");
@@ -361,7 +395,6 @@ window.addEventListener("pagehide", () => abortBackgroundOperations("pagehide"))
 window.addEventListener("beforeunload", () => abortBackgroundOperations("beforeunload"));
 
 const UI_ICON_BASE_DIR = "assets/ui";
-const FOLLOW_RESUME_MS = 5000;
 const SUBTITLE_CHECK_DELAY_MS = 1000;
 const SUBTITLE_DETECT_TIMEOUT_MS = 5000;
 const SUBTITLE_CONTROL_STABLE_MS = 3000;
@@ -653,6 +686,7 @@ const subtitleUiCoordinator = {
     lastRouteSwitchAt: 0
 };
 const playInfoWaiters = new Set();
+const subtitleCacheSyncInFlight = new Map();
 
 function normalizeComparablePartId(value) {
     const raw = String(value ?? "").trim();
@@ -786,7 +820,15 @@ function markSubtitleStateChanged(reason, detail = {}) {
 
 function commitSubtitleRows(rows, options = {}) {
     const list = Array.isArray(rows) ? rows : [];
-    if (!list.length) return false;
+    if (!list.length) {
+        logContent.warn("subtitle_rows_discarded", {
+            task: "subtitle",
+            bvid: normalizeBvidCase(options.bvid || getBvidFromUrl(location.href) || ""),
+            code: "SUBTITLE_ROWS_EMPTY",
+            detail: { source: String(options.source || "unknown"), reason: "empty_rows" }
+        });
+        return false;
+    }
     const currentBvid = normalizeBvidCase(getBvidFromUrl(location.href) || "");
     const currentP = Number(getRoutePartId() || 1);
     const incomingBvid = normalizeBvidCase(options.bvid || currentBvid || "");
@@ -806,6 +848,21 @@ function commitSubtitleRows(rows, options = {}) {
             currentP,
             currentCid
         });
+        logContent.warn("subtitle_rows_discarded", {
+            task: "subtitle",
+            bvid: incomingBvid,
+            code: "SUBTITLE_ROUTE_MISMATCH",
+            detail: {
+                source: String(options.source || "unknown"),
+                reason: "route_identity_mismatch",
+                row_count: list.length,
+                incoming_p: incomingP,
+                incoming_cid: incomingCid,
+                current_bvid: currentBvid,
+                current_p: currentP,
+                current_cid: currentCid
+            }
+        });
         return false;
     }
     const routeKey = getCurrentSubtitleRouteKey();
@@ -821,6 +878,16 @@ function commitSubtitleRows(rows, options = {}) {
             routeKey,
             incomingRowCount: list.length,
             currentRowCount: existingRows.length
+        });
+        logContent.info("subtitle_rows_skipped", {
+            task: "subtitle",
+            bvid: incomingBvid,
+            detail: {
+                source,
+                reason: "current_rows_already_authoritative",
+                incoming_row_count: list.length,
+                current_row_count: existingRows.length
+            }
         });
         return false;
     }
@@ -858,7 +925,24 @@ function commitSubtitleRows(rows, options = {}) {
     if (!existingRows.length || subtitleUiCoordinator.initialAlignmentPending) {
         subtitleUiCoordinator.initialAlignmentPending = true;
     }
+    if (unchanged && alreadyReadyForRoute) {
+        logContent.info("subtitle_rows_skipped", {
+            task: "subtitle",
+            bvid: incomingBvid,
+            detail: { source, reason: "unchanged_rows", row_count: list.length }
+        });
+    }
     if (unchanged && alreadyReadyForRoute) return false;
+    logContent.info("subtitle_rows_applied", {
+        task: "subtitle",
+        bvid: incomingBvid,
+        detail: {
+            source,
+            row_count: list.length,
+            cid: subtitleUiCoordinator.rowsCid,
+            replaced_existing: existingRows.length > 0
+        }
+    });
     markSubtitleStateChanged(source, {
         rowCount: list.length,
         readyTransition: !alreadyReadyForRoute
@@ -1964,6 +2048,8 @@ const logInject = globalThis.AIPluginLogger.create("inject", {
     getDebugMode: () => isDebugLoggingEnabled()
 });
 let logWindowVisible = false;
+let playerWideModeActive = false;
+let wideSidePanelOpenPending = false;
 
 bootstrap();
 
@@ -1977,6 +2063,7 @@ async function bootstrap() {
     window.addEventListener("keydown", isolateChatInputKeyboardEvent, true);
     window.addEventListener("keydown", onGlobalShortcut, true);
     window.addEventListener("resize", syncPanelHeightMode);
+    initPlayerWideModeBridge();
     chrome.storage.onChanged.addListener(onStorageChanged);
     startRouteWatcher();
     await waitPanelMount();
@@ -2152,6 +2239,12 @@ async function onInjectMessage(event) {
     const subtitles = Array.isArray(event.data?.data) ? event.data.data : [];
     if (!subtitles.length) {
         logContent.warn("subtitle_detected", { source: "inject_message_empty" });
+        logContent.warn("subtitle_read_discarded", {
+            task: "subtitle",
+            bvid: normalizeBvidCase(event.data?.bvid || getBvidFromUrl(location.href) || ""),
+            code: "SUBTITLE_EMPTY_RESPONSE",
+            detail: { source: "inject", reason: "empty_rows" }
+        });
         return;
     }
     const bvid = normalizeBvidCase(event.data?.bvid) || normalizeBvidCase(resolveCurrentBvid());
@@ -2159,8 +2252,30 @@ async function onInjectMessage(event) {
     const partCount = Number(event.data?.partCount || 0);
     if (partCount > 0) appState.injectPartCount = partCount;
     const currentUrlBvid = normalizeBvidCase(getBvidFromUrl(location.href));
+    logContent.info("subtitle_read_received", {
+        task: "subtitle",
+        bvid: bvid || currentUrlBvid,
+        detail: {
+            source: "inject",
+            row_count: subtitles.length,
+            cid,
+            p: Number(event.data?.p || event.data?.tid || 0),
+            part_count: partCount
+        }
+    });
     if (bvid && currentUrlBvid && bvid !== currentUrlBvid) {
         pushSubtitleTimeline("drop_mismatch_bvid", { payloadBvid: bvid, currentBvid: currentUrlBvid });
+        logContent.warn("subtitle_read_discarded", {
+            task: "subtitle",
+            bvid,
+            code: "SUBTITLE_BVID_MISMATCH",
+            detail: {
+                source: "inject",
+                reason: "bvid_mismatch",
+                row_count: subtitles.length,
+                current_bvid: currentUrlBvid
+            }
+        });
         return;
     }
     const payloadP = Number(event.data?.p || event.data?.tid || 0);
@@ -2233,6 +2348,20 @@ async function onInjectMessage(event) {
             payloadRouteKey,
             coordinatorRouteKey: subtitleUiCoordinator.routeKey
         });
+        const discardReason = payloadP && currentUrlP && payloadP !== currentUrlP
+            ? "payload_p_mismatch"
+            : "route_state_not_aligned";
+        logContent.info("subtitle_direct_render_skipped", {
+            task: "subtitle",
+            bvid: pendingPayload.bvid,
+            detail: {
+                source: "inject",
+                reason: discardReason,
+                row_count: subtitles.length,
+                payload_route_key: payloadRouteKey,
+                current_route_key: subtitleUiCoordinator.routeKey
+            }
+        });
     }
     appState.subtitleCacheSyncPending = true;
     if (["summary", "real"].includes(appState.activePage)) renderContent();
@@ -2257,6 +2386,19 @@ async function onInjectMessage(event) {
             cid: pendingPayload.cid,
             current_bvid: currentBvid,
             current_cid: currentCid
+        });
+        logContent.warn("subtitle_read_discarded", {
+            task: "subtitle",
+            bvid: pendingPayload.bvid,
+            code: "SUBTITLE_STALE_AFTER_SYNC",
+            detail: {
+                source: "inject",
+                reason: "route_changed_after_forward",
+                row_count: subtitles.length,
+                payload_cid: pendingPayload.cid,
+                current_bvid: currentBvid,
+                current_cid: currentCid
+            }
         });
         return;
     }
@@ -2480,6 +2622,87 @@ function onStorageChanged(changes, areaName) {
 let panelShadowRoot = null;
 let playerResizeObserver = null;
 
+function getPlayerWideLayoutMetrics() {
+    const player = document.querySelector("#bilibili-player");
+    const leftContainer = document.querySelector(".video-container-v1 .left-container")
+        || document.querySelector(".left-container");
+    const danmakuBox = document.querySelector("#danmukuBox");
+    return {
+        playerWidth: player?.getBoundingClientRect?.().width || 0,
+        leftContainerWidth: leftContainer?.getBoundingClientRect?.().width || 0,
+        danmakuMarginTop: danmakuBox ? parseFloat(getComputedStyle(danmakuBox).marginTop) || 0 : 0
+    };
+}
+
+function isPlayerWideMode() {
+    return !!isWidePlayerLayout?.(getPlayerWideLayoutMetrics());
+}
+
+function isWideScreenToggleClick(event) {
+    const path = typeof event?.composedPath === "function" ? event.composedPath() : [];
+    for (const node of path) {
+        if (!node || node === document || node === window) continue;
+        const className = typeof node.className === "string"
+            ? node.className
+            : String(node.className?.baseVal || "");
+        const marker = [
+            className,
+            node.getAttribute?.("title") || "",
+            node.getAttribute?.("aria-label") || "",
+            node.getAttribute?.("data-title") || ""
+        ].join(" ");
+        if (isWideScreenToggleMarker?.(marker)) return true;
+        if (node.id === "bilibili-player") break;
+    }
+    return false;
+}
+
+function syncPlayerWideMode() {
+    const nextWide = isPlayerWideMode();
+    if (nextWide === playerWideModeActive) return nextWide;
+    playerWideModeActive = nextWide;
+    if (!nextWide) {
+        setEmbeddedPanelVisible(true);
+        logUI.info("wide_mode_embedded_restored", { task: "ui" });
+    }
+    return nextWide;
+}
+
+function openSidePanelForWideMode() {
+    if (wideSidePanelOpenPending) return;
+    wideSidePanelOpenPending = true;
+    chrome.runtime.sendMessage({ action: "OPEN_SIDE_PANEL", reason: "player_wide" })
+        .then((result) => {
+            if (!result?.ok) {
+                showToast(result?.error || "无法打开浏览器侧边栏");
+                return;
+            }
+            if (result.requiresToolbarAction) {
+                showToast("请点击 Firefox 工具栏中的 Bilitato 图标打开侧边栏");
+                return;
+            }
+            setEmbeddedPanelVisible(false);
+            logUI.info("wide_mode_side_panel_opened", { task: "ui" });
+        })
+        .catch((error) => showToast(error?.message || "无法打开浏览器侧边栏"))
+        .finally(() => {
+            wideSidePanelOpenPending = false;
+        });
+}
+
+function onPlayerWideToggleClick(event) {
+    if (!isWideScreenToggleClick(event)) return;
+    const wasWide = isPlayerWideMode();
+    if (!wasWide) openSidePanelForWideMode();
+    setTimeout(syncPlayerWideMode, 0);
+    setTimeout(syncPlayerWideMode, 160);
+}
+
+function initPlayerWideModeBridge() {
+    playerWideModeActive = isPlayerWideMode();
+    document.addEventListener("click", onPlayerWideToggleClick, true);
+}
+
 function getPanelRoot() {
     return panelShadowRoot;
 }
@@ -2649,6 +2872,7 @@ function initResizeObserver() {
     const videoArea = document.querySelector(".bpx-player-video-area");
     
     playerResizeObserver = new ResizeObserver(() => {
+        syncPlayerWideMode();
         requestAnimationFrame(syncPluginHeight);
     });
     
@@ -5236,6 +5460,9 @@ function renderChat(panel) {
     }
     const history = Array.isArray(appState.cache?.history) ? appState.cache.history : [];
     const pending = Array.isArray(appState.chatPending) ? appState.chatPending : [];
+    const chatReasoningEffort = ["low", "medium", "high"].includes(String(appState.settings?.chatReasoningEffort || "").toLowerCase())
+        ? String(appState.settings.chatReasoningEffort).toLowerCase()
+        : "auto";
     logPartScopeDiagnostic("ui_render_read", {
         feature: "chat",
         historyCount: history.length,
@@ -5252,7 +5479,8 @@ function renderChat(panel) {
         hLast: history[history.length - 1]?.content?.length,
         p: pending.length,
         last: pending[pending.length-1]?.content?.length,
-        s: appState.chatStreamingId
+        s: appState.chatStreamingId,
+        reasoning: chatReasoningEffort
     });
     
     // Always check for existing list first
@@ -5291,6 +5519,9 @@ function renderChat(panel) {
     const sendLabel = isGenerating ? "■" : "↑";
     const sendAria = isGenerating ? "停止" : "发送";
     const chatRowsHtml = renderChatRows(history);
+    const chatReasoningOptions = [["auto", "自动"], ["low", "低"], ["medium", "中"], ["high", "高"]]
+        .map(([key, label]) => `<option value="${key}"${chatReasoningEffort === key ? " selected" : ""}>${label}</option>`)
+        .join("");
 
     // If chat structure exists, just update content to prevent scroll jump
     if (listExisting) {
@@ -5351,6 +5582,9 @@ function renderChat(panel) {
             ${guideSection}
             <div class="chat-display-area" id="chat-list"${initialStyle}>${chatRowsHtml}</div>
             <div class="chat-footer">
+                <label class="chat-reasoning-control">推理
+                    <select id="chat-reasoning-effort" aria-label="聊天推理强度">${chatReasoningOptions}</select>
+                </label>
                 <div class="chat-input-wrap">
                     <textarea id="chat-input" placeholder="有咩想问的？"></textarea>
                     <button class="chat-send-btn ${isGenerating ? "stopping" : ""}" data-action="${sendAction}" aria-label="${sendAria}">${sendLabel}</button>
@@ -5359,6 +5593,19 @@ function renderChat(panel) {
         </section>
     `;
     const input = panel.querySelector("#chat-input");
+    panel.querySelector("#chat-reasoning-effort")?.addEventListener("change", async (event) => {
+        const reasoningEffort = ["low", "medium", "high"].includes(String(event.target.value || "").toLowerCase())
+            ? String(event.target.value).toLowerCase()
+            : "auto";
+        const nextSettings = { ...(appState.settings || {}), chatReasoningEffort: reasoningEffort };
+        appState.settings = nextSettings;
+        try {
+            const response = await chrome.runtime.sendMessage({ action: "SAVE_SETTINGS", settings: nextSettings });
+            appState.settings = response?.settings || nextSettings;
+        } catch (error) {
+            showToast(error?.message || "保存失败");
+        }
+    });
     input?.addEventListener("input", () => {
         if (!String(input.value || "").trim()) return;
         dismissChatGuide();
@@ -5964,6 +6211,10 @@ function renderSettings(panel) {
     const groqVisible = asrProviderKey === "groq" ? "" : "settings-hidden";
     const siliconFlowVisible = asrProviderKey === "siliconflow" ? "" : "settings-hidden";
     const mimoVisible = asrProviderKey === "mimo" ? "" : "settings-hidden";
+    const mimoTokenPlanRegion = normalizeMimoTokenPlanRegionInput(settings.mimoTokenPlanRegion);
+    const mimoTokenPlanRegionMode = normalizeMimoTokenPlanRegionModeInput(settings.mimoTokenPlanRegionMode);
+    const mimoTokenPlanRegionSelection = mimoTokenPlanRegionMode === "auto" ? "auto" : mimoTokenPlanRegion;
+    const mimoTokenPlanRegionVisible = providerKey === "mimo" || asrProviderKey === "mimo" ? "" : "settings-hidden";
     const guidedVisible = promptMode === "guided" ? "" : "settings-hidden";
     const customPromptVisible = promptMode === "custom" ? "" : "settings-hidden";
     panel.innerHTML = `
@@ -5995,15 +6246,14 @@ function renderSettings(panel) {
                 </div>
                 <div class="settings-provider-url">${escapeHtml(provider.baseUrl || "-")}</div>
                 <label>API Key</label>
-                ${renderSecretInput("settings-api-key", settings.apiKey || "", "示例：sk-xxxxx")}
+                ${renderSecretInput("settings-api-key", settings.apiKey || "", providerKey === "mimo" ? "示例：sk-xxxxx / tp-xxxxx" : "示例：sk-xxxxx")}
                 <label class="settings-label-with-info">Model${modelLabelInfo}</label>
                 <div id="settings-provider-model-wrap" class="${providerModelWrapVisible}">
                     ${renderCustomSelect("settings-provider-model", [
                         ...providerModelOptions.map((model) => ({
                             value: model,
                             label: model,
-                            tag: providerKey === "modelscope" && MODELSCOPE_RECOMMENDED_MODELS.has(model) ? "推荐" : "",
-                            tooltip: providerKey === "modelscope" ? (MODELSCOPE_MODEL_LIMIT_TOOLTIPS[model] || "") : ""
+                            tag: providerKey === "modelscope" && MODELSCOPE_RECOMMENDED_MODELS.has(model) ? "推荐" : ""
                         })),
                         { value: "custom", label: "自定义" }
                     ], providerModelSelectValue)}
@@ -6021,6 +6271,12 @@ function renderSettings(panel) {
                     <input id="settings-base-url" type="text" value="${escapeHtml(settings.customBaseUrl || "")}" placeholder="示例：https://api.example.com/v1">
                     <button type="button" class="panel-btn ghost" data-action="settings-authorize-custom-origin">授权当前域名</button>
                 </div>
+                <label class="settings-mimo-token-plan-region-field ${mimoTokenPlanRegionVisible}">MiMo Token Plan 区域</label>
+                <select id="settings-mimo-token-plan-region" class="settings-mimo-token-plan-region-field ${mimoTokenPlanRegionVisible}">
+                    <option value="auto" ${mimoTokenPlanRegionSelection === "auto" ? "selected" : ""}>自动（当前：${MIMO_TOKEN_PLAN_REGION_LABELS[mimoTokenPlanRegion]}）</option>
+                    ${Object.entries(MIMO_TOKEN_PLAN_REGION_LABELS).map(([value, label]) => `<option value="${value}" ${mimoTokenPlanRegionSelection === value ? "selected" : ""}>固定为${label}</option>`).join("")}
+                </select>
+                <div class="settings-model-hint settings-mimo-token-plan-region-field ${mimoTokenPlanRegionVisible}">自动模式默认从中国大陆开始，鉴权或区域不匹配时尝试其他区域并记住成功结果；普通 sk- 密钥不受影响。</div>
                 <div class="settings-group-title" id="settings-asr-section">ASR（音频识别）模型配置</div>
                 <label>ASR Provider</label>
                 <div class="settings-provider-row">
@@ -6064,7 +6320,7 @@ function renderSettings(panel) {
                 <div id="settings-asr-mimo-wrap" class="settings-asr-provider-fields ${mimoVisible}">
                     <div class="settings-provider-url">${DEFAULT_MIMO_ASR_BASE_URL}</div>
                     <label>小米 MiMo API Key</label>
-                    ${renderSecretInput("settings-mimo-api-key", settings.mimoApiKey || "", "示例：sk-xxxxx")}
+                    ${renderSecretInput("settings-mimo-api-key", settings.mimoApiKey || "", "示例：sk-xxxxx / tp-xxxxx")}
                     <label>ASR 模型</label>
                     <input id="settings-mimo-asr-model" type="text" value="${DEFAULT_MIMO_ASR_MODEL}" readonly>
                 </div>
@@ -6272,7 +6528,7 @@ function renderSettings(panel) {
     panel.querySelector("#settings-base-url")?.addEventListener("input", () => updateSettingsProviderHint(panel));
     ["#settings-base-url"].forEach((selector) => {
         panel.querySelector(selector)?.addEventListener("blur", (event) => {
-            const prefixed = ensureHttpsUrlPrefixInput(event.currentTarget.value);
+            const prefixed = ensureCustomBaseUrlPrefixInput(event.currentTarget.value);
             if (prefixed) event.currentTarget.value = prefixed;
         });
     });
@@ -7470,6 +7726,9 @@ async function handleSendChat() {
         text,
         messageId,
         bvid: normalizeBvidCase(resolveCurrentBvid() || ""),
+        reasoningEffort: ["low", "medium", "high"].includes(String(appState.settings?.chatReasoningEffort || "").toLowerCase())
+            ? String(appState.settings.chatReasoningEffort).toLowerCase()
+            : "auto",
         taskContext: {
             cid: resolveCid(),
             tid: getTidFromUrl(location.href),
@@ -7537,14 +7796,7 @@ function renderTopRemaining() {
     const output = Number(latest.outputTokens || 0);
     const tokenStr = input || output ? `${total} (In ${input} / Out ${output})` : `${total}`;
     const latency = Number.isFinite(Number(latest.latencyMs)) ? `${(Number(latest.latencyMs) / 1000).toFixed(3)}s` : "-";
-    const parts = [`用时: ${latency}`, `Tokens: ${tokenStr}`];
-    if (String(latest.provider || "").toLowerCase() === "modelscope") {
-        parts.push(
-            `模型剩余 ${formatMetricQuotaValue(latest.modelScopeRemaining, latest.modelScopeModelLimit)}`,
-            `账号剩余 ${formatMetricQuotaValue(latest.modelScopeUserRemaining, latest.modelScopeUserLimit)}`
-        );
-    }
-    const metricLine = parts.join(" · ");
+    const metricLine = [`用时: ${latency}`, `Tokens: ${tokenStr}`].join(" · ");
     setMetricText(metricLine);
 }
 
@@ -8283,6 +8535,7 @@ function updateSettingsProviderHint(panel) {
     const providerModelSelect = panel?.querySelector("#settings-provider-model");
     const providerCustomModelInput = panel?.querySelector("#settings-provider-custom-model");
     const openRouterFreeHint = panel?.querySelector("#settings-openrouter-free-hint");
+    const mimoRegionFields = panel?.querySelectorAll(".settings-mimo-token-plan-region-field") || [];
     const customBase = String(panel?.querySelector("#settings-base-url")?.value || "").trim();
     const isCustom = key === "custom";
     const hasProviderModelSelect = !isCustom && getProviderModelOptions(key).length > 0;
@@ -8298,6 +8551,7 @@ function updateSettingsProviderHint(panel) {
     if (openRouterFreeHint) {
         openRouterFreeHint.classList.toggle("settings-hidden", !(key === "openrouter" && currentModel === "openrouter/free"));
     }
+    mimoRegionFields.forEach((node) => node.classList.toggle("settings-hidden", key !== "mimo" && String(panel?.querySelector("#settings-asr-provider")?.value || "") !== "mimo"));
     if (urlNode) {
         urlNode.textContent = isCustom ? (customBase || "请填写自定义 Base URL") : (provider.baseUrl || "-");
     }
@@ -8308,15 +8562,6 @@ function updateSettingsProviderHint(panel) {
 }
 
 const GROQ_ASR_LIMIT_TOOLTIP = "当前常见 Groq 转录限额：RPM 20；ASH 7.2K（每小时约 2 小时音频）。具体以 Groq 控制台 Limits 页面为准。";
-const MODELSCOPE_MODEL_LIMIT_TOOLTIPS = {
-    "Qwen/Qwen3-30B-A3B-Instruct-2507": "Qwen/Qwen3-30B-A3B-Instruct-2507 · ModelScope 免费额度：200次/天",
-    "Qwen/Qwen3-235B-A22B-Instruct-2507": "Qwen/Qwen3-235B-A22B-Instruct-2507 · ModelScope 免费额度：50次/天",
-    "Qwen/Qwen3-Coder-30B-A3B-Instruct": "Qwen/Qwen3-Coder-30B-A3B-Instruct · ModelScope 免费额度：100次/天",
-    "Qwen/Qwen3-30B-A3B": "Qwen/Qwen3-30B-A3B · ModelScope 免费额度：200次/天",
-    "deepseek-ai/DeepSeek-V4-Pro": "deepseek-ai/DeepSeek-V4-Pro · ModelScope 免费额度：20次/天",
-    "deepseek-ai/DeepSeek-V4-Flash-0731": "deepseek-ai/DeepSeek-V4-Flash-0731 · ModelScope 免费额度：50次/天"
-};
-
 function updateSettingsAsrProviderHint(panel) {
     const asrProviders = {
         groq: {
@@ -8346,6 +8591,12 @@ function updateSettingsAsrProviderHint(panel) {
     if (groqWrap) groqWrap.classList.toggle("settings-hidden", key !== "groq");
     if (siliconFlowWrap) siliconFlowWrap.classList.toggle("settings-hidden", key !== "siliconflow");
     if (mimoWrap) mimoWrap.classList.toggle("settings-hidden", key !== "mimo");
+    const mainProviderKey = panel?.querySelector("#settings-provider-select .custom-option.selected")?.dataset.value
+        || appState.settings?.provider
+        || "modelscope";
+    panel?.querySelectorAll(".settings-mimo-token-plan-region-field").forEach((node) => {
+        node.classList.toggle("settings-hidden", key !== "mimo" && mainProviderKey !== "mimo");
+    });
 }
 
 async function authorizeCustomOriginFromPanel() {
@@ -8361,7 +8612,7 @@ async function authorizeCustomOriginFromPanel() {
     const input = panel.querySelector("#settings-base-url");
     let customUrl = "";
     try {
-        customUrl = normalizeHttpsBaseUrlInput(input?.value);
+        customUrl = normalizeCustomBaseUrlInput(input?.value);
     } catch (error) {
         showToast(error?.message || "Base URL 格式不正确");
         return false;
@@ -8653,10 +8904,10 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
     const requestedAsrProvider = String(panel.querySelector("#settings-asr-provider")?.value || "groq").toLowerCase();
     const asrProvider = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
     const customBaseUrlInput = panel.querySelector("#settings-base-url");
-    let customBaseUrl = ensureHttpsUrlPrefixInput(appState.settings?.customBaseUrl);
+    let customBaseUrl = ensureCustomBaseUrlPrefixInput(appState.settings?.customBaseUrl);
     try {
         if (providerValue === "custom") {
-            customBaseUrl = normalizeHttpsBaseUrlInput(customBaseUrlInput?.value);
+            customBaseUrl = normalizeCustomBaseUrlInput(customBaseUrlInput?.value);
             if (customBaseUrlInput && customBaseUrl) customBaseUrlInput.value = customBaseUrl;
         }
     } catch (error) {
@@ -8664,6 +8915,7 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         return false;
     }
 
+    const mimoTokenPlanRegionSelection = String(panel.querySelector("#settings-mimo-token-plan-region")?.value || "auto").toLowerCase();
     const payload = {
         provider: providerValue,
         apiKey: activeApiKey,
@@ -8683,6 +8935,10 @@ async function saveSettingsFromPanel(isAutoSave = false, options = {}) {
         siliconFlowAsrModel: String(panel.querySelector("#settings-siliconflow-asr-model")?.value || "").trim(),
         mimoApiKey: String(panel.querySelector("#settings-mimo-api-key")?.value || "").trim(),
         mimoAsrModel: DEFAULT_MIMO_ASR_MODEL,
+        mimoTokenPlanRegion: mimoTokenPlanRegionSelection === "auto"
+            ? normalizeMimoTokenPlanRegionInput(appState.settings?.mimoTokenPlanRegion)
+            : normalizeMimoTokenPlanRegionInput(mimoTokenPlanRegionSelection),
+        mimoTokenPlanRegionMode: mimoTokenPlanRegionSelection === "auto" ? "auto" : "manual",
         prefMode: panel.querySelector("#settings-pref-mode")?.value || "quality",
         themeMode: panel.querySelector("#settings-theme-mode")?.value || "system",
         defaultOpenPage,
@@ -8842,8 +9098,17 @@ function ensureHttpsUrlPrefixInput(value) {
     return `https://${raw.replace(/^\/+/, "")}`;
 }
 
-function normalizeHttpsBaseUrlInput(value) {
-    const raw = ensureHttpsUrlPrefixInput(value);
+function ensureCustomBaseUrlPrefixInput(value) {
+    const raw = String(value || "").trim();
+    if (!raw || /^[a-z][a-z\d+.-]*:\/\//i.test(raw)) return raw;
+    if (/^(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(raw)) {
+        return `http://${raw.replace(/^\/+/, "")}`;
+    }
+    return `https://${raw.replace(/^\/+/, "")}`;
+}
+
+function normalizeCustomBaseUrlInput(value) {
+    const raw = ensureCustomBaseUrlPrefixInput(value);
     if (!raw) return "";
     let url;
     try {
@@ -8851,7 +9116,11 @@ function normalizeHttpsBaseUrlInput(value) {
     } catch (_) {
         throw new Error("Base URL 格式不正确");
     }
-    if (url.protocol !== "https:") throw new Error("Base URL 必须使用 https://");
+    const isLocalHttp = url.protocol === "http:"
+        && ["localhost", "127.0.0.1"].includes(url.hostname.toLowerCase());
+    if (url.protocol !== "https:" && !isLocalHttp) {
+        throw new Error("远程 Base URL 必须使用 HTTPS；本地模型可使用 localhost 或 127.0.0.1 的 HTTP 地址");
+    }
     return raw;
 }
 
@@ -8871,19 +9140,8 @@ function scrollToCurrentSubtitle(force, behavior = "smooth") {
     if (force && subtitleUiCoordinator.scrollUnlockAt > Date.now() && behavior === "auto") return false;
     const rows = getCurrentSubtitleStateRows();
     if (!rows.length) return false;
-    let canFollowScroll = appState.followEnabled;
-    if (!appState.followEnabled && !force) {
-        if (Date.now() - appState.followPausedAt >= FOLLOW_RESUME_MS) {
-            appState.followEnabled = true;
-            canFollowScroll = true;
-            toggleFollowButton();
-        } else {
-            canFollowScroll = false;
-            toggleFollowButton();
-        }
-    } else if (force) {
-        canFollowScroll = true;
-    }
+    const canFollowScroll = appState.followEnabled || force;
+    if (!canFollowScroll) toggleFollowButton();
     const t = getPlayerTime();
     // Allow highlighting even if time is 0 or paused, as long as it's valid
     if (!Number.isFinite(t)) return false;
@@ -9644,7 +9902,15 @@ async function startTranscriptionFromCapsule() {
             }
         });
         appState.asrRequestDispatched = false;
-        if (!res?.ok) throw new Error(res?.error || "Groq 转录失败");
+        if (!res?.ok) {
+            throw {
+                name: res?.name || "Error",
+                message: res?.error || res?.message || "Groq 转录失败",
+                code: res?.code || "",
+                status: res?.status,
+                __backgroundReported: true
+            };
+        }
     } catch (error) {
         appState.asrRequestDispatched = false;
         if (finishWithExistingSubtitle("已读取已有字幕")) return;
@@ -9665,7 +9931,9 @@ async function startTranscriptionFromCapsule() {
         }
         resetTranscriptionState();
         updateProgress(0, progressTaskId, { force: true });
-        reportContentError?.(error, { task: "asr", source: "start_transcription" });
+        if (!error?.__backgroundReported) {
+            reportContentError?.(error, { task: "asr", source: "start_transcription" });
+        }
         setPanelError("CC", error, error.message || "Groq 转录失败");
         notifyMappedError(error, error.message || "Groq 转录失败");
         renderContent();
@@ -9742,7 +10010,15 @@ async function handleRegenerateGroqSubtitle() {
                 asrRunId
             }
         });
-        if (!res?.ok) throw new Error(res?.error || "重新生成失败");
+        if (!res?.ok) {
+            throw {
+                name: res?.name || "Error",
+                message: res?.error || res?.message || "重新生成失败",
+                code: res?.code || "",
+                status: res?.status,
+                __backgroundReported: true
+            };
+        }
     } catch (error) {
         if (appState.tabState && typeof appState.tabState === "object") {
             appState.tabState = {
@@ -9752,7 +10028,9 @@ async function handleRegenerateGroqSubtitle() {
         }
         resetTranscriptionState();
         updateProgress(0, `transcribe:${injectBvid || "unknown"}`, { force: true });
-        reportContentError?.(error, { task: "asr_regenerate", source: "regenerate_transcription" });
+        if (!error?.__backgroundReported) {
+            reportContentError?.(error, { task: "asr_regenerate", source: "regenerate_transcription" });
+        }
         notifyMappedError(error, error.message || "重新生成失败");
         renderContent();
     }
@@ -11354,56 +11632,124 @@ function flushPendingSubtitleIfReady() {
 async function syncActiveCacheByBvid(expectedBvid) {
     const target = normalizeBvidCase(expectedBvid);
     if (!target) return;
+    const existingSync = subtitleCacheSyncInFlight.get(target);
+    if (existingSync) {
+        logContent.info("subtitle_cache_sync_skipped", {
+            task: "subtitle",
+            bvid: target,
+            detail: { reason: "sync_already_in_flight" }
+        });
+        return existingSync;
+    }
+    const syncPromise = (async () => {
+        logContent.info("subtitle_cache_sync_started", {
+            task: "subtitle",
+            bvid: target,
+            detail: { route_cid: getCurrentRouteCid(), route_part_count: getCurrentRoutePartCount() }
+        });
+        try {
+            const res = await chrome.storage.local.get([`cache_${target}`]);
+            if (normalizeBvidCase(appState.tabState?.activeBvid || "") !== target) {
+                logContent.warn("subtitle_cache_sync_discarded", {
+                    task: "subtitle",
+                    bvid: target,
+                    code: "SUBTITLE_CACHE_STALE_ROUTE",
+                    detail: {
+                        reason: "active_bvid_changed",
+                        active_bvid: normalizeBvidCase(appState.tabState?.activeBvid || "")
+                    }
+                });
+                return false;
+            }
+            const directory = res?.[`cache_${target}`] || null;
+            const nextCache = selectCacheDirectoryPart(
+                directory,
+                target,
+                getCurrentRouteCid() || getVerifiedSubtitleCidForCurrentRoute(target)
+            );
+            const acceptedCache = nextCache
+                && normalizeBvidCase(nextCache?.bvid || "") === target
+                && isCacheForCurrentRouteVideo(nextCache, target)
+                ? nextCache
+                : null;
+            const routeCid = getCurrentRouteCid();
+            const routeTid = getRoutePartId();
+            const currentCacheTid = String(appState.cache?.tid || "").trim();
+            const canPreserveCurrentSubtitleCache = !acceptedCache
+                && !(routeCid > 0)
+                && normalizeBvidCase(appState.cache?.bvid || "") === target
+                && hasSubtitleInCache(appState.cache)
+                && (routeTid ? currentCacheTid === routeTid : (!currentCacheTid || currentCacheTid === "1"));
+            appState.cache = acceptedCache || (canPreserveCurrentSubtitleCache ? appState.cache : null);
+            if (acceptedCache) {
+                logContent.info("subtitle_cache_sync_accepted", {
+                    task: "subtitle",
+                    bvid: target,
+                    detail: {
+                        row_count: Array.isArray(acceptedCache.rawSubtitle) ? acceptedCache.rawSubtitle.length : 0,
+                        cid: Number(acceptedCache.cid || 0),
+                        part_count: Number(acceptedCache.partCount || 0)
+                    }
+                });
+            } else if (!canPreserveCurrentSubtitleCache) {
+                logContent.warn("subtitle_cache_sync_discarded", {
+                    task: "subtitle",
+                    bvid: target,
+                    code: "SUBTITLE_CACHE_ROUTE_MISMATCH",
+                    detail: {
+                        reason: directory ? "no_matching_part" : "cache_missing",
+                        route_cid: routeCid,
+                        route_tid: routeTid,
+                        route_part_count: getCurrentRoutePartCount(),
+                        directory_part_count: Object.keys(directory?.parts || {}).length
+                    }
+                });
+            }
+            if (canPreserveCurrentSubtitleCache) {
+                logPartScopeDiagnostic("cache_preserved_while_cid_pending", {
+                    targetBvid: target.toLowerCase(),
+                    cacheCid: Number(appState.cache?.cid || 0),
+                    cacheTid: currentCacheTid,
+                    routeTid
+                }, `cache-preserved:${target}:${currentCacheTid}`);
+            }
+            applyCacheSubtitleState(appState.cache, target);
+            if (hasUsableSubtitleCache(appState.cache, target)) {
+                appState.subtitleCapturedBvid = target;
+                if (!isTranscriptionRunning()) {
+                    appState.transcriptionCapsuleVisible = false;
+                    appState.transcriptionCapsuleMeta = null;
+                }
+                const source = String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "").toLowerCase();
+                if (!["groq", "whisper", "siliconflow", "funasr", "mimo", "custom_asr"].includes(source)) {
+                    refreshSubtitleOptionsForCurrentVideo()
+                        .then((options) => {
+                            if (Array.isArray(options) && options.length > 1 && appState.activePage === "CC") renderContent();
+                        })
+                        .catch(() => {});
+                }
+            }
+            appState.isStateDirty = false;
+            renderContent();
+            return !!appState.cache;
+        } catch (error) {
+            logContent.warn("subtitle_cache_sync_failed", {
+                task: "subtitle",
+                bvid: target,
+                code: "SUBTITLE_CACHE_SYNC_FAILED",
+                detail: { error_message: error?.message || String(error) }
+            });
+            return false;
+        }
+    })();
+    subtitleCacheSyncInFlight.set(target, syncPromise);
     try {
-        const res = await chrome.storage.local.get([`cache_${target}`]);
-        if (normalizeBvidCase(appState.tabState?.activeBvid || "") !== target) return;
-        const directory = res?.[`cache_${target}`] || null;
-        const nextCache = selectCacheDirectoryPart(
-            directory,
-            target,
-            getCurrentRouteCid() || getVerifiedSubtitleCidForCurrentRoute(target)
-        );
-        const acceptedCache = nextCache
-            && normalizeBvidCase(nextCache?.bvid || "") === target
-            && isCacheForCurrentRouteVideo(nextCache, target)
-            ? nextCache
-            : null;
-        const routeCid = getCurrentRouteCid();
-        const routeTid = getRoutePartId();
-        const currentCacheTid = String(appState.cache?.tid || "").trim();
-        const canPreserveCurrentSubtitleCache = !acceptedCache
-            && !(routeCid > 0)
-            && normalizeBvidCase(appState.cache?.bvid || "") === target
-            && hasSubtitleInCache(appState.cache)
-            && (routeTid ? currentCacheTid === routeTid : (!currentCacheTid || currentCacheTid === "1"));
-        appState.cache = acceptedCache || (canPreserveCurrentSubtitleCache ? appState.cache : null);
-        if (canPreserveCurrentSubtitleCache) {
-            logPartScopeDiagnostic("cache_preserved_while_cid_pending", {
-                targetBvid: target.toLowerCase(),
-                cacheCid: Number(appState.cache?.cid || 0),
-                cacheTid: currentCacheTid,
-                routeTid
-            }, `cache-preserved:${target}:${currentCacheTid}`);
+        return await syncPromise;
+    } finally {
+        if (subtitleCacheSyncInFlight.get(target) === syncPromise) {
+            subtitleCacheSyncInFlight.delete(target);
         }
-        applyCacheSubtitleState(appState.cache, target);
-        if (hasUsableSubtitleCache(appState.cache, target)) {
-            appState.subtitleCapturedBvid = target;
-            if (!isTranscriptionRunning()) {
-                appState.transcriptionCapsuleVisible = false;
-                appState.transcriptionCapsuleMeta = null;
-            }
-            const source = String(appState.cache?.subtitleSource || appState.tabState?.subtitleSource || "").toLowerCase();
-            if (!["groq", "whisper", "siliconflow", "funasr", "mimo", "custom_asr"].includes(source)) {
-                refreshSubtitleOptionsForCurrentVideo()
-                    .then((options) => {
-                        if (Array.isArray(options) && options.length > 1 && appState.activePage === "CC") renderContent();
-                    })
-                    .catch(() => {});
-            }
-        }
-        appState.isStateDirty = false;
-        renderContent();
-    } catch (_) {}
+    }
 }
 
 function hasSubtitleCacheForBvid(targetBvid) {
@@ -11670,6 +12016,9 @@ function onSidePanelMessage(message, sender, sendResponse) {
                 paused: video ? !!video.paused : true
             };
         }
+        if (command === "get-player-layout") {
+            return { wide: isPlayerWideMode() };
+        }
         if (command === "get-settings-ui-options") {
             const providers = { ...(appState.providers || {}) };
             return {
@@ -11908,6 +12257,12 @@ function onBackgroundMessage(message) {
     const routeBvid = normalizeBvidCase(getBvidFromUrl(location.href));
     if (payloadBvid && routeBvid && payloadBvid !== routeBvid) {
         pushSubtitleTimeline("drop_mismatch_bvid_bg", { payloadBvid, currentBvid: routeBvid });
+        logContent.warn("subtitle_sync_discarded", {
+            task: "subtitle",
+            bvid: payloadBvid,
+            code: "SUBTITLE_BVID_MISMATCH",
+            detail: { reason: "background_message_route_mismatch", current_bvid: routeBvid }
+        });
         return false;
     }
     if (message?.tabState) {
@@ -11915,7 +12270,18 @@ function onBackgroundMessage(message) {
         syncStepProgressByTaskState(appState.tabState);
     }
     const cache = message?.cache || null;
-    if (cache && payloadBvid && normalizeBvidCase(cache?.bvid || "") !== payloadBvid) return false;
+    if (cache && payloadBvid && normalizeBvidCase(cache?.bvid || "") !== payloadBvid) {
+        logContent.warn("subtitle_sync_discarded", {
+            task: "subtitle",
+            bvid: payloadBvid,
+            code: "SUBTITLE_CACHE_BVID_MISMATCH",
+            detail: {
+                reason: "message_cache_bvid_mismatch",
+                cache_bvid: normalizeBvidCase(cache?.bvid || "")
+            }
+        });
+        return false;
+    }
     appState.pendingSubtitle = null;
     renderNav();
     const messageCacheBvid = normalizeBvidCase(cache?.bvid || "");
@@ -11929,6 +12295,31 @@ function onBackgroundMessage(message) {
     appState.cache = acceptedCache || (keepCurrentCache ? appState.cache : null);
     if (appState.cache) {
         applyCacheSubtitleState(appState.cache, payloadBvid || routeBvid);
+        logContent.info("subtitle_sync_accepted", {
+            task: "subtitle",
+            bvid: payloadBvid || routeBvid,
+            detail: {
+                reason: String(message?.reason || action || "background"),
+                row_count: Array.isArray(appState.cache?.rawSubtitle) ? appState.cache.rawSubtitle.length : 0,
+                cid: Number(appState.cache?.cid || 0),
+                part_count: Number(appState.cache?.partCount || appState.tabState?.activePartCount || 0),
+                preserved_current_cache: !acceptedCache && keepCurrentCache
+            }
+        });
+    } else if (payloadBvid || routeBvid) {
+        logContent.warn("subtitle_sync_discarded", {
+            task: "subtitle",
+            bvid: payloadBvid || routeBvid,
+            code: "SUBTITLE_CACHE_ROUTE_MISMATCH",
+            detail: {
+                reason: "background_cache_not_accepted",
+                cache_cid: Number(cache?.cid || 0),
+                route_cid: getCurrentRouteCid(),
+                cache_part_count: Number(cache?.partCount || 0),
+                route_part_count: getCurrentRoutePartCount()
+            }
+        });
+        void syncActiveCacheByBvid(payloadBvid || routeBvid);
     }
     if (cache?.rawSubtitle?.length || cache?.processedSubtitle?.length) {
         reconcileTranscriptionState(payloadBvid || routeBvid);

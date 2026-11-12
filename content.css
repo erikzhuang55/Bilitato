@@ -1844,6 +1844,33 @@ body::-webkit-scrollbar {
     margin-top: auto;
 }
 
+.chat-reasoning-control {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 5px;
+    margin: 0 2px 6px;
+    color: #7d8694;
+    font-size: 11px;
+}
+
+.chat-reasoning-control select {
+    min-width: 56px;
+    padding: 3px 20px 3px 7px;
+    border: 1px solid #e3e8ec;
+    border-radius: 7px;
+    background: #fff;
+    color: #2f3542;
+    font: inherit;
+    cursor: pointer;
+}
+
+.ai-summary-plugin-box[data-theme="dark"] .chat-reasoning-control select {
+    border-color: #3a414d;
+    background: #252a33;
+    color: #eef1f5;
+}
+
 .chat-input-wrap {
     position: relative;
 }
@@ -4870,6 +4897,40 @@ input[type="range"]:active::-webkit-slider-thumb {
     line-height: 1;
 }
 
+.release-history-version {
+    display: block;
+}
+
+.release-history-version-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: #2f3542;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    list-style: none;
+}
+
+.release-history-version-summary::-webkit-details-marker {
+    display: none;
+}
+
+.release-history-version-summary::after {
+    content: "展开";
+    color: #9499a0;
+    font-size: 10px;
+    font-weight: 400;
+}
+
+.release-history-version[open] .release-history-version-summary {
+    margin-bottom: 8px;
+}
+
+.release-history-version[open] .release-history-version-summary::after {
+    content: "收起";
+}
+
 .release-notice-group-items {
     display: flex;
     flex-direction: column;
@@ -5077,6 +5138,10 @@ input[type="range"]:active::-webkit-slider-thumb {
 .release-notice-overlay[data-theme="dark"] .release-notice-group {
     background: #252b34;
     border-color: rgba(255, 255, 255, 0.1);
+}
+
+.release-notice-overlay[data-theme="dark"] .release-history-version-summary {
+    color: #eef1f5;
 }
 
 .release-notice-overlay[data-theme="dark"] .release-notice-section-tag {

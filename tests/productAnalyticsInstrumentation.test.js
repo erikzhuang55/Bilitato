@@ -89,6 +89,7 @@ describe("product analytics instrumentation", () => {
 
   it("turns off DeepSeek V4 thinking only for a length-truncated reasoning retry", () => {
     expect(background).toContain("function shouldDisableDeepSeekV4ThinkingForRetry");
+    expect(background).toContain('return /(?:^|\\/)deepseek-v4(?:[.-]|$)/i.test(String(model || "").trim())');
     expect(background).toContain("if (!isDeepSeekV4ModelName(settings?.model)) return false");
     expect(background).toContain("if (!isOutputLengthFinishReason({ finishReason: diagnostics.finishReason })) return false");
     expect(background).toContain("if (!(diagnostics.reasoningChars > 0)) return false");

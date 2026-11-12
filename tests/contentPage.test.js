@@ -56,4 +56,16 @@ describe("contentPage", () => {
     expect(page.isStorageChangeStateDirty({ cache_BV1: { newValue: {} } }, { afterBvid: "BV1" })).toBe(true);
     expect(page.isStorageChangeStateDirty({}, { switched: false, routeMismatch: false })).toBe(false);
   });
+
+  it("detects Bilibili wide layout from danmaku offset or player width", () => {
+    expect(page.isWidePlayerLayout({ danmakuMarginTop: 680 })).toBe(true);
+    expect(page.isWidePlayerLayout({ playerWidth: 1050, leftContainerWidth: 700 })).toBe(true);
+    expect(page.isWidePlayerLayout({ playerWidth: 700, leftContainerWidth: 700, danmakuMarginTop: 0 })).toBe(false);
+  });
+
+  it("recognizes the Bilibili wide-screen control marker", () => {
+    expect(page.isWideScreenToggleMarker("bpx-player-ctrl-wide")).toBe(true);
+    expect(page.isWideScreenToggleMarker("切换宽屏")).toBe(true);
+    expect(page.isWideScreenToggleMarker("bpx-player-ctrl-full")).toBe(false);
+  });
 });

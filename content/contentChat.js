@@ -39,20 +39,7 @@
         const input = Number.isFinite(Number(metrics.inputTokens)) ? Number(metrics.inputTokens) : 0;
         const output = Number.isFinite(Number(metrics.outputTokens)) ? Number(metrics.outputTokens) : 0;
         const tokenStr = input || output ? `${total} (In ${input} / Out ${output})` : `${total}`;
-        const parts = [`用时 ${latency}`, `Tokens ${tokenStr}`];
-        if (String(metrics.provider || "").toLowerCase() === "modelscope") {
-            const modelRemaining = formatQuotaValue(metrics.modelScopeRemaining, metrics.modelScopeModelLimit);
-            const userRemaining = formatQuotaValue(metrics.modelScopeUserRemaining, metrics.modelScopeUserLimit);
-            parts.push(`模型剩余 ${modelRemaining}`, `账号剩余 ${userRemaining}`);
-        }
-        return parts.join(" · ");
-    }
-
-    function formatQuotaValue(remaining, limit) {
-        const hasRemaining = remaining !== null && remaining !== undefined && remaining !== "";
-        const hasLimit = limit !== null && limit !== undefined && limit !== "";
-        if (!hasRemaining) return hasLimit ? `官网未返回/${limit}` : "官网未返回";
-        return hasLimit ? `${remaining}/${limit}` : String(remaining);
+        return [`用时 ${latency}`, `Tokens ${tokenStr}`].join(" · ");
     }
 
     globalThis.BilitatoContentChat = {

@@ -20,10 +20,15 @@ import {
 import {
   MIMO_ASR_CHUNK_SECONDS,
   MIMO_ASR_MODEL,
-  MIMO_ASR_TRANSCRIBE_URL,
   blobToBase64DataUrl,
+  buildMimoAsrAuthHeaders,
   buildMimoAsrRequestBody,
-  extractMimoAsrText
+  extractMimoAsrText,
+  getMimoTokenPlanRegionCandidates,
+  normalizeMimoTokenPlanRegion,
+  normalizeMimoTokenPlanRegionMode,
+  shouldTryNextMimoTokenPlanRegion,
+  resolveMimoChatCompletionsUrl
 } from "./utils/mimoAsr.js";
 
 const FFMPEG_CORE_URL = chrome.runtime.getURL("node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js");
@@ -34,6 +39,10 @@ const audioUploadSessions = new Map();
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const action = String(message?.action || "");
+  if (action === "OFFSCREEN_PING") {
+    sendResponse({ ok: true, ready: true });
+    return false;
+  }
   if (!/^OFFSCREEN_CHUNK_AUDIO/.test(action)) return false;
   handleChunkMessage(action, message?.payload || {})
     .then((result) => sendResponse({ ok: true, result }))
@@ -44,6 +53,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     }));
   return true;
 });
+
+chrome.runtime.sendMessage({ action: "OFFSCREEN_READY" }).catch(() => {});
 
 async function handleChunkMessage(action, payload = {}) {
   if (action === "OFFSCREEN_CHUNK_AUDIO_UPLOAD_START") return startAudioUpload(payload);
@@ -224,6 +235,8 @@ async function transcribePreparedChunks(payload = {}) {
   const requestedProvider = String(payload?.provider || "groq").toLowerCase();
   const provider = ["groq", "siliconflow", "mimo"].includes(requestedProvider) ? requestedProvider : "groq";
   const apiKey = String(payload?.apiKey || payload?.groqApiKey || "").trim();
+  let mimoTokenPlanRegion = normalizeMimoTokenPlanRegion(payload?.mimoTokenPlanRegion);
+  let mimoTokenPlanRegionMode = normalizeMimoTokenPlanRegionMode(payload?.mimoTokenPlanRegionMode);
   const model = String(payload?.model || payload?.groqModel || "").trim()
     || (provider === "siliconflow" ? "FunAudioLLM/SenseVoiceSmall" : (provider === "mimo" ? MIMO_ASR_MODEL : "whisper-large-v3-turbo"));
   const videoTitle = String(payload?.videoTitle || "").trim();
@@ -266,8 +279,12 @@ async function transcribePreparedChunks(payload = {}) {
     const result = provider === "siliconflow"
       ? await requestSiliconFlowChunkTranscription(file, apiKey, model)
       : provider === "mimo"
-        ? await requestMimoChunkTranscription(file, apiKey, model)
+        ? await requestMimoChunkTranscription(file, apiKey, model, mimoTokenPlanRegion, mimoTokenPlanRegionMode)
         : await requestGroqChunkTranscription(file, apiKey, model, videoTitle, baseUrl);
+    if (provider === "mimo" && result.mimoTokenPlanRegion) {
+      mimoTokenPlanRegion = normalizeMimoTokenPlanRegion(result.mimoTokenPlanRegion);
+      mimoTokenPlanRegionMode = "manual";
+    }
     quota = result.quota || quota;
     const chunkRows = mapTranscriptionToRows(result.data, { noTimestamp });
     const beforeTail = mergedRows.length ? mergedRows.slice(-2).map((row) => serializeBoundaryRow(row, noTimestamp)) : [];
@@ -298,6 +315,7 @@ async function transcribePreparedChunks(payload = {}) {
   return {
     rows: mergedRows,
     quota,
+    mimoTokenPlanRegion: provider === "mimo" ? mimoTokenPlanRegion : "",
     diagnostics: {
       boundaries
     }
@@ -495,36 +513,44 @@ async function requestSiliconFlowChunkTranscription(audioFile, apiKey, model) {
   return { data, quota: null };
 }
 
-async function requestMimoChunkTranscription(audioFile, apiKey, model) {
+async function requestMimoChunkTranscription(audioFile, apiKey, model, tokenPlanRegion = "cn", tokenPlanRegionMode = "auto") {
   const audioDataUrl = await blobToBase64DataUrl(audioFile);
-  const response = await fetch(MIMO_ASR_TRANSCRIBE_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(buildMimoAsrRequestBody(audioDataUrl, model))
-  });
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    if (response.status === 429) {
-      throw createOffscreenError("ASR_RATE_LIMIT", "小米 MiMo 限流，请稍后重试");
+  const regions = getMimoTokenPlanRegionCandidates(apiKey, tokenPlanRegion, tokenPlanRegionMode);
+  for (let index = 0; index < regions.length; index += 1) {
+    const region = regions[index];
+    const response = await fetch(resolveMimoChatCompletionsUrl(apiKey, region), {
+      method: "POST",
+      headers: {
+        ...buildMimoAsrAuthHeaders(apiKey),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(buildMimoAsrRequestBody(audioDataUrl, model))
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => "");
+      const hasNext = index < regions.length - 1;
+      if (hasNext && shouldTryNextMimoTokenPlanRegion(response.status, detail)) continue;
+      if (response.status === 429) {
+        throw createOffscreenError("ASR_RATE_LIMIT", "小米 MiMo 限流，请稍后重试");
+      }
+      throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_FAILED", `小米 MiMo 转录失败（${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
     }
-    throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_FAILED", `小米 MiMo 转录失败（${response.status}）${detail ? `：${detail.slice(0, 180)}` : ""}`);
+    const responseData = await response.json().catch(() => null);
+    const finishReason = String(responseData?.choices?.[0]?.finish_reason || "").trim();
+    const text = extractMimoAsrText(responseData);
+    if (finishReason && finishReason !== "stop") {
+      throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_INCOMPLETE", `小米 MiMo 返回未完成（${finishReason}），请重新转录`);
+    }
+    if (!text) {
+      throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_EMPTY", "小米 MiMo 返回了空分片，为避免生成残缺字幕，本次转录已停止");
+    }
+    return {
+      data: { text },
+      quota: null,
+      mimoTokenPlanRegion: region
+    };
   }
-  const responseData = await response.json().catch(() => null);
-  const finishReason = String(responseData?.choices?.[0]?.finish_reason || "").trim();
-  const text = extractMimoAsrText(responseData);
-  if (finishReason && finishReason !== "stop") {
-    throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_INCOMPLETE", `小米 MiMo 返回未完成（${finishReason}），请重新转录`);
-  }
-  if (!text) {
-    throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_EMPTY", "小米 MiMo 返回了空分片，为避免生成残缺字幕，本次转录已停止");
-  }
-  return {
-    data: { text },
-    quota: null
-  };
+  throw createOffscreenError("ASR_CHUNK_TRANSCRIBE_FAILED", "小米 MiMo Token Plan 区域识别失败");
 }
 
 function createOffscreenError(code, message) {

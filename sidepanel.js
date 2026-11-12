@@ -3,6 +3,16 @@ const DEFAULT_GROQ_ASR_BASE_URL = "https://api.groq.com/openai/v1";
 const DEFAULT_SILICONFLOW_ASR_BASE_URL = "https://api.siliconflow.cn/v1";
 const DEFAULT_MIMO_ASR_BASE_URL = "https://api.xiaomimimo.com/v1";
 const DEFAULT_MIMO_ASR_MODEL = "mimo-v2.5-asr";
+const MIMO_TOKEN_PLAN_REGION_LABELS = Object.freeze({ cn: "中国大陆", sgp: "新加坡", ams: "欧洲" });
+
+function normalizeMimoTokenPlanRegionInput(region) {
+    const normalized = String(region || "").trim().toLowerCase();
+    return Object.prototype.hasOwnProperty.call(MIMO_TOKEN_PLAN_REGION_LABELS, normalized) ? normalized : "cn";
+}
+
+function normalizeMimoTokenPlanRegionModeInput(mode) {
+    return String(mode || "").trim().toLowerCase() === "manual" ? "manual" : "auto";
+}
 const SUMMARY_DRAFT_TTL_MS = 10 * 60 * 1000;
 const SUMMARY_DRAFT_STORAGE_PREFIX = "summaryDraft_";
 const state = {
@@ -19,6 +29,7 @@ const state = {
     streams: null,
     busy: "",
     error: "",
+    errorCode: "",
     search: "",
     chatDraft: "",
     settingsScrollTop: 0,
@@ -44,6 +55,7 @@ const state = {
     activeBvid: "",
     activePartKey: "",
     switchingToEmbedded: false,
+    openedDuringWideMode: false,
     summaryStreamDraft: null,
     summaryDraftExpiryTimer: null,
     summaryDraftExpiryAt: 0,
@@ -143,21 +155,19 @@ function getLatestMetricText() {
     if (!latest) return "暂无调用指标";
     const latency = Number.isFinite(Number(latest.latencyMs)) ? `${(Number(latest.latencyMs) / 1000).toFixed(2)}s` : "-";
     const tokens = Number(latest.tokens || 0);
-    const parts = [`用时 ${latency}`, `Tokens ${tokens}`];
-    if (String(latest.provider || "").toLowerCase() === "modelscope") {
-        parts.push(
-            `模型剩余 ${formatMetricQuotaValue(latest.modelScopeRemaining, latest.modelScopeModelLimit)}`,
-            `账号剩余 ${formatMetricQuotaValue(latest.modelScopeUserRemaining, latest.modelScopeUserLimit)}`
-        );
-    }
-    return parts.join(" · ");
+    return [`用时 ${latency}`, `Tokens ${tokens}`].join(" · ");
 }
 
-function formatMetricQuotaValue(remaining, limit) {
-    const hasRemaining = remaining !== null && remaining !== undefined && remaining !== "";
-    const hasLimit = limit !== null && limit !== undefined && limit !== "";
-    if (!hasRemaining) return hasLimit ? `官网未返回/${limit}` : "官网未返回";
-    return hasLimit ? `${remaining}/${limit}` : String(remaining);
+function normalizeChatReasoningEffort(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    return ["auto", "low", "medium", "high"].includes(normalized) ? normalized : "auto";
+}
+
+function chatReasoningOptionsHtml(value) {
+    const selected = normalizeChatReasoningEffort(value);
+    return [["auto", "自动"], ["low", "低"], ["medium", "中"], ["high", "高"]]
+        .map(([key, label]) => `<option value="${key}"${selected === key ? " selected" : ""}>${label}</option>`)
+        .join("");
 }
 
 function normalizeCloudCachePrefs(value = {}) {
@@ -230,8 +240,17 @@ function ensureHttpsUrlPrefixInput(value) {
     return `https://${raw.replace(/^\/+/, "")}`;
 }
 
-function normalizeHttpsBaseUrlInput(value) {
-    const raw = ensureHttpsUrlPrefixInput(value);
+function ensureCustomBaseUrlPrefixInput(value) {
+    const raw = String(value || "").trim();
+    if (!raw || /^[a-z][a-z\d+.-]*:\/\//i.test(raw)) return raw;
+    if (/^(?:localhost|127\.0\.0\.1)(?::\d+)?(?:\/|$)/i.test(raw)) {
+        return `http://${raw.replace(/^\/+/, "")}`;
+    }
+    return `https://${raw.replace(/^\/+/, "")}`;
+}
+
+function normalizeCustomBaseUrlInput(value) {
+    const raw = ensureCustomBaseUrlPrefixInput(value);
     if (!raw) return "";
     let url;
     try {
@@ -239,7 +258,11 @@ function normalizeHttpsBaseUrlInput(value) {
     } catch (_) {
         throw new Error("Base URL 格式不正确");
     }
-    if (url.protocol !== "https:") throw new Error("Base URL 必须使用 https://");
+    const isLocalHttp = url.protocol === "http:"
+        && ["localhost", "127.0.0.1"].includes(url.hostname.toLowerCase());
+    if (url.protocol !== "https:" && !isLocalHttp) {
+        throw new Error("远程 Base URL 必须使用 HTTPS；本地模型可使用 localhost 或 127.0.0.1 的 HTTP 地址");
+    }
     return raw;
 }
 
@@ -286,6 +309,21 @@ async function refreshState({ quiet = false, hydrate = false, refreshFeedback = 
         state.tabId = tab.id;
         if (!state.switchingToEmbedded) {
             await hideEmbeddedForActiveTab(tab.id);
+        }
+        const playerLayout = await chrome.tabs.sendMessage(tab.id, {
+            action: "SIDE_PANEL_CONTENT_ACTION",
+            command: "get-player-layout"
+        }).catch(() => null);
+        const isWideMode = playerLayout?.ok && playerLayout.wide === true;
+        if (isWideMode) {
+            state.openedDuringWideMode = true;
+        } else if (state.openedDuringWideMode) {
+            state.openedDuringWideMode = false;
+            state.switchingToEmbedded = true;
+            await setEmbeddedVisibleForTab(tab.id, true);
+            state.hiddenEmbeddedTabId = 0;
+            window.close();
+            return;
         }
         const result = await chrome.runtime.sendMessage({
             action: "GET_BOOTSTRAP",
@@ -367,6 +405,7 @@ async function refreshState({ quiet = false, hydrate = false, refreshFeedback = 
         state.activeSubtitleId = String(subtitleOptionState?.activeId || state.cache?.subtitleLanguage || "");
         state.feedback = result.feedback || null;
         state.error = "";
+        state.errorCode = "";
         const nextSignature = JSON.stringify({
             tabId: state.tabId,
             tabState: state.tabState,
@@ -386,7 +425,10 @@ async function refreshState({ quiet = false, hydrate = false, refreshFeedback = 
         checkLatestVersionAvailability().catch(() => {});
         if (hydrate) refreshAnnouncementUnreadState().catch(() => {});
     } catch (error) {
-        if (!quiet) state.error = error?.message || "读取失败";
+        if (!quiet) {
+            state.error = error?.message || "读取失败";
+            state.errorCode = error?.code || "";
+        }
         render();
     }
 }
@@ -405,11 +447,21 @@ async function refreshAsrSettingsFromBackground() {
 
 async function contentAction(command, extra = {}) {
     if (!state.tabId) throw new Error("未找到当前视频标签页");
-    const result = await chrome.tabs.sendMessage(state.tabId, {
-        action: "SIDE_PANEL_CONTENT_ACTION",
-        command,
-        ...extra
-    });
+    let result;
+    try {
+        result = await chrome.tabs.sendMessage(state.tabId, {
+            action: "SIDE_PANEL_CONTENT_ACTION",
+            command,
+            ...extra
+        });
+    } catch (error) {
+        if (/Receiving end does not exist|Could not establish connection|message channel closed/i.test(String(error?.message || error))) {
+            const connectionError = new Error("页面连接已失效，请刷新 B 站页面后重试");
+            connectionError.code = "CONTENT_SCRIPT_UNAVAILABLE";
+            throw connectionError;
+        }
+        throw error;
+    }
     if (!result?.ok) throw new Error(result?.error || "网页操作失败");
     return result;
 }
@@ -751,7 +803,12 @@ window.matchMedia?.("(prefers-color-scheme: dark)")?.addEventListener?.("change"
 });
 
 function statusHtml() {
-    if (state.error) return `<div class="status error">${escapeHtml(state.error)}</div>`;
+    if (state.error) {
+        const action = state.errorCode === "CONTENT_SCRIPT_UNAVAILABLE"
+            ? '<button class="btn secondary" data-action="refresh-page">刷新页面</button>'
+            : "";
+        return `<div class="status error"><span>${escapeHtml(state.error)}</span>${action}</div>`;
+    }
     return "";
 }
 
@@ -964,6 +1021,9 @@ function renderChat() {
             ${guide}
             <div class="chat-display-area">${rows}</div>
             <div class="chat-footer">
+                <label class="chat-reasoning-control">推理
+                    <select id="chat-reasoning-effort" aria-label="聊天推理强度">${chatReasoningOptionsHtml(state.settings?.chatReasoningEffort)}</select>
+                </label>
                 <div class="chat-input-wrap">
                     <textarea id="chat-input" placeholder="有咩想问的？">${escapeHtml(state.chatDraft)}</textarea>
                     <button class="chat-send-btn ${state.chatStreaming ? "stopping" : ""}" data-action="${state.chatStreaming ? "stop-chat" : "send-chat"}" aria-label="${state.chatStreaming ? "停止" : "发送"}">${state.chatStreaming ? "■" : "↑"}</button>
@@ -1067,23 +1127,31 @@ function renderSettings() {
     const provider = state.providers?.[settings.provider] || {};
     const rawProviderModels = state.settingsUiOptions.providerModels?.[settings.provider] || [];
     const recommendedModelScopeModelOrder = [
-        "Qwen/Qwen3-30B-A3B-Instruct-2507",
-        "Qwen/Qwen3-30B-A3B"
+        "Qwen/Qwen3.8-Flash-Next",
+        "Qwen/Qwen3.5-27B"
     ];
     const recommendedModelScopeModels = new Set(recommendedModelScopeModelOrder);
+    const retiredModelScopeModels = new Set([
+        "zhipuai/glm-5.2",
+        "minimax/minimax-m1-80k",
+        "mistralai/mistral-large-instruct-2407"
+    ]);
+    const availableProviderModels = settings.provider === "modelscope"
+        ? rawProviderModels.filter((model) => !retiredModelScopeModels.has(String(model || "").toLowerCase()))
+        : rawProviderModels;
     const providerModels = settings.provider === "modelscope"
         ? [
-            ...recommendedModelScopeModelOrder.filter((model) => rawProviderModels.includes(model)),
-            ...rawProviderModels.filter((model) => !recommendedModelScopeModels.has(model))
+            ...recommendedModelScopeModelOrder.filter((model) => availableProviderModels.includes(model)),
+            ...availableProviderModels.filter((model) => !recommendedModelScopeModels.has(model))
         ]
-        : rawProviderModels;
+        : availableProviderModels;
     const currentModel = resolveProviderModelValue(settings.provider, settings.providerModels?.[settings.provider] || settings.model || provider.model || "");
     const modelIsPreset = providerModels.includes(currentModel);
     const modelOptions = providerModels.map((model) => {
         const recommended = settings.provider === "modelscope" && recommendedModelScopeModels.has(model) ? "（推荐）" : "";
         return `<option value="${escapeHtml(model)}" ${model === currentModel ? "selected" : ""}>${escapeHtml(model)}${recommended}</option>`;
     }).join("");
-    const modelScopeModelInfo = "ModelScope 免费额度：Qwen3-30B-A3B-Instruct-2507 200次/天；Qwen3-235B-A22B-Instruct-2507 50次/天；Qwen3-Coder-30B-A3B-Instruct 100次/天；Qwen3-30B-A3B 200次/天；DeepSeek-V4-Pro 20次/天；DeepSeek-V4-Flash-0731 50次/天。";
+    const modelScopeModelInfo = "列表中的模型已通过每日在线推理检测；实际免费额度以 ModelScope 控制台和响应头为准。";
     const modelLabelInfo = settings.provider === "modelscope"
         ? `<span id="setting-model-info" class="settings-info-icon" data-tooltip="${escapeHtml(modelScopeModelInfo)}">i</span>`
         : `<span id="setting-model-info" class="settings-info-icon settings-hidden" data-tooltip="${escapeHtml(modelScopeModelInfo)}">i</span>`;
@@ -1091,6 +1159,10 @@ function renderSettings() {
     const customProviderVisible = settings.provider === "custom" ? "" : "settings-hidden";
     const requestedAsrProvider = String(settings.asrProvider || "groq").toLowerCase();
     const asrProvider = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
+    const mimoTokenPlanRegion = normalizeMimoTokenPlanRegionInput(settings.mimoTokenPlanRegion);
+    const mimoTokenPlanRegionMode = normalizeMimoTokenPlanRegionModeInput(settings.mimoTokenPlanRegionMode);
+    const mimoTokenPlanRegionSelection = mimoTokenPlanRegionMode === "auto" ? "auto" : mimoTokenPlanRegion;
+    const mimoTokenPlanRegionVisible = settings.provider === "mimo" || asrProvider === "mimo" ? "" : "settings-hidden";
     const guidedVisible = promptSettings.mode === "custom" ? "settings-hidden" : "";
     const customPromptVisible = promptSettings.mode === "custom" ? "" : "settings-hidden";
     const cloudCachePrefs = normalizeCloudCachePrefs(state.cloudCachePrefs);
@@ -1110,13 +1182,14 @@ function renderSettings() {
             <div class="settings-group">
                 <div class="settings-group-title-row"><div class="settings-group-title">主模型配置</div><div class="settings-title-actions"><button type="button" class="panel-btn ghost settings-guide-btn" data-action="open-setup-guide">查看引导</button><button type="button" class="panel-btn ghost settings-guide-btn${state.announcementsUnread ? " has-unread-announcement" : ""}" data-action="open-announcements">查看公告${renderAnnouncementUnreadDot()}</button></div></div>
                 <div class="field"><label>Provider ${providerNote ? `<span id="setting-provider-tag" class="provider-tag">${escapeHtml(providerNote)}</span>` : `<span id="setting-provider-tag" class="provider-tag settings-hidden"></span>`}</label><div class="settings-provider-row"><select id="setting-provider">${providerOptions}</select><button id="setting-provider-register" type="button" class="panel-btn ghost" data-action="open-register" data-url="${escapeHtml(provider?.regUrl || "")}" ${provider?.regUrl ? "" : "disabled"}>注册</button></div></div>
-                <div class="field"><label>API Key</label>${secretField("setting-api-key", settings.apiKey, "示例：sk-xxxxx")}</div>
+                <div class="field"><label>API Key</label>${secretField("setting-api-key", settings.apiKey, settings.provider === "mimo" ? "示例：sk-xxxxx / tp-xxxxx" : "示例：sk-xxxxx")}</div>
                 <div class="field"><label class="settings-label-with-info">Model${modelLabelInfo}</label>${providerModels.length ? `<select id="setting-model-select">${modelOptions}<option value="custom" ${modelIsPreset ? "" : "selected"}>自定义</option></select>` : ""}<input id="setting-model" class="${providerModels.length && modelIsPreset ? "settings-hidden" : ""}" value="${escapeHtml(currentModel)}" placeholder="请输入模型名"></div>
                 <div id="setting-custom-provider-fields" class="${customProviderVisible}">
                     <div class="field"><label>自定义地址协议</label><select id="setting-custom-protocol"><option value="openai" ${settings.customProtocol !== "claude" ? "selected" : ""}>OpenAI 协议</option><option value="claude" ${settings.customProtocol === "claude" ? "selected" : ""}>Claude 协议</option></select></div>
                     <div class="field"><label>Base URL</label><input id="setting-base-url" value="${escapeHtml(settings.customBaseUrl || "")}" placeholder="示例：https://api.example.com/v1"></div>
                     <button type="button" class="panel-btn ghost" data-action="authorize-custom-origin">授权当前域名</button>
                 </div>
+                <div id="setting-mimo-token-plan-region-field" class="field ${mimoTokenPlanRegionVisible}"><label>MiMo Token Plan 区域</label><select id="setting-mimo-token-plan-region"><option value="auto" ${mimoTokenPlanRegionSelection === "auto" ? "selected" : ""}>自动（当前：${MIMO_TOKEN_PLAN_REGION_LABELS[mimoTokenPlanRegion]}）</option>${Object.entries(MIMO_TOKEN_PLAN_REGION_LABELS).map(([value, label]) => `<option value="${value}" ${mimoTokenPlanRegionSelection === value ? "selected" : ""}>固定为${label}</option>`).join("")}</select><div class="settings-model-hint">自动模式默认从中国大陆开始，鉴权或区域不匹配时尝试其他区域并记住成功结果；普通 sk- 密钥不受影响。</div></div>
             </div>
             <div class="settings-group">
                 <div class="settings-group-title" id="setting-asr-section">ASR 音频识别</div>
@@ -1133,7 +1206,7 @@ function renderSettings() {
                 </div>
                 <div id="setting-asr-mimo-fields" class="${asrProvider === "mimo" ? "" : "settings-hidden"}">
                     <div class="settings-provider-url">${DEFAULT_MIMO_ASR_BASE_URL}</div>
-                    <div class="field"><label>小米 MiMo API Key</label>${secretField("setting-mimo-key", settings.mimoApiKey, "示例：sk-xxxxx")}</div>
+                    <div class="field"><label>小米 MiMo API Key</label>${secretField("setting-mimo-key", settings.mimoApiKey, "示例：sk-xxxxx / tp-xxxxx")}</div>
                     <div class="field"><label>小米 MiMo 模型</label><input id="setting-mimo-model" value="${DEFAULT_MIMO_ASR_MODEL}" readonly></div>
                 </div>
             </div>
@@ -1329,9 +1402,6 @@ function updateFollowButton() {
 
 function syncSubtitlePlayback(currentTime, force = false) {
     if (state.activePage !== "CC" || !Number.isFinite(currentTime)) return;
-    if (!state.followEnabled && Date.now() - state.followPausedAt >= 5000) {
-        state.followEnabled = true;
-    }
     const list = document.querySelector(".cc-list");
     if (!list) return;
     const rows = Array.from(list.querySelectorAll(".cc-row"));
@@ -1520,6 +1590,7 @@ function startChatStream(text) {
         text,
         messageId,
         bvid: getBvid(),
+        reasoningEffort: normalizeChatReasoningEffort(state.settings?.chatReasoningEffort),
         taskContext: {
             cid: getActiveCid(),
             tid: String(state.tabState?.activeTid || state.cache?.tid || ""),
@@ -1548,11 +1619,12 @@ async function saveSettings({ silent = false, requestGroqPermission = false } = 
     );
     const customBaseUrlInput = document.getElementById("setting-base-url");
     const customBaseUrl = provider === "custom"
-        ? normalizeHttpsBaseUrlInput(customBaseUrlInput?.value)
-        : ensureHttpsUrlPrefixInput(current.customBaseUrl);
+        ? normalizeCustomBaseUrlInput(customBaseUrlInput?.value)
+        : ensureCustomBaseUrlPrefixInput(current.customBaseUrl);
     if (provider === "custom" && customBaseUrlInput && customBaseUrl) customBaseUrlInput.value = customBaseUrl;
     const requestedAsrProvider = String(document.getElementById("setting-asr-provider")?.value || "groq").toLowerCase();
     const asrProvider = ["groq", "siliconflow", "mimo"].includes(requestedAsrProvider) ? requestedAsrProvider : "groq";
+    const mimoTokenPlanRegionSelection = String(document.getElementById("setting-mimo-token-plan-region")?.value || "auto").toLowerCase();
     const payload = {
         ...current,
         provider,
@@ -1570,6 +1642,10 @@ async function saveSettings({ silent = false, requestGroqPermission = false } = 
         siliconFlowAsrModel: document.getElementById("setting-siliconflow-model")?.value.trim() || "FunAudioLLM/SenseVoiceSmall",
         mimoApiKey: document.getElementById("setting-mimo-key")?.value.trim() || "",
         mimoAsrModel: DEFAULT_MIMO_ASR_MODEL,
+        mimoTokenPlanRegion: mimoTokenPlanRegionSelection === "auto"
+            ? normalizeMimoTokenPlanRegionInput(current.mimoTokenPlanRegion)
+            : normalizeMimoTokenPlanRegionInput(mimoTokenPlanRegionSelection),
+        mimoTokenPlanRegionMode: mimoTokenPlanRegionSelection === "auto" ? "auto" : "manual",
         themeMode: document.getElementById("setting-theme-mode")?.value || "system",
         prefMode: document.getElementById("setting-pref-mode")?.value || "quality",
         defaultOpenPage: document.getElementById("setting-default-page")?.value || "CC",
@@ -1822,6 +1898,9 @@ async function handleAction(actionNode) {
         return;
     }
     if (action === "refresh-page") {
+        state.error = "";
+        state.errorCode = "";
+        render();
         await chrome.tabs.reload(state.tabId);
         return;
     }
@@ -1832,7 +1911,7 @@ async function handleAction(actionNode) {
     }
     if (action === "authorize-custom-origin") {
         const input = document.getElementById("setting-base-url");
-        const baseUrl = normalizeHttpsBaseUrlInput(input?.value);
+        const baseUrl = normalizeCustomBaseUrlInput(input?.value);
         if (!baseUrl) throw new Error("请先填写 Base URL");
         if (input) input.value = baseUrl;
         const permission = await runtimeMessage({
@@ -1976,6 +2055,7 @@ app.addEventListener("click", async (event) => {
     if (!actionNode) return;
     handleAction(actionNode).catch((error) => {
         state.error = error?.message || "操作失败";
+        state.errorCode = error?.code || "";
         render();
     });
 });
@@ -1998,7 +2078,7 @@ app.addEventListener("focusin", (event) => {
 app.addEventListener("focusout", hideUiTooltip);
 app.addEventListener("focusout", (event) => {
     if (event.target.id !== "setting-base-url") return;
-    const prefixed = ensureHttpsUrlPrefixInput(event.target.value);
+    const prefixed = ensureCustomBaseUrlPrefixInput(event.target.value);
     if (prefixed) event.target.value = prefixed;
 });
 
@@ -2047,6 +2127,16 @@ app.addEventListener("input", (event) => {
 });
 
 app.addEventListener("change", (event) => {
+    if (event.target.id === "chat-reasoning-effort") {
+        state.settings = {
+            ...(state.settings || {}),
+            chatReasoningEffort: normalizeChatReasoningEffort(event.target.value)
+        };
+        runtimeMessage({ action: "SAVE_SETTINGS", settings: state.settings })
+            .then((result) => { state.settings = result?.settings || state.settings; })
+            .catch((error) => showToast(error?.message || "保存失败"));
+        return;
+    }
     if (event.target.id === "setting-provider") {
         const button = document.getElementById("setting-provider-register");
         const selectedProvider = state.providers?.[event.target.value] || {};
@@ -2064,6 +2154,8 @@ app.addEventListener("change", (event) => {
             ?.classList.toggle("settings-hidden", event.target.value !== "modelscope");
         document.getElementById("setting-custom-provider-fields")
             ?.classList.toggle("settings-hidden", event.target.value !== "custom");
+        document.getElementById("setting-mimo-token-plan-region-field")
+            ?.classList.toggle("settings-hidden", event.target.value !== "mimo" && document.getElementById("setting-asr-provider")?.value !== "mimo");
         const modelSelect = document.getElementById("setting-model-select");
         const modelInput = document.getElementById("setting-model");
         const apiInput = document.getElementById("setting-api-key");
@@ -2091,6 +2183,8 @@ app.addEventListener("change", (event) => {
         document.getElementById("setting-asr-groq-fields")?.classList.toggle("settings-hidden", event.target.value !== "groq");
         document.getElementById("setting-asr-siliconflow-fields")?.classList.toggle("settings-hidden", event.target.value !== "siliconflow");
         document.getElementById("setting-asr-mimo-fields")?.classList.toggle("settings-hidden", event.target.value !== "mimo");
+        document.getElementById("setting-mimo-token-plan-region-field")
+            ?.classList.toggle("settings-hidden", event.target.value !== "mimo" && document.getElementById("setting-provider")?.value !== "mimo");
     }
     if (event.target.id === "setting-prompt-mode") {
         document.getElementById("setting-prompt-guided-fields")?.classList.toggle("settings-hidden", event.target.value === "custom");
@@ -2190,7 +2284,14 @@ window.addEventListener("beforeunload", () => {
 });
 
 refreshState({ hydrate: true, refreshFeedback: true });
-setInterval(() => refreshState({ quiet: true }), 1500);
+setInterval(() => {
+    const activeElement = document.activeElement;
+    const isEditingSettings = state.activePage === "settings"
+        && activeElement?.id?.startsWith("setting-")
+        && ["INPUT", "TEXTAREA"].includes(activeElement.tagName);
+    if (isEditingSettings) return;
+    refreshState({ quiet: true });
+}, 1500);
 setInterval(async () => {
     if (state.activePage !== "CC" || !state.tabId || document.hidden) return;
     try {

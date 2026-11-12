@@ -70,7 +70,16 @@
         if (IGNORED_ERROR_CODES.has(code)) return false;
         if (isClearlyThirdPartyExtensionError(normalized.stack, context)) return false;
         if (isUnattributedBlobWorkerError(normalized, context)) return false;
+        if (isUnattributedFirefoxDomError(normalized, context)) return false;
         return !IGNORED_ERROR_PATTERNS.some((pattern) => pattern.test(normalized.message));
+    }
+
+    function isUnattributedFirefoxDomError(error, context = {}) {
+        const source = String(context?.source || "");
+        if (!["content_window_error", "content_unhandled_rejection"].includes(source)) return false;
+        if (!/HierarchyRequestError/i.test(String(error?.name || ""))
+            && !/Cannot add children to a Text|appendChild.*Text/i.test(String(error?.message || ""))) return false;
+        return !hasBilitatoFunctionalStack(error?.stack);
     }
 
     function isUnattributedBlobWorkerError(error, context = {}) {

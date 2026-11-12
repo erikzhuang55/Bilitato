@@ -6,8 +6,12 @@ const contentSource = readFileSync(new URL("../content.js", import.meta.url), "u
 const injectSource = readFileSync(new URL("../inject.js", import.meta.url), "utf8");
 const staticRules = JSON.parse(readFileSync(new URL("../rules.json", import.meta.url), "utf8"));
 const ruleSource = backgroundSource.slice(
-  backgroundSource.indexOf("async function ensureDownloadHeaderRule"),
+  backgroundSource.indexOf("function buildExactMediaUrlRegex"),
   backgroundSource.indexOf("async function probeDownloadContentType")
+);
+const temporaryRuleSource = backgroundSource.slice(
+  backgroundSource.indexOf("async function createTemporaryMediaHeaderRule"),
+  backgroundSource.indexOf("async function removeTemporaryMediaHeaderRule")
 );
 const asrFetchSource = backgroundSource.slice(
   backgroundSource.indexOf("static async fetchAudioResourceWithFallback"),
@@ -28,8 +32,18 @@ describe("Bilibili media header rule", () => {
       ]));
   });
 
-  it("refreshes the safe rule before ASR audio fetching", () => {
-    expect(asrFetchSource).toContain("await ensureDownloadHeaderRule(url);");
+  it("matches only the complete media URL without initiator domain filters", () => {
+    expect(staticRules).toEqual([]);
+    expect(temporaryRuleSource).toContain("regexFilter: buildExactMediaUrlRegex(targetUrl)");
+    expect(temporaryRuleSource).toContain("isUrlFilterCaseSensitive: true");
+    expect(temporaryRuleSource).not.toContain("initiatorDomains");
+    expect(temporaryRuleSource).not.toContain("urlFilter");
+    expect(backgroundSource).toContain("cleanupLegacyDownloadHeaderRule()");
+  });
+
+  it("uses and removes an exact temporary rule around ASR audio fetching", () => {
+    expect(asrFetchSource).toContain("headerRuleId = await createTemporaryMediaHeaderRule(url)");
+    expect(asrFetchSource).toContain('removeTemporaryMediaHeaderRule(headerRuleId, { reason: "asr_fetch_finished" })');
   });
 
   it("uses the original extension fetch before the page fallback", () => {
@@ -46,10 +60,20 @@ describe("Bilibili media header rule", () => {
     expect(downloadMessageSource).toContain('DOWNLOAD_URL_EXPIRED');
   });
 
-  it("forces the requested media filename during Chrome filename resolution", () => {
-    expect(backgroundSource).toContain("chrome.downloads.onDeterminingFilename?.addListener");
-    expect(backgroundSource).toContain('suggest({ filename, conflictAction: "uniquify" })');
+  it("lets Chrome uniquify the requested filename without intercepting unrelated downloads", () => {
+    expect(backgroundSource).not.toContain("chrome.downloads.onDeterminingFilename?.addListener");
     expect(downloadMessageSource).toContain('conflictAction: "uniquify"');
+    expect(backgroundSource).toContain("const ownedDownloadIds = new Set()");
+    expect(backgroundSource).toContain("if (!ownedDownloadIds.has(delta.id) && !ruleId) return;");
+  });
+
+  it("binds each download to its own rule and removes it after completion or interruption", () => {
+    expect(downloadMessageSource).toContain("headerRuleId = await createTemporaryMediaHeaderRule(url)");
+    expect(downloadMessageSource).toContain("await rememberDownloadHeaderRule(downloadId, headerRuleId)");
+    expect(downloadMessageSource).toContain('removeTemporaryMediaHeaderRule(headerRuleId, { reason: "download_start_failed" })');
+    expect(backgroundSource).toContain("await releaseDownloadHeaderRule(delta.id, ruleId)");
+    expect(backgroundSource).toContain("DOWNLOAD_HEADER_RULE_STORAGE_KEY");
+    expect(ruleSource).toContain("mutateDownloadHeaderRules");
   });
 
   it("requests fresh DASH signatures before preparing downloads", () => {

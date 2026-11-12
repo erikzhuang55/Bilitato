@@ -2,8 +2,8 @@ name: Model catalog validator
 
 on:
   schedule:
-    # GitHub Actions uses UTC. 20:00 UTC = 04:00 Asia/Shanghai the next day.
-    - cron: '0 20 * * *'
+    # GitHub Actions uses UTC. 20:17 UTC = 04:17 Asia/Shanghai the next day.
+    - cron: '17 20 * * *'
   workflow_dispatch:
 
 permissions:

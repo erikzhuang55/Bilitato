@@ -78,11 +78,13 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('window.addEventListener("pagehide"');
   });
 
-  it("switches to the native side panel in wide mode and restores embedded mode on exit", () => {
+  it("offers a manual side panel button in wide mode and restores embedded mode on exit", () => {
     expect(content.indexOf("let playerWideModeActive = false")).toBeLessThan(content.indexOf("bootstrap();"));
     expect(content.indexOf("let wideSidePanelOpenPending = false")).toBeLessThan(content.indexOf("bootstrap();"));
     expect(content).toContain("initPlayerWideModeBridge()");
-    expect(content).toContain('reason: "player_wide"');
+    expect(content).toContain('reason: "wide_mode_button"');
+    expect(content).toContain('button.addEventListener("click", (event) => {');
+    expect(content).not.toContain('if (!wasWide) openSidePanelForWideMode()');
     expect(content).toContain('command === "get-player-layout"');
     expect(sidepanel).toContain("openedDuringWideMode");
     expect(sidepanel).toContain('command: "get-player-layout"');
@@ -217,19 +219,40 @@ describe("native side panel", () => {
     expect(releaseNotice).toContain("onClose?.()");
   });
 
-
-  it("keeps the ModelScope preset list aligned with the 1.6.5 catalog", () => {
+  it("keeps the ModelScope preset list aligned with currently supported models", () => {
     const modelScopeList = content.match(/modelscope:\s*\[([\s\S]*?)\]/)?.[1] || "";
+    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V4-Flash"');
+    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4.1-Flash-1017"');
+    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Pro-0813"');
+    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V4.1-Flash"');
+    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V4-Pro"');
+    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V4-Flash-0731"');
     expect(modelScopeList).toContain('"Qwen/Qwen3.8-Flash-Next"');
     expect(modelScopeList).toContain('"Qwen/Qwen3.5-27B"');
-    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4.1-Flash"');
-    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Pro"');
-    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Pro-0813"');
-    expect(modelScopeList).toContain('"deepseek-ai/DeepSeek-V4-Flash-0731"');
-    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V4.1-Flash-1017"');
     expect(content).toContain("prioritizeRecommendedProviderModels(key, remoteModels)");
+    expect(content).toContain("MODELSCOPE_RETIRED_MODELS");
+    expect(sidepanel).toContain("retiredModelScopeModels");
+    expect(content.indexOf('"Qwen/Qwen3.8-Flash-Next"')).toBeLessThan(content.indexOf('"Qwen/Qwen3.5-27B"'));
+    expect(modelScopeList).not.toContain('"deepseek-ai/DeepSeek-V3.2"');
+    expect(modelScopeList).not.toContain('"ZhipuAI/GLM-5.2"');
+    expect(modelScopeList).not.toContain('"ZhipuAI/GLM-4.7-Flash"');
+    expect(modelScopeList).not.toContain('"stepfun-ai/Step-3.7-Flash"');
+    expect(modelScopeList).not.toContain('"MiniMax/MiniMax-M1-80k"');
+    expect(modelScopeList).not.toContain('"mistralai/Mistral-Large-Instruct-2407"');
+    expect(content).not.toContain("已通过每日在线推理检测");
+    expect(content).toContain('MODELSCOPE_RECOMMENDED_MODELS.has(model) ? "推荐"');
+    expect(content).toContain('option.querySelector(".model-recommended-tag")');
+    expect(contentCss).toContain(".model-recommended-tag");
+    expect(contentCss).toContain(".custom-option-main > span:first-child");
+    expect(contentCss).toContain("text-overflow: ellipsis");
+    expect(sidepanel).toContain('recommendedModelScopeModels.has(model) ? "（推荐）"');
+    expect(sidepanel).toContain("recommendedModelScopeModelOrder.filter");
+    expect(background).toContain('model: "Qwen/Qwen3.8-Flash-Next"');
     expect(background).toContain("LEGACY_MODELSCOPE_MODELS");
-    expect(background).toContain('["deepseek-ai/deepseek-v4-flash", "deepseek-ai/DeepSeek-V4.1-Flash"]');
+    expect(background).toContain('["deepseek-ai/deepseek-v4-flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"]');
+    expect(background).toContain('["deepseek-ai/deepseek-v4-pro", "deepseek-ai/DeepSeek-V4-Pro-0813"]');
+    expect(background).toContain('["zhipuai/glm-5.2", "Qwen/Qwen3.8-Flash-Next"]');
+    expect(background).toContain('["qwen/qwen3-30b-a3b", "Qwen/Qwen3.8-Flash-Next"]');
   });
 
   it("tracks ModelScope quota headers without displaying quota fields and uses compact segments first", () => {

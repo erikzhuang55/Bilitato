@@ -13,8 +13,8 @@ describe("remote configuration", () => {
     expect(fallback.tasks.summary).toEqual([
       "Qwen/Qwen3.8-Flash-Next",
       "Qwen/Qwen3.5-27B",
-      "deepseek-ai/DeepSeek-V4.1-Flash",
-      "deepseek-ai/DeepSeek-V4-Pro",
+      "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+      "deepseek-ai/DeepSeek-V4-Pro-0813",
     ]);
     expect(normalizeRemoteConfigRow({
       payload: { model_fallback: { max_attempts: 99 } },

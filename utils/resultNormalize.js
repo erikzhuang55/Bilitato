@@ -182,8 +182,8 @@ export function normalizeRumors(value) {
         overview: String(source.overview || ""),
         claims: claims.map((claim) => ({
             claim: String(claim.claim || claim.text || ""),
-            verdict: String(claim.verdict || "unknown"),
-            confidence: Number.isFinite(Number(claim.confidence)) ? Number(claim.confidence) : 0,
+            verdict: String(claim.verdict ?? "unknown"),
+            confidence: claim.confidence == null ? null : (Number.isFinite(Number(claim.confidence)) ? Number(claim.confidence) : null),
             analysis: String(claim.analysis || ""),
             timestamp_sec: Number.isFinite(Number(claim.timestamp_sec ?? claim.timestamp)) ? Number(claim.timestamp_sec ?? claim.timestamp) : 0
         }))
@@ -203,11 +203,12 @@ export function isValidRumorsResult(value) {
         if (!claim || typeof claim !== "object" || Array.isArray(claim)) return false;
         const claimText = String(claim.claim || claim.text || "").trim();
         const verdict = claim.verdict;
-        const confidence = Number(claim.confidence);
+        const hasConfidence = claim.confidence != null;
+        const confidence = hasConfidence ? Number(claim.confidence) : null;
         const timestamp = Number(claim.timestamp_sec ?? claim.timestamp);
         return !!claimText
             && (typeof verdict === "boolean" || (typeof verdict === "string" && !!verdict.trim()))
-            && Number.isFinite(confidence) && confidence >= 0 && confidence <= 100
+            && (!hasConfidence || (Number.isFinite(confidence) && confidence >= 0 && confidence <= 100))
             && typeof claim.analysis === "string"
             && Number.isFinite(timestamp) && timestamp >= 0;
     });

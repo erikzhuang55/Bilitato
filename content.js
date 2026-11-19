@@ -132,10 +132,8 @@ function getProviderModelOptions(providerKey) {
             "Qwen/Qwen3.5-122B-A10B",
             "Qwen/Qwen3.5-35B-A3B",
             "Qwen/Qwen3.5-27B",
-            "deepseek-ai/DeepSeek-V4.1-Flash",
-            "deepseek-ai/DeepSeek-V4-Pro",
-            "deepseek-ai/DeepSeek-V4-Pro-0813",
-            "deepseek-ai/DeepSeek-V4-Flash-0731"
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "deepseek-ai/DeepSeek-V4-Pro-0813"
         ],
         zhipu: [
             "glm-5.2",
@@ -245,7 +243,15 @@ function resolveProviderModelValue(providerKey, model) {
     const key = String(providerKey || "").toLowerCase();
     const value = String(model || "").trim();
     if (key !== "modelscope") return value;
-    const legacyModelScopeModels = new Set([
+    const legacyModelScopeModels = new Map([
+        ["deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+        ["deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+        ["deepseek-ai/DeepSeek-V4-Flash-0731", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+        ["deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Pro-0813"]
+    ]);
+    const mappedModel = legacyModelScopeModels.get(value);
+    if (mappedModel) return mappedModel;
+    const retiredModelScopeModels = new Set([
         "moonshotai/Kimi-K2.5",
         "moonshotai/Kimi-K2.6",
         "MiniMax/MiniMax-M2.5",
@@ -257,13 +263,12 @@ function resolveProviderModelValue(providerKey, model) {
         "ZhipuAI/GLM-4.7-Flash",
         "mistralai/Mistral-Large-Instruct-2407",
         "Qwen/Qwen2.5-72B-Instruct",
-        "deepseek-ai/DeepSeek-V4-Flash",
         "Qwen/Qwen3-30B-A3B-Instruct-2507",
         "Qwen/Qwen3-235B-A22B-Instruct-2507",
         "Qwen/Qwen3-Coder-30B-A3B-Instruct",
         "Qwen/Qwen3-30B-A3B"
     ]);
-    return legacyModelScopeModels.has(value) ? getDefaultProviderModel("modelscope") : value;
+    return retiredModelScopeModels.has(value) ? getDefaultProviderModel("modelscope") : value;
 }
 
 function getSortedProviderKeys(providers = {}) {
@@ -2661,6 +2666,7 @@ function syncPlayerWideMode() {
     const nextWide = isPlayerWideMode();
     if (nextWide === playerWideModeActive) return nextWide;
     playerWideModeActive = nextWide;
+    syncWideSidePanelButton();
     if (!nextWide) {
         setEmbeddedPanelVisible(true);
         logUI.info("wide_mode_embedded_restored", { task: "ui" });
@@ -2671,10 +2677,10 @@ function syncPlayerWideMode() {
 function openSidePanelForWideMode() {
     if (wideSidePanelOpenPending) return;
     wideSidePanelOpenPending = true;
-    chrome.runtime.sendMessage({ action: "OPEN_SIDE_PANEL", reason: "player_wide" })
+    chrome.runtime.sendMessage({ action: "OPEN_SIDE_PANEL", reason: "wide_mode_button" })
         .then((result) => {
             if (!result?.ok) {
-                showToast(result?.error || "无法打开浏览器侧边栏");
+                showToast("无法打开侧边栏，请点击浏览器工具栏中的 Bilitato 图标");
                 return;
             }
             if (result.requiresToolbarAction) {
@@ -2684,22 +2690,40 @@ function openSidePanelForWideMode() {
             setEmbeddedPanelVisible(false);
             logUI.info("wide_mode_side_panel_opened", { task: "ui" });
         })
-        .catch((error) => showToast(error?.message || "无法打开浏览器侧边栏"))
+        .catch(() => showToast("无法打开侧边栏，请点击浏览器工具栏中的 Bilitato 图标"))
         .finally(() => {
             wideSidePanelOpenPending = false;
         });
 }
 
+function syncWideSidePanelButton() {
+    let button = document.getElementById("__bili_ai_wide_side_panel_button__");
+    if (!button && document.body) {
+        button = document.createElement("button");
+        button.id = "__bili_ai_wide_side_panel_button__";
+        button.type = "button";
+        button.textContent = "打开 Bilitato 侧边栏";
+        button.setAttribute("aria-label", "打开 Bilitato 侧边栏");
+        button.style.cssText = "position:fixed;top:76px;right:16px;z-index:10000;padding:8px 12px;border:0;border-radius:8px;background:#00a1d6;color:#fff;font:13px sans-serif;cursor:pointer;box-shadow:0 2px 8px #0003";
+        button.addEventListener("click", (event) => {
+            event.stopPropagation();
+            openSidePanelForWideMode();
+        });
+        document.body.appendChild(button);
+    }
+    if (button) button.style.display = playerWideModeActive ? "" : "none";
+}
+
 function onPlayerWideToggleClick(event) {
     if (!isWideScreenToggleClick(event)) return;
-    const wasWide = isPlayerWideMode();
-    if (!wasWide) openSidePanelForWideMode();
     setTimeout(syncPlayerWideMode, 0);
     setTimeout(syncPlayerWideMode, 160);
 }
 
 function initPlayerWideModeBridge() {
     playerWideModeActive = isPlayerWideMode();
+    if (document.body) syncWideSidePanelButton();
+    else document.addEventListener("DOMContentLoaded", syncWideSidePanelButton, { once: true });
     document.addEventListener("click", onPlayerWideToggleClick, true);
 }
 
@@ -3487,6 +3511,7 @@ function showButtonTooltip(target) {
         panelShadowRoot.appendChild(tooltip);
     }
     tooltip.textContent = text;
+    tooltip.classList.toggle("quota-refresh-tooltip", target.classList.contains("modelscope-quota-refresh"));
     const rect = target.getBoundingClientRect();
     const margin = 7;
     const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
@@ -5215,7 +5240,7 @@ function renderCC(panel) {
             const hasTimestamp = !isNoTimestampSubtitle && Number.isFinite(start) && start >= 0;
             const timeHtml = hasTimestamp
                 ? `<button class="cc-time cc-time-btn" data-action="cc-jump" data-sec="${start}">${formatTime(start)}</button>`
-                : `<span class="cc-time" aria-hidden="true" style="cursor:default;color:transparent;">--</span>`;
+                : `<span class="cc-time" aria-label="第 ${index + 1} 行" style="cursor:default;">#${index + 1}</span>`;
             return `<div class="cc-row" data-index="${index}" data-start="${hasTimestamp ? start : ""}" data-end="${hasTimestamp ? end : ""}">${timeHtml}<span class="cc-text">${escapeHtml(text)}</span><button class="cc-copy-btn" data-action="cc-copy">复制</button></div>`;
         }).join("");
 
@@ -6232,7 +6257,7 @@ function renderSettings(panel) {
                     </div>
                 </div>
                 <label>Provider</label>
-                <div class="settings-provider-row">
+                <div class="settings-provider-row settings-main-provider-row">
                     <div class="custom-select-container" id="settings-provider-select">
                         <div class="custom-select-trigger">
                             <span class="current-value">${escapeHtml(currentProviderName)}</span>
@@ -6243,6 +6268,7 @@ function renderSettings(panel) {
                         </div>
                     </div>
                     <button class="panel-btn ghost" data-action="settings-open-reg" data-url="${escapeHtml(provider.regUrl || "")}">注册</button>
+                    <button class="panel-btn ghost modelscope-quota-refresh ${providerKey === "modelscope" ? "" : "settings-hidden"}" data-action="open-external-url" data-url="https://modelscope.cn/my/settings/account" data-button-tooltip="目前 ModelScope 每日 200 次免费调用额度需要每日登录官网刷新，点击后将跳转官网刷新调用额度。">刷新额度</button>
                 </div>
                 <div class="settings-provider-url">${escapeHtml(provider.baseUrl || "-")}</div>
                 <label>API Key</label>

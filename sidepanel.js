@@ -562,6 +562,14 @@ function settingOptionNote(selectId, value) {
 function resolveProviderModelValue(providerKey, model) {
     const value = String(model || "").trim();
     if (String(providerKey || "").toLowerCase() !== "modelscope") return value;
+    const renamedModels = new Map([
+        ["deepseek-ai/DeepSeek-V4-Flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+        ["deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+        ["deepseek-ai/DeepSeek-V4-Flash-0731", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+        ["deepseek-ai/DeepSeek-V4-Pro", "deepseek-ai/DeepSeek-V4-Pro-0813"]
+    ]);
+    const renamed = renamedModels.get(value);
+    if (renamed) return renamed;
     const legacyModels = new Set([
         "moonshotai/Kimi-K2.5",
         "moonshotai/Kimi-K2.6",
@@ -1181,7 +1189,7 @@ function renderSettings() {
         <div class="settings-scroll-body"><div class="settings-grid">
             <div class="settings-group">
                 <div class="settings-group-title-row"><div class="settings-group-title">主模型配置</div><div class="settings-title-actions"><button type="button" class="panel-btn ghost settings-guide-btn" data-action="open-setup-guide">查看引导</button><button type="button" class="panel-btn ghost settings-guide-btn${state.announcementsUnread ? " has-unread-announcement" : ""}" data-action="open-announcements">查看公告${renderAnnouncementUnreadDot()}</button></div></div>
-                <div class="field"><label>Provider ${providerNote ? `<span id="setting-provider-tag" class="provider-tag">${escapeHtml(providerNote)}</span>` : `<span id="setting-provider-tag" class="provider-tag settings-hidden"></span>`}</label><div class="settings-provider-row"><select id="setting-provider">${providerOptions}</select><button id="setting-provider-register" type="button" class="panel-btn ghost" data-action="open-register" data-url="${escapeHtml(provider?.regUrl || "")}" ${provider?.regUrl ? "" : "disabled"}>注册</button></div></div>
+                <div class="field"><label>Provider ${providerNote ? `<span id="setting-provider-tag" class="provider-tag">${escapeHtml(providerNote)}</span>` : `<span id="setting-provider-tag" class="provider-tag settings-hidden"></span>`}</label><div class="settings-provider-row settings-main-provider-row"><select id="setting-provider">${providerOptions}</select><button id="setting-provider-register" type="button" class="panel-btn ghost" data-action="open-register" data-url="${escapeHtml(provider?.regUrl || "")}" ${provider?.regUrl ? "" : "disabled"}>注册</button><button id="setting-modelscope-quota" type="button" class="panel-btn ghost ${settings.provider === "modelscope" ? "" : "settings-hidden"}" data-action="open-external-url" data-url="https://modelscope.cn/my/settings/account" data-tooltip="目前 ModelScope 每日 200 次免费调用额度需要每日登录官网刷新，点击后将跳转官网刷新调用额度。">刷新额度</button></div></div>
                 <div class="field"><label>API Key</label>${secretField("setting-api-key", settings.apiKey, settings.provider === "mimo" ? "示例：sk-xxxxx / tp-xxxxx" : "示例：sk-xxxxx")}</div>
                 <div class="field"><label class="settings-label-with-info">Model${modelLabelInfo}</label>${providerModels.length ? `<select id="setting-model-select">${modelOptions}<option value="custom" ${modelIsPreset ? "" : "selected"}>自定义</option></select>` : ""}<input id="setting-model" class="${providerModels.length && modelIsPreset ? "settings-hidden" : ""}" value="${escapeHtml(currentModel)}" placeholder="请输入模型名"></div>
                 <div id="setting-custom-provider-fields" class="${customProviderVisible}">
@@ -2151,6 +2159,8 @@ app.addEventListener("change", (event) => {
             tag.classList.toggle("settings-hidden", !tag.textContent);
         }
         document.getElementById("setting-model-info")
+            ?.classList.toggle("settings-hidden", event.target.value !== "modelscope");
+        document.getElementById("setting-modelscope-quota")
             ?.classList.toggle("settings-hidden", event.target.value !== "modelscope");
         document.getElementById("setting-custom-provider-fields")
             ?.classList.toggle("settings-hidden", event.target.value !== "custom");

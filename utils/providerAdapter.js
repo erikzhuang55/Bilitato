@@ -20,10 +20,8 @@ export const PROVIDERS = {
             "Qwen/Qwen3.5-122B-A10B",
             "Qwen/Qwen3.5-35B-A3B",
             "Qwen/Qwen3.5-27B",
-            "deepseek-ai/DeepSeek-V4.1-Flash",
-            "deepseek-ai/DeepSeek-V4-Pro",
-            "deepseek-ai/DeepSeek-V4-Pro-0813",
-            "deepseek-ai/DeepSeek-V4-Flash-0731"
+            "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+            "deepseek-ai/DeepSeek-V4-Pro-0813"
         ],
         headerKey: "Authorization",
         tokenPrefix: "Bearer ",

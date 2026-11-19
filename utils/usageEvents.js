@@ -1,6 +1,8 @@
-import { isSupabaseEnabled, supabaseWrite } from "./supabaseClient.js";
+import { isSupabaseEnabled, supabaseRpc, supabaseWrite } from "./supabaseClient.js";
 
 export const DEFAULT_USAGE_EVENTS_TABLE = "usage_events";
+export const DAILY_ACTIVITY_EVENTS = Object.freeze(new Set(["extension_started", "feature_viewed"]));
+export const DEFAULT_USAGE_ACTIVITY_RPC = "record_usage_activity_daily";
 
 function cleanText(value, maxLength = 500) {
     return String(value || "").trim().slice(0, maxLength);
@@ -59,6 +61,23 @@ export async function reportUsageEvent(settings, payload = {}) {
     if (!isSupabaseEnabled(settings)) return { sent: false, reason: "disabled" };
     const row = normalizeUsageEventPayload(payload);
     if (!row) return { sent: false, reason: "invalid_payload" };
+    if (DAILY_ACTIVITY_EVENTS.has(row.event_name)) {
+        try {
+            await supabaseRpc(settings, settings?.supabaseUsageActivityRpcName || DEFAULT_USAGE_ACTIVITY_RPC, {
+                p_user_hash: row.user_hash,
+                p_extension_version: row.extension_version,
+                p_event_name: row.event_name,
+                p_feature_name: row.feature_name,
+                p_status: row.status
+            }, {
+                requestName: "usage_activity_daily_report",
+                errorMessage: "Supabase daily activity RPC 失败"
+            });
+            return { sent: true, aggregated: true };
+        } catch (_) {
+            // Older or temporarily unavailable backends still receive the raw event.
+        }
+    }
     const tableName = cleanText(settings?.supabaseUsageEventsTable, 80) || DEFAULT_USAGE_EVENTS_TABLE;
     await supabaseWrite(settings, tableName, row, {
         requestName: "usage_event_report",

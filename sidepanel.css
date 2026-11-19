@@ -1447,6 +1447,10 @@ button {
     grid-template-columns: minmax(0, 1fr) auto;
 }
 
+.settings-main-provider-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+}
+
 .settings-provider-url {
     font-size: 12px;
     color: #7b8493;

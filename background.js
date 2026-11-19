@@ -1209,7 +1209,10 @@ const LEGACY_MODELSCOPE_MODELS = new Map([
     ["zhipuai/glm-4.7-flash", "Qwen/Qwen3.8-Flash-Next"],
     ["mistralai/mistral-large-instruct-2407", "Qwen/Qwen3.8-Flash-Next"],
     ["qwen/qwen2.5-72b-instruct", "Qwen/Qwen3.8-Flash-Next"],
-    ["deepseek-ai/deepseek-v4-flash", "deepseek-ai/DeepSeek-V4.1-Flash"],
+    ["deepseek-ai/deepseek-v4-flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+    ["deepseek-ai/deepseek-v4.1-flash", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+    ["deepseek-ai/deepseek-v4-flash-0731", "deepseek-ai/DeepSeek-V4.1-Flash-1017"],
+    ["deepseek-ai/deepseek-v4-pro", "deepseek-ai/DeepSeek-V4-Pro-0813"],
     ["qwen/qwen3-30b-a3b-instruct-2507", "Qwen/Qwen3.8-Flash-Next"],
     ["qwen/qwen3-235b-a22b-instruct-2507", "Qwen/Qwen3.8-Flash-Next"],
     ["qwen/qwen3-coder-30b-a3b-instruct", "Qwen/Qwen3.8-Flash-Next"],
@@ -6796,10 +6799,10 @@ async function requestOffscreenAudioChunkingPrepare(payload = {}) {
             }
         });
         if (response?.ok) return response.result || {};
-        throw createAppError(
+        throw attachSentryContext(createAppError(
             response?.code || "ASR_CHUNKING_FAILED",
             response?.error || "音轨切片失败，请稍后重试"
-        );
+        ), response?.diagnostics || {});
     }
     return requestOffscreenAudioChunkingPrepareFromBlob(payload);
 }
@@ -6823,7 +6826,10 @@ async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
             }
         });
         if (!started?.ok) {
-            throw createAppError(started?.code || "ASR_CHUNKING_FAILED", started?.error || "音轨切片准备失败");
+            throw attachSentryContext(
+                createAppError(started?.code || "ASR_CHUNKING_FAILED", started?.error || "音轨切片准备失败"),
+                started?.diagnostics || {}
+            );
         }
         uploadId = String(started?.result?.uploadId || "").trim();
         if (!uploadId) throw createAppError("ASR_CHUNKING_FAILED", "音轨切片会话创建失败");
@@ -6841,7 +6847,10 @@ async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
                 payload: { uploadId, dataBase64: btoa(binary) }
             });
             if (!appended?.ok) {
-                throw createAppError(appended?.code || "ASR_CHUNKING_FAILED", appended?.error || "音轨分块传输失败");
+                throw attachSentryContext(
+                    createAppError(appended?.code || "ASR_CHUNKING_FAILED", appended?.error || "音轨分块传输失败"),
+                    appended?.diagnostics || {}
+                );
             }
         }
 
@@ -6850,10 +6859,10 @@ async function requestOffscreenAudioChunkingPrepareFromBlob(payload = {}) {
             payload: { uploadId }
         });
         if (!response?.ok) {
-            throw createAppError(
+            throw attachSentryContext(createAppError(
                 response?.code || "ASR_CHUNKING_FAILED",
                 response?.error || "音轨切片失败，请稍后重试"
-            );
+            ), response?.diagnostics || {});
         }
         finished = true;
         return response.result || {};
@@ -7105,7 +7114,7 @@ async function retrySegmentsWithCompactPrompt({ tabId, bvid, cache, settings, ta
     return normalized;
 }
 
-async function retrySegmentsWithAIRepair({ tabId, bvid, cache, settings, mode, originalError }) {
+async function retrySegmentsWithAIRepair({ tabId, bvid, cache, settings, taskContext, mode, originalError }) {
     const responseText = String(originalError?.[SEGMENTS_REPAIR_SOURCE] || "").trim();
     if (!responseText) throw originalError;
     const repairPrompt = buildSegmentsAIRepairPrompt(responseText);
@@ -7375,6 +7384,7 @@ async function retrySegmentsWithAutoFallbacks({
                 bvid,
                 cache,
                 settings,
+                taskContext,
                 mode,
                 originalError: latestError
             });
@@ -8381,6 +8391,7 @@ async function runSummarySegmentsInEfficiency(tabId, bvid, force, settings, task
                     bvid,
                     cache,
                     settings,
+                    taskContext,
                     mode: "efficiency",
                     originalError: segmentsFailureError
                 });

@@ -45,7 +45,7 @@ describe("normalizeRumors", () => {
         {
           claim: "缺少判断",
           verdict: "unknown",
-          confidence: 0,
+          confidence: null,
           analysis: "",
           timestamp_sec: 0
         }
@@ -85,5 +85,16 @@ describe("normalizeRumors", () => {
       overview: "需要核查",
       claims: [{ text: "说法", verdict: true, confidence: 101, analysis: "", timestamp_sec: 0 }]
     })).toBe(false);
+  });
+
+  it("accepts claims without an optional confidence value", () => {
+    const response = {
+      overall_score: 8,
+      overview: "需要核查",
+      claims: [{ text: "某个说法", verdict: false, analysis: "理由", timestamp_sec: 24 }]
+    };
+    expect(isValidRumorsResult(response)).toBe(true);
+    expect(normalizeRumors(response).claims[0].confidence).toBeNull();
+    expect(normalizeRumors(response).claims[0].verdict).toBe("false");
   });
 });

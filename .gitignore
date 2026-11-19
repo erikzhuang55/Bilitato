@@ -23,5 +23,6 @@ Thumbs.db
 # Local generated assets
 social-card-bilitato-xhs/
 outputs/
+output/supabase-backups/
 scripts/ensure-codex-mobile.ps1
 model-catalog-report.json

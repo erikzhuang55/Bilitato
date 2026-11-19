@@ -12,11 +12,11 @@ const DEFAULT_MODELSCOPE_FALLBACK = Object.freeze({
   enabled: true,
   maxAttempts: 4,
   tasks: Object.freeze({
-    default: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
-    summary: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
-    segments: Object.freeze(["Qwen/Qwen3.5-27B", "Qwen/Qwen3.8-Flash-Next", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
-    rumors: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
-    chat: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash", "deepseek-ai/DeepSeek-V4-Pro"]),
+    default: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "deepseek-ai/DeepSeek-V4-Pro-0813"]),
+    summary: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "deepseek-ai/DeepSeek-V4-Pro-0813"]),
+    segments: Object.freeze(["Qwen/Qwen3.5-27B", "Qwen/Qwen3.8-Flash-Next", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "deepseek-ai/DeepSeek-V4-Pro-0813"]),
+    rumors: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "deepseek-ai/DeepSeek-V4-Pro-0813"]),
+    chat: Object.freeze(["Qwen/Qwen3.8-Flash-Next", "Qwen/Qwen3.5-27B", "deepseek-ai/DeepSeek-V4.1-Flash-1017", "deepseek-ai/DeepSeek-V4-Pro-0813"]),
   }),
 });
 

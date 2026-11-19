@@ -183,6 +183,62 @@ describe("contentErrorReporter", () => {
     })).toBe(true);
   });
 
+  it("ignores generic page rejections that contain no actionable reason", () => {
+    globalThis.chrome = {
+      runtime: { getURL: () => "moz-extension://bilitato-id/" }
+    };
+
+    expect(reporter.shouldReportContentError(new Error("Unhandled rejection"), {
+      task: "global_rejection",
+      source: "content_unhandled_rejection"
+    })).toBe(false);
+  });
+
+  it("ignores Bilibili crossStroage page noise but keeps extension-owned failures", () => {
+    globalThis.chrome = {
+      runtime: { getURL: () => "moz-extension://bilitato-id/" }
+    };
+    const pageError = new Error('can\'t access property "getItem", e.crossStroage is null');
+    pageError.stack = "s@https://s1.hdslb.com/bfs/static/player/main.js:1:1";
+    expect(reporter.shouldReportContentError(pageError, {
+      task: "global_rejection",
+      source: "content_unhandled_rejection"
+    })).toBe(false);
+
+    const extensionError = new Error('can\'t access property "getItem", e.crossStroage is null');
+    extensionError.stack = "readCache@moz-extension://bilitato-id/content.js:100:1";
+    expect(reporter.shouldReportContentError(extensionError, {
+      task: "global_rejection",
+      source: "content_unhandled_rejection"
+    })).toBe(true);
+  });
+
+  it("records whether an unattributed rejection has a usable stack", async () => {
+    const listeners = {};
+    globalThis.window = {
+      addEventListener(name, handler) { listeners[name] = handler; }
+    };
+    const sendMessage = vi.fn().mockResolvedValue({ ok: true });
+    globalThis.chrome = {
+      runtime: {
+        getURL: () => "chrome-extension://bilitato-id/",
+        sendMessage
+      }
+    };
+    vi.resetModules();
+    await import("../content/contentErrorReporter.js");
+
+    listeners.unhandledrejection({ reason: "COLS: response timeout" });
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      context: expect.objectContaining({
+        rejection_reason_type: "string",
+        rejection_stack_origin: "missing"
+      })
+    }));
+    delete globalThis.window;
+  });
+
   it("ignores unattributed Firefox Text-node append errors but keeps extension-owned ones", () => {
     globalThis.chrome = {
       runtime: { getURL: () => "moz-extension://bilitato-id/" }

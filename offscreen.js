@@ -49,7 +49,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .catch((error) => sendResponse({
       ok: false,
       error: error?.message || "音轨切片失败",
-      code: error?.code || "ASR_CHUNKING_FAILED"
+      code: error?.code || "ASR_CHUNKING_FAILED",
+      diagnostics: error?.diagnostics || null
     }));
   return true;
 });
@@ -145,12 +146,15 @@ async function prepareChunkAudioSession(payload = {}) {
   const sessionPrefix = `asr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
   const inputName = `${sessionPrefix}.m4a`;
   const cleanupFiles = new Set([inputName]);
+  let stage = "read_duration";
   try {
     const durationSec = await resolveAudioDurationSeconds(sourceBytes, mimeType);
     if (!(durationSec > 0)) {
       throw createOffscreenError("ASR_CHUNK_DURATION_UNKNOWN", "无法识别音轨时长，暂时不能自动切片转录");
     }
+    stage = "write_input";
     await ffmpeg.writeFile(inputName, new Uint8Array(sourceBytes));
+    stage = "plan_chunks";
     const preferredChunkSeconds = provider === "mimo" ? MIMO_ASR_CHUNK_SECONDS : DEFAULT_ASR_CHUNK_SECONDS;
     let chunkSeconds = estimateSafeChunkSeconds(sourceBytes.byteLength, durationSec, maxAudioBytes, {
       fallbackSeconds: preferredChunkSeconds
@@ -161,6 +165,7 @@ async function prepareChunkAudioSession(payload = {}) {
     let plan = buildOverlappedChunkPlan(durationSec, chunkSeconds, DEFAULT_ASR_CHUNK_OVERLAP_SECONDS);
     let chunks = [];
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      stage = "export_chunks";
       chunks = await exportAudioChunks(ffmpeg, inputName, sessionPrefix, plan, provider, cleanupFiles);
       const tooLargeChunk = chunks.find((chunk) => chunk.bytes >= maxAudioBytes);
       if (!tooLargeChunk) break;
@@ -190,6 +195,15 @@ async function prepareChunkAudioSession(payload = {}) {
         mimeType: chunk.mimeType
       }))
     };
+  } catch (error) {
+    error.diagnostics = {
+      asr_stage: stage,
+      asr_provider: provider,
+      audio_mime_type: mimeType,
+      audio_bytes: sourceBytes.byteLength,
+      ...(error.diagnostics || {})
+    };
+    throw error;
   } finally {
     await cleanupFFmpegFiles(ffmpeg, cleanupFiles);
   }
@@ -446,7 +460,9 @@ async function exportAudioChunks(ffmpeg, inputName, sessionPrefix, plan, provide
       outputName
     ]);
     if (exitCode !== 0) {
-      throw createOffscreenError("ASR_CHUNKING_FAILED", "音轨切片失败，请稍后重试");
+      const error = createOffscreenError("ASR_CHUNKING_FAILED", "音轨切片失败，请稍后重试");
+      error.diagnostics = { asr_stage: "export_chunks", chunk_index: item.index, ffmpeg_exit_code: exitCode };
+      throw error;
     }
     const output = await ffmpeg.readFile(outputName, "binary");
     const exactBytes = output instanceof Uint8Array ? output.slice() : new Uint8Array(output || []);

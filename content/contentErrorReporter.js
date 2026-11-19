@@ -71,7 +71,22 @@
         if (isClearlyThirdPartyExtensionError(normalized.stack, context)) return false;
         if (isUnattributedBlobWorkerError(normalized, context)) return false;
         if (isUnattributedFirefoxDomError(normalized, context)) return false;
+        if (isUnattributedGenericRejection(normalized, context)) return false;
+        if (isKnownPageRuntimeNoise(normalized, context)) return false;
         return !IGNORED_ERROR_PATTERNS.some((pattern) => pattern.test(normalized.message));
+    }
+
+    function isUnattributedGenericRejection(error, context = {}) {
+        if (String(context?.source || "") !== "content_unhandled_rejection") return false;
+        if (!/^Unhandled rejection$/i.test(String(error?.message || "").trim())) return false;
+        return !hasBilitatoFunctionalStack(error?.stack);
+    }
+
+    function isKnownPageRuntimeNoise(error, context = {}) {
+        const source = String(context?.source || "");
+        if (!["content_window_error", "content_unhandled_rejection"].includes(source)) return false;
+        if (!/crossStroage\s+is\s+null|crossStroage.*getItem/i.test(String(error?.message || ""))) return false;
+        return !hasBilitatoFunctionalStack(error?.stack);
     }
 
     function isUnattributedFirefoxDomError(error, context = {}) {
@@ -128,6 +143,14 @@
         } catch (_) {
             return false;
         }
+    }
+
+    function getRejectionStackOrigin(stack) {
+        if (!stack) return "missing";
+        if (hasBilitatoFunctionalStack(stack)) return "bilitato";
+        if (/\b(?:chrome|moz)-extension:\/\//i.test(stack)) return "other_extension";
+        if (/https?:\/\//i.test(stack)) return "web_page";
+        return "unknown";
     }
 
     function buildPageContext(extra = {}) {
@@ -195,9 +218,13 @@
         });
 
         window.addEventListener("unhandledrejection", (event) => {
-            reportContentError(event.reason || "Unhandled rejection", {
+            const reason = event.reason;
+            const stack = String(reason?.stack || "");
+            reportContentError(reason || "Unhandled rejection", {
                 task: "global_rejection",
-                source: "content_unhandled_rejection"
+                source: "content_unhandled_rejection",
+                rejection_reason_type: reason == null ? "missing" : typeof reason,
+                rejection_stack_origin: getRejectionStackOrigin(stack)
             });
         });
     }

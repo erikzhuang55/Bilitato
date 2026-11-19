@@ -956,6 +956,11 @@ body::-webkit-scrollbar {
     pointer-events: none;
 }
 
+.button-tooltip.quota-refresh-tooltip {
+    max-width: min(260px, calc(100vw - 16px));
+    white-space: normal;
+}
+
 .button-tooltip::before {
     content: "";
     position: absolute;
@@ -3380,6 +3385,10 @@ input[type="range"]:active::-webkit-slider-thumb {
     align-items: center;
     position: relative;
     z-index: 1;
+}
+
+.settings-main-provider-row {
+    grid-template-columns: minmax(0, 1fr) auto auto;
 }
 
 .settings-provider-row:has(.custom-select-container.open) {

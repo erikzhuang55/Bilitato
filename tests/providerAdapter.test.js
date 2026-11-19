@@ -183,7 +183,7 @@ describe("providerAdapter", () => {
     const baseConfig = {
       provider: "modelscope",
       apiKey: "ms-test",
-      model: "deepseek-ai/DeepSeek-V4-Pro"
+      model: "deepseek-ai/DeepSeek-V4-Pro-0813"
     };
     await callAI("modelscope", baseConfig, [{ role: "user", content: "生成分段" }]);
     await callAI("modelscope", {
@@ -192,7 +192,7 @@ describe("providerAdapter", () => {
     }, [{ role: "user", content: "生成分段" }]);
     await callAI("modelscope", {
       ...baseConfig,
-      model: "deepseek-ai/DeepSeek-V4.1-Flash",
+      model: "deepseek-ai/DeepSeek-V4.1-Flash-1017",
       deepSeekV4ThinkingDisabled: true
     }, [{ role: "user", content: "生成分段" }]);
     await callAI("modelscope", {
@@ -400,7 +400,7 @@ describe("providerAdapter", () => {
       parameterMode: "provider_default",
       thinkingControl: "enable_thinking"
     });
-    expect(getModelCapability("modelscope", "deepseek-ai/DeepSeek-V4.1-Flash").thinkingControl).toBe("thinking_type");
+    expect(getModelCapability("modelscope", "deepseek-ai/DeepSeek-V4.1-Flash-1017").thinkingControl).toBe("thinking_type");
     expect(getModelCapability("mimo", "mimo-v2.6-pro").thinkingControl).toBe("");
     expect(getModelCapability("openrouter", "openrouter/auto").parameterMode).toBe("provider_default");
     expect(getModelCapability("claude", "claude-sonnet-5-5").parameterMode).toBe("claude_effort");

@@ -1,6 +1,6 @@
 {
   "name": "bilitato",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,6 +11,7 @@
     "commitlint": "commitlint --from HEAD~1 --to HEAD --verbose",
     "prepare": "husky",
     "test": "vitest run",
+    "test:reasoning:live": "node scripts/smokeReasoningEffort.js",
     "test:watch": "vitest",
     "models:validate": "node scripts/modelCatalogValidator.js",
     "models:validate:dry-run": "node scripts/modelCatalogValidator.js --dry-run"

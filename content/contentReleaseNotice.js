@@ -4,6 +4,67 @@
   const STORAGE_KEY = "bilitato_last_seen_version";
 
   const RELEASE_NOTES = {
+    "1.6.6": {
+      title: "Bilitato 已更新至 v1.6.6",
+      displayVersion: "v1.6.6",
+      subtitle: "更新模型候选列表与 ModelScope 额度入口，并改善宽屏操作和任务稳定性。",
+      groups: [
+        {
+          tag: "新增",
+          items: [
+            {
+              title: "ModelScope 刷新额度入口",
+              desc: "在设置页选择 ModelScope 后，可点击“刷新额度”前往官网账户页。",
+              highlight: true,
+            },
+          ],
+        },
+        {
+          tag: "优化",
+          items: [
+            {
+              title: "更新 ModelScope 模型",
+              desc: "更新 DeepSeek 预设，并兼容已保存的旧模型名称。",
+            },
+            {
+              title: "更新模型候选与推理适配",
+              desc: "更新多个供应商的文本模型候选，并调整部分模型的推理参数。",
+            },
+            {
+              title: "无时间轴字幕显示行号",
+              desc: "没有时间轴的字幕现在显示行号，查找和引用更方便。",
+            },
+            {
+              title: "精简使用统计数据",
+              desc: "部分高频使用事件改为按日汇总，减少数据库占用。",
+            },
+          ],
+        },
+        {
+          tag: "修复",
+          items: [
+            {
+              title: "宽屏时自动打开侧边栏",
+              desc: "点击播放器宽屏按钮后自动打开 Bilitato 侧边栏；未能打开时仍可使用页面按钮。",
+              highlight: true,
+            },
+            {
+              title: "修复部分验真结果无法显示",
+              desc: "模型未返回置信度时，验真结果也可以正常展示。",
+            },
+            {
+              title: "修复部分分段生成失败",
+              desc: "解决特定重试流程中的变量错误。",
+            },
+            {
+              title: "改善 Firefox 授权",
+              desc: "修复点击授权后可能无法弹出权限请求的问题。",
+            },
+          ],
+        },
+      ],
+      privacy: "Bilitato 不会上传您的 API Key、Prompt 或与 AI 的聊天内容。",
+    },
     "1.6.5": {
       title: "Bilitato 已更新至 v1.6.5",
       displayVersion: "v1.6.5",
@@ -1318,7 +1379,9 @@
 
   function buildReleasePageVersions(version) {
     const majorHistory = [];
-    if (version === "1.6.5") {
+    if (version === "1.6.6") {
+      majorHistory.push("1.6.6", "1.6.5", "1.6.4", "1.6.3", "1.6.2", "1.6.1", "1.6.0", "1.5.x", "1.4.x", "1.3.x", "1.2.x");
+    } else if (version === "1.6.5") {
       majorHistory.push("1.6.5", "1.6.4", "1.6.3", "1.6.2", "1.6.1", "1.6.0", "1.5.x", "1.4.x", "1.3.x", "1.2.x");
     } else if (version === "1.6.4") {
       majorHistory.push("1.6.4", "1.6.3", "1.6.2", "1.6.1", "1.6.0", "1.5.x", "1.4.x", "1.3.x", "1.2.x");

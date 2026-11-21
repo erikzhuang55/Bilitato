@@ -78,13 +78,14 @@ describe("native side panel", () => {
     expect(sidepanel).toContain('window.addEventListener("pagehide"');
   });
 
-  it("offers a manual side panel button in wide mode and restores embedded mode on exit", () => {
+  it("opens the side panel from the wide mode click and keeps the button as fallback", () => {
     expect(content.indexOf("let playerWideModeActive = false")).toBeLessThan(content.indexOf("bootstrap();"));
     expect(content.indexOf("let wideSidePanelOpenPending = false")).toBeLessThan(content.indexOf("bootstrap();"));
     expect(content).toContain("initPlayerWideModeBridge()");
-    expect(content).toContain('reason: "wide_mode_button"');
+    expect(content).toContain('automatic ? "wide_mode_toggle" : "wide_mode_button"');
+    expect(content).toContain('if (!isPlayerWideMode()) openSidePanelForWideMode({ automatic: true });');
     expect(content).toContain('button.addEventListener("click", (event) => {');
-    expect(content).not.toContain('if (!wasWide) openSidePanelForWideMode()');
+    expect(content).toContain('playerWideModeActive && embeddedPanel?.style.display !== "none"');
     expect(content).toContain('command === "get-player-layout"');
     expect(sidepanel).toContain("openedDuringWideMode");
     expect(sidepanel).toContain('command: "get-player-layout"');
@@ -92,7 +93,7 @@ describe("native side panel", () => {
   });
 
   it("checks database driven update availability without frequent polling", () => {
-    expect(manifest.version).toBe("1.6.5");
+    expect(manifest.version).toBe("1.6.6");
     expect(background).toContain('msg.action === "CHECK_LATEST_VERSION"');
     expect(background).toContain('msg.action === "OPEN_EXTENSION_MANAGEMENT"');
     expect(background).toContain("VERSION_CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000");
@@ -111,6 +112,14 @@ describe("native side panel", () => {
     expect(sidepanel).toContain(">有可用版本更新</button>");
     expect(sidepanel).toContain('data-tooltip="跳转插件页后请在左上角找到“更新”按钮以更新插件"');
     expect(sidepanel).not.toContain("有可用版本更新 v${latest}");
+  });
+
+  it("ships the 1.6.6 release notice and previous versions", () => {
+    expect(releaseNotice).toContain('"1.6.6"');
+    expect(releaseNotice).toContain("Bilitato 已更新至 v1.6.6");
+    expect(releaseNotice).toContain("ModelScope 刷新额度入口");
+    expect(releaseNotice).toContain("宽屏时自动打开侧边栏");
+    expect(releaseNotice).toContain('majorHistory.push("1.6.6", "1.6.5", "1.6.4"');
   });
 
   it("ships the 1.6.5 release notice pages", () => {

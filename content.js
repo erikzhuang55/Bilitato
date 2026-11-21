@@ -136,6 +136,8 @@ function getProviderModelOptions(providerKey) {
             "deepseek-ai/DeepSeek-V4-Pro-0813"
         ],
         zhipu: [
+            "glm-5.3",
+            "glm-5.3-flash",
             "glm-5.2",
             "glm-5-turbo",
             "glm-5.1",
@@ -146,18 +148,17 @@ function getProviderModelOptions(providerKey) {
         ],
         gemini: [
             "gemini-3.8-flash",
-            "gemini-3.7-flash",
             "gemini-3.6-flash",
-            "gemini-3.5-flash",
             "gemini-3.5-flash-lite",
             "gemini-3.1-pro-preview",
             "gemini-3-flash-preview",
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
             "gemini-2.5-flash-lite"
         ],
         openai: [
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
             "gpt-6.1-sol",
+            "gpt-6.1-terra",
             "gpt-6-astra",
             "gpt-6-luna",
             "gpt-5.6",
@@ -166,20 +167,14 @@ function getProviderModelOptions(providerKey) {
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",
-            "gpt-5.2",
-            "gpt-5",
-            "gpt-5-mini",
-            "gpt-5-nano",
-            "gpt-4.1",
-            "gpt-4.1-mini",
-            "gpt-4o",
-            "gpt-4o-mini"
+            "gpt-5.2"
         ],
         openrouter: [
             "openrouter/auto",
             "openrouter/free",
             "~openai/gpt-latest",
             "~openai/gpt-mini-latest",
+            "openai/gpt-6.2-sol",
             "openai/gpt-6.1-sol",
             "openai/gpt-6-astra",
             "openai/gpt-6-luna",
@@ -191,13 +186,13 @@ function getProviderModelOptions(providerKey) {
             "anthropic/claude-opus-4.7",
             "~google/gemini-pro-latest",
             "~google/gemini-flash-latest",
+            "google/gemini-4-neon",
             "google/gemini-3.8-flash",
-            "google/gemini-3.5-flash",
             "qwen/qwen3.7-max",
             "deepseek/deepseek-v4-pro",
             "deepseek/deepseek-v3.2",
             "moonshotai/kimi-k3",
-            "moonshotai/kimi-k2.6",
+            "moonshotai/kimi-k3.1-pro",
             "z-ai/glm-5.2",
             "z-ai/glm-5.1",
             "x-ai/grok-4.3",
@@ -208,15 +203,7 @@ function getProviderModelOptions(providerKey) {
             "deepseek-v4-pro"
         ],
         kimi: [
-            "kimi-k3",
-            "kimi-k2.6",
-            "kimi-k2.5",
-            "kimi-k2-turbo-preview",
-            "kimi-k2-thinking",
-            "kimi-k2-thinking-turbo",
-            "moonshot-v1-8k",
-            "moonshot-v1-32k",
-            "moonshot-v1-128k"
+            "kimi-k3"
         ],
         mimo: [
             "mimo-v2.6-flash",
@@ -225,9 +212,10 @@ function getProviderModelOptions(providerKey) {
         claude: [
             "claude-sonnet-5-5",
             "claude-opus-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-2",
             "claude-sonnet-4-6",
             "claude-opus-4-5",
-            "claude-sonnet-4-5",
             "claude-haiku-4-5"
         ]
     };
@@ -2674,23 +2662,25 @@ function syncPlayerWideMode() {
     return nextWide;
 }
 
-function openSidePanelForWideMode() {
+function openSidePanelForWideMode({ automatic = false } = {}) {
     if (wideSidePanelOpenPending) return;
     wideSidePanelOpenPending = true;
-    chrome.runtime.sendMessage({ action: "OPEN_SIDE_PANEL", reason: "wide_mode_button" })
+    chrome.runtime.sendMessage({ action: "OPEN_SIDE_PANEL", reason: automatic ? "wide_mode_toggle" : "wide_mode_button" })
         .then((result) => {
             if (!result?.ok) {
-                showToast("无法打开侧边栏，请点击浏览器工具栏中的 Bilitato 图标");
+                if (!automatic) showToast("无法打开侧边栏，请点击浏览器工具栏中的 Bilitato 图标");
                 return;
             }
             if (result.requiresToolbarAction) {
-                showToast("请点击 Firefox 工具栏中的 Bilitato 图标打开侧边栏");
+                if (!automatic) showToast("请点击 Firefox 工具栏中的 Bilitato 图标打开侧边栏");
                 return;
             }
             setEmbeddedPanelVisible(false);
             logUI.info("wide_mode_side_panel_opened", { task: "ui" });
         })
-        .catch(() => showToast("无法打开侧边栏，请点击浏览器工具栏中的 Bilitato 图标"))
+        .catch(() => {
+            if (!automatic) showToast("无法打开侧边栏，请点击浏览器工具栏中的 Bilitato 图标");
+        })
         .finally(() => {
             wideSidePanelOpenPending = false;
         });
@@ -2711,11 +2701,13 @@ function syncWideSidePanelButton() {
         });
         document.body.appendChild(button);
     }
-    if (button) button.style.display = playerWideModeActive ? "" : "none";
+    const embeddedPanel = document.getElementById("__bili_ai_plugin_root__");
+    if (button) button.style.display = playerWideModeActive && embeddedPanel?.style.display !== "none" ? "" : "none";
 }
 
 function onPlayerWideToggleClick(event) {
     if (!isWideScreenToggleClick(event)) return;
+    if (!isPlayerWideMode()) openSidePanelForWideMode({ automatic: true });
     setTimeout(syncPlayerWideMode, 0);
     setTimeout(syncPlayerWideMode, 160);
 }
@@ -3094,6 +3086,7 @@ function setEmbeddedPanelVisible(visible = true) {
     const root = document.getElementById("__bili_ai_plugin_root__");
     if (!root) return;
     root.style.display = visible ? "" : "none";
+    syncWideSidePanelButton();
 }
 
 // 移除 syncPanelPosition 相关逻辑，因为不再需要 fixed 定位同步

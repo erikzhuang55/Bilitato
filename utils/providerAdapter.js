@@ -103,9 +103,10 @@ export const MODEL_CAPABILITY_RULES = Object.freeze([
     { providers: ["openai"], pattern: /^gpt-(?:5|6)(?:[.-]|$)/i, parameterMode: "openai_reasoning", defaultEffort: "medium" },
     { providers: ["deepseek"], pattern: /^deepseek-(?:flash|v4(?:[.-]pro)?(?:[.-]|$))/i, parameterMode: "openai_reasoning", defaultEffort: "high", thinkingControl: "thinking_type" },
     { providers: ["gemini"], pattern: /^gemini-(?:2\.5|3(?:\.|-))/i, parameterMode: "gemini_thinking", defaultEffort: "medium" },
-    { providers: ["claude"], pattern: /^claude-(?:(?:sonnet|opus)-5-5|sonnet-4-6|opus-4-5)$/i, parameterMode: "claude_effort", defaultEffort: "medium" },
+    { providers: ["claude"], pattern: /^claude-(?:fable-5-2|(?:sonnet|opus|haiku)-5-5|sonnet-4-6|opus-4-5)$/i, parameterMode: "claude_effort", defaultEffort: "medium" },
     { providers: ["openrouter"], pattern: /^(?:openai\/gpt-(?:5|6)|deepseek\/|qwen\/qwen3|moonshotai\/kimi-k[23]|z-ai\/glm-5|anthropic\/claude-(?:sonnet|opus)-(?:5|4\.7))/i, parameterMode: "openrouter_reasoning", defaultEffort: "medium" },
     { providers: ["kimi"], pattern: /^kimi-k3(?:[-.]|$)/i, parameterMode: "openai_reasoning", defaultEffort: "low" },
+    { providers: ["zhipu"], pattern: /^glm-5\.3(?:-flash)?$/i, parameterMode: "provider_default", defaultEffort: "high" },
     { providers: ["modelscope"], pattern: /^qwen\/qwen3\.(?:5|6|7|8)-/i, parameterMode: "provider_default", thinkingControl: "enable_thinking" },
     { providers: ["modelscope"], pattern: /^deepseek-ai\/deepseek-v4(?:[.-]|$)/i, parameterMode: "provider_default", thinkingControl: "thinking_type" },
     { providers: ["modelscope", "zhipu", "mimo"], pattern: /./, parameterMode: "provider_default" },
@@ -338,7 +339,11 @@ function isOpenAIModelSupportingNoReasoning(model) {
     if (!match) return false;
     const major = Number(match[1]);
     const minor = Number(match[2]);
-    return major > 5 || (major === 5 && minor >= 1);
+    return (major === 5 && minor >= 1) || /^gpt-6\.1-terra(?:-|$)/.test(normalized);
+}
+
+function isGlm53Model(model) {
+    return /^glm-5\.3(?:-flash)?$/i.test(String(model || "").trim());
 }
 
 function isModelScopeGlmThinkingModel(model) {
@@ -691,6 +696,13 @@ function resolveProviderRequest(providerKey, config, messages, streaming) {
         if ((providerKey || config.provider) === "openai") {
             body.max_completion_tokens = body.max_tokens;
             delete body.max_tokens;
+            if (/^gpt-6(?:-astra|\.1-sol|\.2-(?:sol|astra))(?:-|$)/i.test(model) && body.reasoning_effort === "none") {
+                body.reasoning_effort = "low";
+            }
+        }
+        if (String(providerKey || config?.provider || "").trim().toLowerCase() === "zhipu" && isGlm53Model(model)) {
+            body.thinking = { type: "enabled" };
+            body.reasoning_effort = reasoningEffort === "low" ? "low" : "high";
         }
         if (requestPolicy.source !== "remote" && config?.deepSeekV4ThinkingDisabled === true && isDeepSeekV4Model(model)) {
             body.thinking = { type: "disabled" };

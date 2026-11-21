@@ -386,6 +386,9 @@ describe("providerAdapter", () => {
 
   it("maintains explicit parameter modes for representative model families", () => {
     expect(getModelCapability("openai", "gpt-5.6").parameterMode).toBe("openai_reasoning");
+    expect(getModelCapability("openai", "gpt-6.2-sol").parameterMode).toBe("openai_reasoning");
+    expect(getModelCapability("zhipu", "glm-5.3").defaultEffort).toBe("high");
+    expect(getModelCapability("claude", "claude-haiku-5-5").parameterMode).toBe("claude_effort");
     expect(getModelCapability("openai", "gpt-4o").parameterMode).toBe("temperature");
     expect(getModelCapability("deepseek", "deepseek-flash")).toMatchObject({
       parameterMode: "openai_reasoning",
@@ -485,10 +488,33 @@ describe("providerAdapter", () => {
     expect(bodies[0].reasoning_effort).toBeUndefined();
     expect(bodies[1].thinking).toEqual({ type: "disabled" });
     expect(bodies[1].reasoning_effort).toBeUndefined();
-    expect(bodies[2].reasoning_effort).toBe("none");
+    expect(bodies[2].reasoning_effort).toBe("low");
     expect(bodies[3].thinking).toEqual({ type: "disabled" });
     expect(bodies[3].reasoning_effort).toBeUndefined();
     expect(bodies[4].reasoning_effort).toBe("medium");
+  });
+
+  it("keeps supported reasoning enabled for GPT-6.2 and GLM-5.3 summaries", async () => {
+    const fetchMock = vi.fn(async () => mockJsonResponse({
+      choices: [{ message: { content: "完成" } }]
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await callAI("openai", {
+      provider: "openai", apiKey: "sk-test", model: "gpt-6.2-sol", requestTask: "summary"
+    }, [{ role: "user", content: "总结" }]);
+    await callAI("zhipu", {
+      provider: "zhipu", apiKey: "zhipu-key", model: "glm-5.3", requestTask: "summary"
+    }, [{ role: "user", content: "总结" }]);
+    await callAI("zhipu", {
+      provider: "zhipu", apiKey: "zhipu-key", model: "glm-5.3-flash", requestTask: "chat"
+    }, [{ role: "user", content: "聊天" }]);
+
+    const bodies = fetchMock.mock.calls.map((call) => JSON.parse(call[1].body));
+    expect(bodies[0].reasoning_effort).toBe("low");
+    expect(bodies[0].temperature).toBeUndefined();
+    expect(bodies[1]).toMatchObject({ thinking: { type: "enabled" }, reasoning_effort: "low" });
+    expect(bodies[2]).toMatchObject({ thinking: { type: "enabled" }, reasoning_effort: "high" });
   });
 
   it("reports safe request metadata without exposing request text", async () => {
